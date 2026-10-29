@@ -24,6 +24,14 @@ struct ItemRow: Identifiable, Hashable, Sendable {
     var domain: String { SearchRecord.domain(of: urls.first) }
 }
 
+/// Something the owner must look at: a sync reported an event or an integrity result that could mean a stolen key, a stolen
+/// phrase or a hostile server. Kept until dismissed (the Devices window lists them; the sync indicator turns red).
+struct SecurityAlert: Identifiable, Equatable {
+    let id: String
+    let text: String
+    let date: Date
+}
+
 enum SyncState: Equatable {
     case idle
     case syncing
@@ -45,6 +53,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     private(set) var syncState: SyncState = .idle
     private(set) var pendingChanges = 0
     private(set) var lastConflicts = 0
+    private(set) var securityAlerts: [SecurityAlert] = []
+    /// The server offered recovery keys different from the ones this device pinned: never adopted, backups are blocked.
+    private(set) var recoveryKeyChanged = false
     private(set) var undecryptable = 0
     private(set) var startupError: String?
     private(set) var deviceName = ""
@@ -366,9 +377,52 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         return try await vault.devices()
     }
 
-    func revoke(deviceID: String) async throws {
+    /// Revokes and re-keys. The report lists what the device could still have read, for the caller to show.
+    @discardableResult
+    func revoke(deviceID: String) async throws -> RotationReport {
         guard let vault else { throw BiselVault.VaultError.notConfigured }
-        try await vault.revoke(deviceID: deviceID)
+        return try await vault.revoke(deviceID: deviceID)
+    }
+
+    func recentEvents() async -> [ServerEvent] {
+        guard let vault else { return [] }
+        return (try? await vault.recentEvents()) ?? []
+    }
+
+    func dismissAlert(_ id: String) { securityAlerts.removeAll { $0.id == id } }
+
+    /// Turns what a sync reported into alerts. Events caused by this Mac itself are not alarms.
+    private func raiseAlerts(_ report: SyncReport, vault: Vault) async {
+        var fresh: [SecurityAlert] = []
+        for e in report.events where e.deviceId != deviceID {
+            let text: String
+            switch e.type {
+            case "recovery":
+                text = e.subjectId == nil
+                    ? "The recovery phrase was used to read your box. If that was not you, replace the recovery phrase and change your important passwords."
+                    : "A device was added with your recovery phrase and is held back for now. If that was not you, revoke it in Devices and replace the recovery phrase."
+            case "recovery_rotate": text = "The recovery phrase was replaced from another device."
+            case "approve": text = "Another device was approved to join your box."
+            case "revoke", "rotate": text = "Another device revoked a device or replaced the box key."
+            default: continue
+            }
+            fresh.append(SecurityAlert(id: "event-\(e.id)", text: text, date: e.date))
+        }
+        for id in report.rejectedTombstones {
+            fresh.append(SecurityAlert(id: "tombstone-\(id)-\(report.headSeq)", text:
+                "A delete arrived that was not made with your box key. The item was restored from this Mac’s trash.", date: Date()))
+        }
+        let changed = await vault.recoveryMaterialChanged
+        if changed && !recoveryKeyChanged {
+            fresh.append(SecurityAlert(id: "recovery-material", text:
+                "The server is offering different recovery keys than this Mac remembers. They were not adopted and backups are blocked. If you did not change the recovery phrase, treat the server as compromised.", date: Date()))
+        }
+        recoveryKeyChanged = changed
+        let known = Set(securityAlerts.map(\.id))
+        let added = fresh.filter { !known.contains($0.id) }
+        guard !added.isEmpty else { return }
+        securityAlerts.append(contentsOf: added)
+        Toast.shared.show(added.count == 1 ? added[0].text : "\(added.count) security notices. Open Devices to read them", isError: true, duration: .seconds(8))
     }
 
     // MARK: sync
@@ -409,6 +463,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             pendingChanges = (try? await vault.pendingChanges()) ?? 0
             syncState = .synced(Date())
             if !report.conflicts.isEmpty { lastConflicts = report.conflicts.count }
+            await raiseAlerts(report, vault: vault)
             Log.app.notice("sync(\(reason)): pushed=\(report.pushed) pulled=\(report.pulled) conflicts=\(report.conflicts.count) deferred=\(report.deferredConflicts.count)")
             if report.rotationAdopted, await !vault.isUnlocked {
                 // Another device rotated the vault key (a revoke): the core locked itself. Drop everything and ask for Touch ID.

@@ -23,7 +23,9 @@ struct SyncStatusView: View {
     }
 
     @ViewBuilder private var icon: some View {
-        if service.isLocalOnly { Image(systemName: "internaldrive").foregroundStyle(theme.colors.tertiaryText.color) } else {
+        if !service.securityAlerts.isEmpty || service.recoveryKeyChanged {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(theme.colors.danger.color)
+        } else if service.isLocalOnly { Image(systemName: "internaldrive").foregroundStyle(theme.colors.tertiaryText.color) } else {
         switch service.syncState {
         case .syncing: ProgressView().controlSize(.mini)
         case .synced: Image(systemName: "checkmark.icloud").foregroundStyle(theme.colors.success.color)
@@ -35,6 +37,7 @@ struct SyncStatusView: View {
     }
 
     private var text: String {
+        if !service.securityAlerts.isEmpty || service.recoveryKeyChanged { return "Security notice: open Devices" }
         if service.isLocalOnly { return "On this Mac only" }
         let pending = service.pendingChanges > 0 ? " · \(service.pendingChanges) pending" : ""
         switch service.syncState {

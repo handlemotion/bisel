@@ -184,6 +184,11 @@ enum DebugFlow {
         do {
             try await svc.unlock()
             await svc.sync(reason: "flow-pre")
+            if viaCore {
+                // Device B was added with the recovery phrase meanwhile: this Mac must have been told, loudly.
+                check(svc.securityAlerts.contains { $0.text.contains("recovery phrase") }, "a device added with the recovery phrase raises a security alert (\(svc.securityAlerts.count))")
+                check(!(await svc.recentEvents()).isEmpty, "the Devices window has recent activity to list")
+            }
             guard let row = svc.rows.first(where: { $0.title.hasPrefix("Acme") }) else { check(false, "no Acme item"); return }
             var item = try await svc.item(id: row.id)
             item.title = title
