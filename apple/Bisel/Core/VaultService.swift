@@ -133,7 +133,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
 
     /// Touch ID, then VK is held for the fill window. With software keys (Debug) the Secure Enclave prompt that would
     /// normally come from opening the device envelope doesn't exist, so the same biometric gate runs first.
-    func unlock(reason: String = "Unlock bisel") async throws {
+    func unlock(reason: String = "Unlock your box") async throws {
         guard let vault else { throw BiselVault.VaultError.notConfigured }
         if BiselEnvironment.usesSoftwareKeys { try await AppGate().authenticate(reason: reason) }
         do { try await vault.unlock(reason: reason) }

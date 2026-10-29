@@ -62,8 +62,8 @@ public enum DeviceKeyError: Error, Sendable, Equatable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .biometryChanged: return "Touch ID fingerprints changed on this Mac, so this device's vault key is locked for safety. Add this Mac again from another device, or recover with your 24 words."
-        case .encryptionKeyMissing: return "This device's vault key is no longer available. Add this Mac again from another device, or recover with your 24 words."
+        case .biometryChanged: return "Touch ID fingerprints changed on this Mac, so this device's box key is locked for safety. Add this Mac again from another device, or recover with your 24 words."
+        case .encryptionKeyMissing: return "This device's box key is no longer available. Add this Mac again from another device, or recover with your 24 words."
         }
     }
 }

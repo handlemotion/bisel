@@ -639,13 +639,13 @@
         }
       }
     },
-    "bisel command panel": {
+    "Bisel command panel": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "bisel command panel"
+            "value": "Bisel command panel"
           }
         }
       }

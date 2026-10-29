@@ -155,7 +155,7 @@ final class AppModel {
         panelController.authenticating = true
         Task {
             defer { panelController.authenticating = false }
-            do { try await service.unlock(reason: "Unlock bisel to use the command panel") }
+            do { try await service.unlock(reason: "Unlock your box to use the command panel") }
             catch KeyStoreError.userCancelled {}
             catch BiometricGate.Failure.denied {}
             catch { Toast.shared.show(describe(error), isError: true) }

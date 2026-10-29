@@ -29,7 +29,7 @@
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Bisel does not script other apps.</string>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Bisel uses Touch ID to unlock your vault.</string>
+	<string>Bisel uses Touch ID to unlock your box.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Personal use.</string>
 </dict>

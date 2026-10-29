@@ -42,14 +42,14 @@ public enum RotationError: Error, Sendable, Equatable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .staleEpoch: return "The vault key was changed on another device. Sync, unlock and try again."
-        case .vaultKeyRotated: return "The vault key was changed on another device. Unlock to continue."
-        case .tooManyConflicts: return "The vault kept changing while the key was being rotated. Nothing was changed; try again."
+        case .staleEpoch: return "The box key was changed on another device. Sync, unlock and try again."
+        case .vaultKeyRotated: return "The box key was changed on another device. Unlock to continue."
+        case .tooManyConflicts: return "The box kept changing while the key was being rotated. Nothing was changed; try again."
         case .pendingChanges(let n): return "\(n) local change(s) are not synced yet. Sync first."
         case .undecryptableItems(let ids): return "\(ids.count) item(s) cannot be decrypted and block the rotation. Delete them first."
-        case .recoveryNeedsUpgrade: return "Create a new recovery phrase first (this vault predates key rotation)."
+        case .recoveryNeedsUpgrade: return "Create a new recovery phrase first (this box predates key rotation)."
         case .cannotRevokeThisDevice: return "A device cannot revoke itself. Revoke it from another device."
-        case .deviceNotFound: return "That device is not in this vault."
+        case .deviceNotFound: return "That device is not in this box."
         case .inProgress: return "A key rotation is already in progress."
         }
     }

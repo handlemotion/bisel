@@ -40,8 +40,8 @@ final class CommandPanelController {
         self.themeStore = themeStore
         self.accessibilityStore = accessibilityStore
         // A borderless panel has no title bar, but assistive technologies still name the window by its title.
-        panel.title = String(localized: "bisel command panel")
-        panel.setAccessibilityLabel(String(localized: "bisel command panel"))
+        panel.title = String(localized: "Bisel command panel")
+        panel.setAccessibilityLabel(String(localized: "Bisel command panel"))
         host = NSHostingView(rootView: AnyView(EmptyView()))
         host.sizingOptions = []
         panel.contentView = host

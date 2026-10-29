@@ -95,8 +95,8 @@ public enum IntegrityError: Error, Sendable, Equatable, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .keyConfirmationFailed: return "This device received a vault key that does not open your vault. Do not use it: remove this device and add it again from a device you trust, or recover with your 24 words."
-        case .noRecordDecrypts: return "None of the stored items can be decrypted with this device's key. Something is wrong with the vault key on this device or on the server."
+        case .keyConfirmationFailed: return "This device received a box key that does not open your box. Do not use it: remove this device and add it again from a device you trust, or recover with your 24 words."
+        case .noRecordDecrypts: return "None of the stored items can be decrypted with this device's key. Something is wrong with the box key on this device or on the server."
         case .verificationCodeMismatch: return "The verification code does not match. Do not continue: someone may be interfering with the enrollment."
         case .unknownDevices(let d): return "\(d.count) device(s) on the server were never approved on this device: \(d.map(\.name).joined(separator: ", ")). Check each one's fingerprint, then trust or revoke it."
         case .serverRolledBack: return "The server reports an older state than this device already saw. It may have been restored from a backup or tampered with."

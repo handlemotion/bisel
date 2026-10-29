@@ -67,7 +67,7 @@ public struct PastVersion: Sendable, Identifiable {
 
 public enum RecoveryError: Error, Sendable, Equatable, LocalizedError {
     case nothingToRestore
-    public var errorDescription: String? { "That version can no longer be read with the current vault key." }
+    public var errorDescription: String? { "That version can no longer be read with the current box key." }
 }
 
 /// Facade over the core (SPEC §7). One instance per device/store.
@@ -321,7 +321,7 @@ public actor Vault {
     /// Enrolled device, step 2: seal VK to the new device's DK-enc and register it. Needs a fresh biometric check.
     public func approveEnrollment(_ request: EnrollmentRequest) async throws {
         let vk = try requireKey()
-        try await config.gate.authenticate(reason: "Add \(request.name) to your vault")
+        try await config.gate.authenticate(reason: "Add \(request.name) to your box")
         let epoch = try requireIdentity().epoch
         var raw = try vk.rawBytes()
         defer { raw.zeroize() }
@@ -650,7 +650,7 @@ public actor Vault {
     @discardableResult
     public func rotateVaultKey(revoking deviceID: String? = nil) async throws -> RotationReport {
         guard !rotationInProgress else { throw RotationError.inProgress }
-        let reason = deviceID == nil ? "Rotate the vault key" : "Revoke a device"
+        let reason = deviceID == nil ? "Rotate the box key" : "Revoke a device"
         if !isUnlocked { try await unlock(reason: reason) }
         _ = try requireKey()
         try await config.gate.authenticate(reason: reason)
@@ -876,7 +876,7 @@ public actor Vault {
         guard !id.recoveryMismatch else { throw IntegrityError.recoveryMaterialChanged }
         guard id.recoveryPinned else { throw IntegrityError.recoveryNotPinned }
         guard let encPub = id.recoveryEncryptionPublicKey, !encPub.isEmpty else {
-            throw VaultError.badBackup("this vault's recovery phrase predates key rotation; create a new one first")
+            throw VaultError.badBackup("this box's recovery phrase predates key rotation; create a new one first")
         }
         let file = BackupFile(recoveryPublicKey: pub, recoveryEncryptionPublicKey: encPub, recoveryEnvelope: env,
                               epoch: id.epoch, records: try store.allRecords())
