@@ -18,6 +18,9 @@ struct MainWindowView: View {
     @State private var section: Section? = .settings
     /// After the recovery phrase of a new box: one last onboarding step to import passwords.
     @State private var showImport = false
+    /// The titlebar's height, measured from the window: the scene sizes the content area, the titlebar comes on top of it,
+    /// so the island's frame is its height minus this.
+    @State private var titlebarInset: CGFloat = 32
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.theme) private var theme
 
@@ -45,7 +48,10 @@ struct MainWindowView: View {
         }
         .background(cardSize == nil ? Color.clear : Theme.biselDark.colors.background.color)
         .animation(.easeInOut(duration: 0.28), value: screenKey)
-        .frame(minWidth: cardSize == nil ? 820 : 0, minHeight: cardSize == nil ? 540 : 0)
+        // SwiftUI owns the window size (the scene is .contentSize): the island is exactly its fixed frame, the settings window
+        // grows from a 820x540 minimum. No AppKit resizing, so the hosting view can never lag behind the window.
+        .frame(minWidth: cardSize?.width ?? 820, maxWidth: cardSize?.width ?? .infinity,
+               minHeight: cardSize.map { $0.height - titlebarInset } ?? 540, maxHeight: cardSize.map { $0.height - titlebarInset } ?? .infinity)
         .themedPage(theme, opaque: cardSize == nil)
         .panelMaterial()
         .background(WindowAccessor { w in
@@ -53,6 +59,8 @@ struct MainWindowView: View {
             w.isRestorable = false
             DockPresence.windowAppeared(w)
             style(w)
+            let inset = w.frame.height - w.contentLayoutRect.height
+            if cardSize != nil, abs(inset - titlebarInset) > 0.5, inset >= 0 { DispatchQueue.main.async { titlebarInset = inset } }
         })
         .toolbarBackgroundVisibility(cardSize == nil ? .automatic : .hidden, for: .windowToolbar)
         .navigationTitle(service.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel")
@@ -72,7 +80,7 @@ struct MainWindowView: View {
     }
 
     private func style(_ w: NSWindow) {
-        if let size = cardSize {
+        if cardSize != nil {
             w.isOpaque = false
             w.backgroundColor = .clear
             w.titlebarAppearsTransparent = true
@@ -84,7 +92,6 @@ struct MainWindowView: View {
             for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = true }
             w.isMovableByWindowBackground = true
             w.hasShadow = true
-            if w.frame.size != size { w.setContentSize(size) }   // one fixed island size, set once
         } else {
             w.isOpaque = true
             w.backgroundColor = .windowBackgroundColor
@@ -94,9 +101,6 @@ struct MainWindowView: View {
             w.styleMask.insert(.resizable)
             for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = false }
             w.isMovableByWindowBackground = false
-            if w.frame.width < 820 || w.frame.height < 540 {
-                w.setContentSize(NSSize(width: max(820, w.frame.width), height: max(540, w.frame.height)))
-            }
         }
     }
 

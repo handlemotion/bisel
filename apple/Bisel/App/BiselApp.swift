@@ -22,6 +22,7 @@ struct BiselApp: App {
         }
         .defaultLaunchBehavior(.suppressed)
         .defaultSize(width: 920, height: 600)
+        .windowResizability(.contentSize)
     }
 }
 
