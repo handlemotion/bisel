@@ -63,8 +63,8 @@
         {
           "binding": "DB",
           "database_name": "bisel",
-          // REPLACE_WITH_D1_DATABASE_ID: the id printed by `wrangler d1 create bisel` (DEPLOY.md step 3).
-          "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+          // 59412b50-1bcd-450c-a2af-7ec77877d646: the id printed by `wrangler d1 create bisel` (DEPLOY.md step 3).
+          "database_id": "59412b50-1bcd-450c-a2af-7ec77877d646",
           "migrations_dir": "migrations"
         }
       ],
