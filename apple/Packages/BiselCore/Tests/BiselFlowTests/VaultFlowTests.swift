@@ -428,6 +428,51 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("a damaged backup restores what opens and uploads it; one where nothing opens is refused before the server is touched")
+    func damagedBackup() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            let phrase = try await a.bootstrap(server)
+            for n in 0..<3 { try await a.vault.save(login("Item \(n)", password: "pw-\(n)")) }
+            try await a.vault.sync()
+            let good = FileManager.default.temporaryDirectory.appendingPathComponent("good-\(UUID().uuidString).bisel-backup")
+            let some = FileManager.default.temporaryDirectory.appendingPathComponent("some-\(UUID().uuidString).bisel-backup")
+            let none = FileManager.default.temporaryDirectory.appendingPathComponent("none-\(UUID().uuidString).bisel-backup")
+            defer { for f in [good, some, none] { try? FileManager.default.removeItem(at: f) } }
+            try await a.vault.exportBackup(to: good)
+
+            // Move ciphertext between ids: the AAD binds id and revision, so every moved blob fails authentication.
+            func damaged(swapping count: Int) throws -> Data {
+                var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: good)) as? [String: Any])
+                var items = try #require(json["items"] as? [[String: Any]])
+                let blobs = items.map { $0["blob"] }
+                let count = min(count, items.count)
+                for i in 0..<count { items[i]["blob"] = blobs[(i + 1) % count] }
+                json["items"] = items
+                return try JSONSerialization.data(withJSONObject: json)
+            }
+            try damaged(swapping: 2).write(to: some)
+            try damaged(swapping: .max).write(to: none)   // every record moved
+
+            try await TestServer.with { fresh in
+                let refused = try Device("refused")
+                await #expect(throws: VaultError.self) {
+                    try await refused.vault.importBackup(from: none, phrase: phrase, server: fresh.url, bootstrapToken: TestServer.bootstrapToken, deviceName: "refused")
+                }
+                #expect(try await refused.vault.identity() == nil, "nothing was bootstrapped or written")
+
+                // The same fresh server still accepts the partly damaged one, uploads what opened, and says what it skipped.
+                let partial = try Device("partial")
+                await #expect(throws: VaultError.self) {
+                    try await partial.vault.importBackup(from: some, phrase: phrase, server: fresh.url, bootstrapToken: TestServer.bootstrapToken, deviceName: "partial")
+                }
+                #expect(try await partial.vault.identity()?.serverURL == fresh.url)
+                #expect(try await partial.vault.pendingChanges() == 0, "what could be restored is already on the server")
+                #expect(try await partial.vault.items().items.count >= 1)
+            }
+        }
+    }
+
     @Test("recover from the 24 words on a fresh store; wrong or rotated-away phrases do not work")
     func recoveryFromPhrase() async throws {
         try await TestServer.with { server in

@@ -1000,9 +1000,30 @@ public actor Vault {
         guard let encPub = id.recoveryEncryptionPublicKey, !encPub.isEmpty else {
             throw VaultError.badBackup("this box's recovery phrase predates key rotation; create a new one first")
         }
+        let records = try store.allRecords()
+        // With the box unlocked, prove the records open under the key the recovery envelope will hand back: a pull that stopped
+        // half-way through another device's key rotation leaves records of two keys, and such a file only fails on restore day.
+        if let held = liveKey() {
+            let unreadable = records.filter { $0.pending == .none && !$0.deleted && !canOpen($0, with: held) }
+            guard unreadable.isEmpty else {
+                throw VaultError.badBackup("\(unreadable.count) item(s) do not open with this box's key yet; sync again and retry")
+            }
+        }
         let file = BackupFile(recoveryPublicKey: pub, recoveryEncryptionPublicKey: encPub, recoveryEnvelope: env,
-                              epoch: id.epoch, records: try store.allRecords())
+                              epoch: id.epoch, records: records)
         try file.encoded().write(to: url, options: .atomic)
+    }
+
+    private func canOpen(_ record: StoredRecord, with key: LockedKey) -> Bool {
+        key.withKeyOrFalse { (try? ItemSealer.open(blob: record.blob, id: record.id, rev: record.rev, vaultKey: $0)) != nil }
+    }
+
+    /// Refuses a backup none of whose items opens (wrong or mismatched file) before anything is bootstrapped or written.
+    private func requireOpenableItems(_ file: BackupFile, _ vk: SymmetricKey) throws {
+        let live = file.records.filter { !$0.deleted }
+        guard live.isEmpty || live.contains(where: { (try? ItemSealer.open(blob: $0.blob, id: $0.id, rev: $0.rev, vaultKey: vk)) != nil }) else {
+            throw VaultError.badBackup("none of the \(live.count) item(s) in this backup opens with its key; the file is damaged")
+        }
     }
 
     /// Disaster recovery onto a fresh (un-bootstrapped) server: opens the backup with the phrase, bootstraps
@@ -1019,6 +1040,7 @@ public actor Vault {
         var (vkData, _) = try file.vaultKey(phrase: phrase)
         defer { vkData.zeroize() }
         let vk = SymmetricKey(data: vkData)
+        try requireOpenableItems(file, vk)
         // A fresh server starts at epoch 1, and the recovery envelope is bound to the epoch: seal it again for this server.
         let keys = try RecoveryKeys(phrase: phrase)
         let bundle = RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
@@ -1040,6 +1062,7 @@ public actor Vault {
         let file = try BackupFile.decode(try Data(contentsOf: url))
         var (vkData, _) = try file.vaultKey(phrase: phrase)
         defer { vkData.zeroize() }
+        try requireOpenableItems(file, SymmetricKey(data: vkData))
         let keys = try RecoveryKeys(phrase: phrase)
         let bundle = RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
                                     envelope: try keys.seal(vaultKey: vkData, epoch: 1))
