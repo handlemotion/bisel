@@ -77,6 +77,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     /// Called on lock/unlock so the panel can redraw.
     @ObservationIgnored var onLockStateChange: (() -> Void)?
 
+    /// A panel open within this many seconds of the last finished sync does not sync again.
+    private static let panelSyncMinInterval: TimeInterval = 10
     static let fillWindowKey = "security.fillWindowMinutes"
     static let idleLockKey = "security.idleLockMinutes"
     static var fillWindowMinutes: Int { UserDefaults.standard.object(forKey: fillWindowKey) as? Int ?? 5 }
@@ -385,6 +387,12 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         // Requests run one after another (a caller that awaits always sees a pass that started after its own edits);
         // the background poll just skips a tick while one is running.
         if reason == "poll" && syncing { return }
+        // Opening the panel syncs, so opening and closing it quickly would queue one pass (a signature, Keychain reads, a GET
+        // and SQLite writes) per open. One that just finished, or is running, already covers it.
+        if reason == "panel" {
+            if syncing { return }
+            if case .synced(let at) = syncState, Date().timeIntervalSince(at) < Self.panelSyncMinInterval { return }
+        }
         let previous = syncChain
         let run = Task { await previous?.value; await performSync(reason: reason) }
         syncChain = run
