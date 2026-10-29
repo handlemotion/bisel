@@ -36,14 +36,30 @@ struct SetupView: View {
         OnboardingFrame(progress: progress, title: title, message: message) {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
                 switch step {
-                case .welcome: EmptyView()
+                case .welcome:
+                    VStack(alignment: .leading, spacing: theme.spacing.l) {
+                        OnboardingRow(icon: "IconKeyboardDown", text: "Start by using cmd + shift + space")
+                        OnboardingRow(icon: "IconKeyhole", text: "Autofills natively in Safari or in Chromium via extensions")
+                        OnboardingRow(icon: "IconCloudSync2", text: "Syncs directly iPhones and other Macs")
+                    }
+                    .padding(theme.spacing.l)
                 case .local:
                     field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
                 case .connect:
-                    field("Server", "https://box.example.com", $server, id: "setup-server")
+                    HStack(alignment: .top, spacing: theme.spacing.m) {
+                        field("Server", "https://box.example.com", $server, id: "setup-server")
+                        field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
+                    }
                     phraseEditor
-                    field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
                 case .restore:
+                    HStack(alignment: .top, spacing: theme.spacing.m) {
+                        field("Server", "https://box.example.com", $server, id: "setup-server")
+                        secureField("Bootstrap token", "Set with wrangler secret BOOTSTRAP_TOKEN", $token, id: "setup-token")
+                    }
+                    HStack(alignment: .top, spacing: theme.spacing.m) {
+                        phraseEditor
+                        field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
+                    }
                     HStack {
                         Button("Choose backup file…") { picking = true }
                             .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-pick-backup")
@@ -54,17 +70,13 @@ struct SetupView: View {
                     TextField("", text: $debugPath, prompt: Text("debug: backup file path")).onboardingField(theme)
                         .accessibilityIdentifier("setup-debug-path").onSubmit { backupURL = URL(fileURLWithPath: debugPath) }
                     #endif
-                    field("Server", "https://box.example.com", $server, id: "setup-server")
-                    secureField("Bootstrap token", "Set with wrangler secret BOOTSTRAP_TOKEN", $token, id: "setup-token")
-                    phraseEditor
-                    field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
                 }
                 ErrorLine(text: error)
             }
         } actions: {
             switch step {
             case .welcome:
-                Button { go(.connect) } label: { HStack(spacing: 8) { PillGlyph(); Text("Connect to Box") } }
+                Button { go(.connect) } label: { HStack(spacing: 8) { PillGlyph(); Text("Use a box") } }
                     .buttonStyle(PillButtonStyle()).accessibilityIdentifier("setup-mode-recover")
                 Button("Use locally") { go(.local) }
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-create")
@@ -95,14 +107,14 @@ struct SetupView: View {
         switch step {
         case .welcome: "Welcome to Bisel"
         case .local: "Set up on this Mac"
-        case .connect: "Connect to a box"
+        case .connect: "Use a box"
         case .restore: "Restore a backup"
         }
     }
 
     private var message: String {
         switch step {
-        case .welcome: "Bisel is the password manager you don’t wait for. You set up a box once, and after that it opens with your biometrics on your Apple devices."
+        case .welcome: "Bisel is the password manager we meant to be easy to reach while staying amazingly secure, working fully on a command menu taking less time to reach your info."
         case .local: "We make your keys right here on this Mac, and nothing leaves it until you decide to connect a server."
         case .connect: "Add the server your box lives on and your 24-word recovery phrase, and this Mac joins it."
         case .restore: "Pick your .bisel-backup file, point it at a fresh server and add your recovery phrase, and we rebuild the box there."
@@ -208,7 +220,7 @@ struct PhraseGateView: View {
         OnboardingFrame(progress: title == "Your recovery phrase" ? 0.8 : nil, title: title,
                         message: "These 24 words are the only way back into your box if you lose every device, so write them down somewhere safe. We show them once and never keep a copy.") {
             VStack(alignment: .leading, spacing: theme.spacing.l) {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.s), count: 3), alignment: .leading, spacing: theme.spacing.s) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.s), count: 4), alignment: .leading, spacing: theme.spacing.s) {
                     ForEach(Array(phrase.words.enumerated()), id: \.offset) { i, w in
                         HStack(spacing: theme.spacing.s) {
                             Text("\(i + 1)").font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.tertiaryText.color)

@@ -32,14 +32,14 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 24) {
                 if let progress { ProgressTrack(value: progress) }
-                VStack(alignment: .leading, spacing: theme.spacing.l) {
+                VStack(alignment: .leading, spacing: theme.spacing.m) {
                     Text(title)
-                        .font(theme.font(theme.fonts.detailTitle - 3))
+                        .font(theme.font(theme.fonts.detailTitle - 4))
                         .accessibilityAddTraits(.isHeader)
                     if let message {
                         Text(message)
                             .font(theme.font(theme.fonts.search))
-                            .lineSpacing(3)
+                            .lineSpacing(4)
                             .foregroundStyle(theme.colors.secondaryText.color)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -58,8 +58,7 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
         .padding(inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.colors.background.color)
-        .overlay(RoundedRectangle(cornerRadius: theme.radii.card, style: .continuous)
-            .strokeBorder(theme.colors.border.color, lineWidth: theme.card.hairline).allowsHitTesting(false))
+        .overlay(glassRim.allowsHitTesting(false))
         .foregroundStyle(theme.colors.text.color)
         .environment(\.theme, theme)
         .preferredColorScheme(.dark)
@@ -67,7 +66,38 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
     }
 }
 
-/// 6 pt track (pill secondary) with the progress fill, 2 pt corners.
+/// One line of the welcome list: a 15 pt icon and a line of copy.
+struct OnboardingRow: View {
+    var icon: String
+    var text: String
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        HStack(spacing: theme.spacing.l) {
+            Image(icon).renderingMode(.template).frame(width: 15, height: 15)
+            Text(text).font(theme.font(theme.fonts.search)).lineSpacing(3)
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(theme.colors.secondaryText.color)
+    }
+}
+
+extension OnboardingFrame {
+    /// Pitch black stays pitch black; the glass is only a thin rim on the edge that catches a little light from the
+    /// top-left. The radius is the window's own (measured, about 20 pt), so the rim sits on the window's edge.
+    var glassRim: some View {
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .strokeBorder(
+                LinearGradient(stops: [.init(color: .white.opacity(0.26), location: 0),
+                                       .init(color: .white.opacity(0.07), location: 0.35),
+                                       .init(color: .white.opacity(0.02), location: 0.65),
+                                       .init(color: .white.opacity(0.12), location: 1)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing),
+                lineWidth: 1)
+    }
+}
+
+/// 8 pt pill track (pill secondary) with the progress fill.
 struct ProgressTrack: View {
     var value: Double
     @Environment(\.theme) private var theme
@@ -75,12 +105,12 @@ struct ProgressTrack: View {
     var body: some View {
         GeometryReader { g in
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 2).fill(theme.colors.pillSecondary.color)
-                RoundedRectangle(cornerRadius: 2).fill((theme.colors.progress ?? theme.colors.accent).color)
+                Capsule().fill(theme.colors.pillSecondary.color)
+                Capsule().fill((theme.colors.progress ?? theme.colors.accent).color)
                     .frame(width: g.size.width * max(0, min(1, value)))
             }
         }
-        .frame(height: 6)
+        .frame(height: 8)
         .animation(.easeInOut(duration: 0.25), value: value)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Set-up progress")
@@ -90,9 +120,9 @@ struct ProgressTrack: View {
 
 /// Window sizes for the card phases.
 enum OnboardingLayout {
-    static let setup = NSSize(width: 400, height: 560)
-    static let phrase = NSSize(width: 420, height: 700)
-    static let locked = NSSize(width: 400, height: 300)
+    static let setup = NSSize(width: 646, height: 420)   // Figma frame is 646 wide
+    static let phrase = NSSize(width: 646, height: 580)
+    static let locked = NSSize(width: 560, height: 280)
 }
 
 /// Figma pill: 36 pt high, hugs its label, 14 pt. Primary (white) or secondary (#282828). Lifts a little on hover.
