@@ -52,6 +52,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     private(set) var deviceID = ""
     /// Recovery phrase shown right after set-up, until the user confirms "I have stored it".
     private(set) var pendingPhrase: RecoveryPhrase?
+    /// True from creating a brand-new box until its phrase is confirmed: the only time "Back" may throw the box away.
+    private(set) var freshBox = false
     private(set) var unlockedAt: Date?
     var isBusy = false
 
@@ -179,8 +181,20 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         let phrase = try await vault.bootstrapLocal(deviceName: deviceName)
         setRecoveryUnconfirmed(true)
         pendingPhrase = phrase
+        freshBox = true
         await refreshPhase()
         setPhase(.unlocked)
+    }
+
+    /// Back from the recovery phrase of a box that was created a moment ago and holds nothing: erase it and start over.
+    func discardNewBox() async {
+        guard freshBox, pendingPhrase != nil, let vault else { return }
+        isBusy = true; defer { isBusy = false }
+        do { try await vault.removeLocalDevice() } catch { Log.app.error("discarding the new box failed") }
+        setRecoveryUnconfirmed(false)
+        pendingPhrase = nil
+        freshBox = false
+        await refreshPhase()
     }
 
     /// Registers this Mac's vault with a fresh server, then uploads everything made while it was local.
@@ -196,6 +210,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     var isLocalOnly: Bool { phase != .needsSetup && serverURL == nil }
 
     func confirmPhraseStored() {
+        freshBox = false
         pendingPhrase = nil
         setRecoveryUnconfirmed(false)
         Task { await sync(reason: "setup") }

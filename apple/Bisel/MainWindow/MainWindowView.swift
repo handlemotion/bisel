@@ -56,11 +56,11 @@ struct MainWindowView: View {
     /// and shows the command panel's material. Everything else is the normal window.
     private var cardSize: NSSize? {
         guard service.startupError == nil, !usesFixture else { return nil }
-        if service.pendingPhrase != nil { return OnboardingLayout.phrase }
-        if showImport { return OnboardingLayout.setup }
+        if service.pendingPhrase != nil { return OnboardingLayout.island }
+        if showImport { return OnboardingLayout.island }
         switch service.phase {
-        case .needsSetup: return OnboardingState.shared.recovering ? OnboardingLayout.phrase : OnboardingLayout.setup
-        case .locked: return OnboardingLayout.locked
+        case .needsSetup: return OnboardingLayout.island
+        case .locked: return OnboardingLayout.island
         default: return nil
         }
     }
@@ -78,9 +78,7 @@ struct MainWindowView: View {
             for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = true }
             w.isMovableByWindowBackground = true
             w.hasShadow = true
-            if abs(w.contentLayoutRect.width - size.width) > 1 || abs(w.contentLayoutRect.height - size.height) > 1 {
-                w.setContentSize(size)
-            }
+            if w.frame.size != size { w.setContentSize(size) }   // one fixed island size, set once
         } else {
             w.isOpaque = true
             w.backgroundColor = .windowBackgroundColor
@@ -90,8 +88,8 @@ struct MainWindowView: View {
             w.styleMask.insert(.resizable)
             for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = false }
             w.isMovableByWindowBackground = false
-            if w.contentLayoutRect.width < 820 || w.contentLayoutRect.height < 540 {
-                w.setContentSize(NSSize(width: max(820, w.contentLayoutRect.width), height: max(540, w.contentLayoutRect.height)))
+            if w.frame.width < 820 || w.frame.height < 540 {
+                w.setContentSize(NSSize(width: max(820, w.frame.width), height: max(540, w.frame.height)))
             }
         }
     }

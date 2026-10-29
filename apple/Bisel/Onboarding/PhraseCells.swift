@@ -1,13 +1,4 @@
-import Observation
 import SwiftUI
-
-/// Which onboarding step is up, so the window can be as big as the step needs.
-@MainActor
-@Observable
-final class OnboardingState {
-    static let shared = OnboardingState()
-    var recovering = false
-}
 
 /// Pulls the recovery words out of whatever was pasted or uploaded: plain words, numbered lines ("1. cannon"), or the
 /// text file Bisel saves (a heading and a closing sentence around 24 numbered lines).
@@ -40,9 +31,9 @@ struct PhraseCellChrome<Word: View>: View {
         HStack(spacing: theme.spacing.s) {
             Text("\(number)").font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.tertiaryText.color)
             Spacer(minLength: theme.spacing.s)
-            word
+            word.lineLimit(1)
         }
-        .padding(.vertical, 10).padding(.horizontal, theme.spacing.m)
+        .padding(.vertical, 6.5).padding(.horizontal, theme.spacing.m)
         .frame(maxWidth: .infinity)
         .background(shape.fill(theme.colors.field.color))
         .overlay(shape.strokeBorder(focused ? theme.colors.text.color.opacity(0.35) : .clear, lineWidth: theme.card.hairline))
@@ -57,7 +48,7 @@ struct PhraseInputGrid: View {
     private let theme = Theme.biselDark
 
     var body: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.s), count: 4), alignment: .leading, spacing: theme.spacing.s) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), alignment: .leading, spacing: 6) {
             ForEach(0..<24, id: \.self) { i in
                 PhraseCellChrome(number: i + 1, focused: focus == i) {
                     TextField("", text: cell(i))

@@ -25,12 +25,6 @@ struct SetupView: View {
     private var deviceName: String { Host.current().localizedName ?? "Mac" }
 
     var body: some View {
-        content
-            .onChange(of: step) { _, new in OnboardingState.shared.recovering = (new == .recover) }
-            .onAppear { OnboardingState.shared.recovering = (step == .recover) }
-    }
-
-    private var content: some View {
         OnboardingFrame(progress: step == .welcome ? 0.2 : 0.5, title: title, message: message, centered: step == .recover) {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
                 switch step {
@@ -126,7 +120,7 @@ struct PhraseGateView: View {
                         message: "Your only way back in if you lose every device. Shown once, never kept.",
                         centered: true) {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.s), count: 4), alignment: .leading, spacing: theme.spacing.s) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 4), alignment: .leading, spacing: 6) {
                     ForEach(Array(phrase.words.enumerated()), id: \.offset) { i, w in
                         PhraseCellChrome(number: i + 1) {
                             Text(w).font(theme.font(theme.fonts.value, weight: .medium)).textSelection(.disabled)
@@ -137,6 +131,10 @@ struct PhraseGateView: View {
                 if let saved { Caption("Saved as \(saved)") }
             }
         } actions: {
+            if service.freshBox {
+                Button("Back") { Task { await service.discardNewBox() } }
+                    .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("phrase-back")
+            }
             Button("Download", action: download)
                 .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("phrase-download")
             Spacer(minLength: 0)

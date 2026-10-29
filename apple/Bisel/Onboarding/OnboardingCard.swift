@@ -33,10 +33,12 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
                 }
             }
             if centered {
+                // The content sits close to the actions (they add their own 16 pt of padding), the rest of the free space goes
+                // above it, away from the text. It must fit: the progress bar, the text and the actions never move between screens.
                 VStack(spacing: 0) {
-                    Spacer(minLength: theme.spacing.l)
+                    Spacer(minLength: 14)
                     content.frame(maxWidth: .infinity, alignment: .leading)
-                    Spacer(minLength: theme.spacing.l)
+                    Spacer().frame(height: theme.spacing.s)
                 }
                 .frame(maxHeight: .infinity)
             } else {
@@ -111,9 +113,8 @@ struct ProgressTrack: View {
 
 /// Window sizes for the card phases.
 enum OnboardingLayout {
-    static let setup = NSSize(width: 646, height: 420)   // Figma frame is 646 wide
-    static let phrase = NSSize(width: 646, height: 480)
-    static let locked = NSSize(width: 560, height: 280)
+    /// One size for every onboarding screen (Figma frame is 646 wide), so the window never has to resize.
+    static let island = NSSize(width: 646, height: 420)
 }
 
 /// Figma pill: 36 pt high, hugs its label, 14 pt. Primary (white) or secondary (#282828). Lifts a little on hover.
