@@ -10,6 +10,7 @@
     "migrate": "wrangler d1 migrations apply bisel --local",
     "reset": "rm -rf .wrangler/state",
     "types": "wrangler types",
+    "deploy:prod": "wrangler deploy --env prod",
     "typecheck": "tsc --noEmit",
     "test": "playwright test",
     "test:report": "playwright show-report"

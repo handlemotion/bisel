@@ -9,6 +9,7 @@ import {
   requireAdmin,
   readBodyCapped,
   recordFailure,
+  shortHash,
   type AppEnv,
 } from "./auth";
 import { b64urlByteLength, b64urlDecode } from "./encoding";
@@ -57,6 +58,35 @@ app.use(
 app.use("*", async (c, next) => {
   await next();
   c.header("Cache-Control", "no-store");
+});
+
+// Flood limit per client address: Cloudflare's Workers rate-limiting binding (wrangler.jsonc), checked before
+// any D1 work. A request without CF-Connecting-IP never reaches a deployed Worker, so only local dev is exempt.
+// The answer is the same empty 429 on every route and for every kind of caller, so it says nothing about auth.
+// If the limiter itself errors the request is served: refusing the owner is worse than skipping a soft limit.
+app.use("*", async (c, next) => {
+  const ip = c.req.header("cf-connecting-ip");
+  if (ip) {
+    try {
+      const { success } = await c.env.RATE_LIMITER.limit({ key: ip });
+      if (!success) return c.body(null, 429, { "Retry-After": "10" });
+    } catch (err) {
+      console.log(JSON.stringify({ evt: "error", where: "rate_limiter", message: String(err) }));
+    }
+  }
+  await next();
+});
+
+// Liveness for an uptime monitor: 200 with no body when D1 answers, 503 with no body when it does not.
+// It carries no version, name, counts or setup state, and needs no signature.
+app.get("/healthz", async (c) => {
+  try {
+    await c.env.DB.prepare("SELECT 1").first();
+  } catch (err) {
+    console.log(JSON.stringify({ evt: "error", where: "healthz", message: String(err) }));
+    return c.body(null, 503);
+  }
+  return c.body(null, 200);
 });
 
 const deviceAuth = authenticate("device");
@@ -227,7 +257,7 @@ app.post("/v1/bootstrap", async (c) => {
     if (!tokenOk || done) {
       await decoyVerify("device", new Uint8Array(64), new Uint8Array(32));
       if (!tokenOk) await recordFailure(env, req, now, "bad_bootstrap_token");
-      else console.log(JSON.stringify({ evt: "auth_fail", reason: "already_bootstrapped", ip: clientIp(req) }));
+      else console.log(JSON.stringify({ evt: "auth_fail", reason: "already_bootstrapped", ip: await shortHash(clientIp(req)) }));
       return deny();
     }
     body = await readBodyCapped(req, BODY_LIMITS.bootstrap);

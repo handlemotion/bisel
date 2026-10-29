@@ -896,3 +896,53 @@ test("failed-auth backoff: it slows the offender, never locks out a valid signat
   expect(refused.status).toBe(404);
   expect(refused.ms).toBeLessThan(350);
 });
+
+test("/healthz answers a bare 200 to anyone, and nothing else about the service", async ({ request }) => {
+  const api = new Bisel(request, { "CF-Connecting-IP": "10.70.0.1" });
+  const ok = await fingerprint(await api.api.fetch("/healthz", { headers: { "CF-Connecting-IP": "10.70.0.1" } }));
+  expect(ok.status).toBe(200);
+  expect(ok.body).toBe("");
+  const h = Object.fromEntries(ok.headers);
+  expect(h["cache-control"]).toBe("no-store");
+  expect(h["x-content-type-options"]).toBe("nosniff");
+  expect(h["content-length"] ?? "0").toBe("0");
+  expect(h["server"]).toBeUndefined();
+
+  // Only GET and HEAD exist; any other method is the usual bare 404.
+  const head = await api.api.fetch("/healthz", { method: "HEAD", headers: { "CF-Connecting-IP": "10.70.0.1" } });
+  expect(head.status()).toBe(200);
+  const post = await fingerprint(await api.api.fetch("/healthz", { method: "POST", headers: { "CF-Connecting-IP": "10.70.0.1" } }));
+  const unknown = await fingerprint(await api.api.fetch("/v1/nope", { headers: { "CF-Connecting-IP": "10.70.0.1" } }));
+  expect(post).toEqual(unknown);
+
+  // No CORS, ever: a browser origin gets nothing it could read.
+  const cors = await api.api.fetch("/v1/sync", { method: "OPTIONS", headers: { "CF-Connecting-IP": "10.70.0.1", Origin: "https://evil.example", "Access-Control-Request-Method": "GET" } });
+  expect(cors.status()).toBe(404);
+  expect(Object.keys(cors.headers()).filter((k) => k.startsWith("access-control-"))).toEqual([]);
+});
+
+test("per-address flood limit: a flood from one address gets a bare 429, other addresses and the owner are untouched", async ({ request }) => {
+  const flooder = { "CF-Connecting-IP": "10.77.0.1" };
+  let limitedAt = -1;
+  let limited: APIResponse | undefined;
+  // The test server inherits the production limit: 300 requests per minute per address.
+  for (let i = 0; i < 400 && limitedAt < 0; i++) {
+    const res = await request.fetch("/healthz", { headers: flooder });
+    if (res.status() === 429) {
+      limitedAt = i;
+      limited = res;
+    } else expect(res.status()).toBe(200);
+  }
+  expect(limitedAt, "the limit kicks in").toBeGreaterThan(0);
+  expect(limitedAt).toBeLessThanOrEqual(300);
+  expect((await limited!.body()).length).toBe(0);
+  expect(limited!.headers()["retry-after"]).toBe("10");
+  expect(limited!.headers()["x-content-type-options"], "hardening headers survive the refusal").toBe("nosniff");
+
+  // The same address stays limited on every route (that is what a flood limit is for).
+  expect((await request.fetch("/v1/nope", { headers: flooder })).status()).toBe(429);
+  // Another address is not affected.
+  expect((await request.fetch("/healthz", { headers: { "CF-Connecting-IP": "10.77.0.2" } })).status()).toBe(200);
+  const owner = new Bisel(request, { "CF-Connecting-IP": "10.77.0.3" });
+  expect((await owner.call(a, "GET", "/v1/sync")).status()).toBe(200);
+});
