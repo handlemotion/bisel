@@ -22,8 +22,10 @@ enum PanelDebugDriver {
         guard !started else { return }  // the perf driver builds a second controller
         started = true
         let env = ProcessInfo.processInfo.environment
-        // Invisible by default; BISEL_DEV_VISIBLE=1 opts into a visible panel (for screenshots only, keep runs short).
-        controller.debugStealth = env["BISEL_DEV_VISIBLE"] == nil
+        // Only the debug drivers run invisible (BISEL_DEV_VISIBLE=1 opts into a visible panel, for screenshots only).
+        // A normal launch must show the panel.
+        let driving = env["BISEL_DEV_AXHOLD"] != nil || env["BISEL_DEV_PANEL_CYCLES"] != nil || env["BISEL_DEV_PANEL_PERF"] != nil
+        controller.debugStealth = driving && env["BISEL_DEV_VISIBLE"] == nil
         if env["BISEL_DEV_AXHOLD"] != nil {
             Task { await hold(controller, query: env["BISEL_DEV_AXHOLD_QUERY"] ?? "", actions: env["BISEL_DEV_AXHOLD"] == "actions", dumpPath: env["BISEL_DEV_AXHOLD_DUMP"]) }
         }
