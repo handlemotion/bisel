@@ -1,36 +1,17 @@
 import SwiftUI
 
-/// The Bisel mark: a chamfered square (a bevelled edge) on the primary pill color. Stands in until the final app icon.
-struct BrandMark: View {
-    var size: CGFloat = 64
-    @Environment(\.theme) private var theme
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
-            .fill(theme.colors.pillPrimary.color)
-            .frame(width: size, height: size)
-            .overlay(
-                Bevel()
-                    .fill(theme.colors.pillPrimaryText.color)
-                    .frame(width: size * 0.42, height: size * 0.42)
-            )
-            .shadow(color: theme.colors.accent.color.opacity(0.45), radius: size * 0.35, y: size * 0.08)
-            .accessibilityHidden(true)
-    }
-
-    /// Square with the top-left corner cut at 45°.
-    private struct Bevel: Shape {
-        func path(in r: CGRect) -> Path {
-            let c = r.width * 0.38
-            var p = Path()
-            p.move(to: CGPoint(x: r.minX + c, y: r.minY))
-            p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
-            p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
-            p.addLine(to: CGPoint(x: r.minX, y: r.maxY))
-            p.addLine(to: CGPoint(x: r.minX, y: r.minY + c))
-            p.closeSubpath()
-            return p
-        }
+/// The Bisel mark: a square with its top-left corner cut at 45° (a bevelled edge).
+struct BevelShape: Shape {
+    func path(in r: CGRect) -> Path {
+        let c = r.width * 0.38
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX + c, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+        p.addLine(to: CGPoint(x: r.minX, y: r.maxY))
+        p.addLine(to: CGPoint(x: r.minX, y: r.minY + c))
+        p.closeSubpath()
+        return p
     }
 }
 
@@ -44,7 +25,7 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
     var message: String?
     @ViewBuilder var content: Content
     @ViewBuilder var actions: Actions
-    @Environment(\.theme) private var theme
+    private let theme = Theme.biselDark   // onboarding is always the solid black frame from Figma
 
     private let inset: CGFloat = 20   // Figma frame padding
     var body: some View {
@@ -53,12 +34,11 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
                 if let progress { ProgressTrack(value: progress) }
                 VStack(alignment: .leading, spacing: theme.spacing.l) {
                     Text(title)
-                        .font(theme.font(theme.fonts.detailTitle))
+                        .font(theme.font(theme.fonts.detailTitle - 3))
                         .accessibilityAddTraits(.isHeader)
                     if let message {
-                        // Figma body is 17 pt, a step above the search field size.
                         Text(message)
-                            .font(theme.font(theme.fonts.search + 2))
+                            .font(theme.font(theme.fonts.search))
                             .lineSpacing(3)
                             .foregroundStyle(theme.colors.secondaryText.color)
                             .fixedSize(horizontal: false, vertical: true)
@@ -77,9 +57,12 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
         }
         .padding(inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(CardFill())
+        .background(theme.colors.background.color)
         .overlay(RoundedRectangle(cornerRadius: theme.radii.card, style: .continuous)
             .strokeBorder(theme.colors.border.color, lineWidth: theme.card.hairline).allowsHitTesting(false))
+        .foregroundStyle(theme.colors.text.color)
+        .environment(\.theme, theme)
+        .preferredColorScheme(.dark)
         .ignoresSafeArea()
     }
 }
@@ -112,21 +95,47 @@ enum OnboardingLayout {
     static let locked = NSSize(width: 400, height: 300)
 }
 
-/// Figma pill: 36 pt high, hugs its label, 14 pt. Primary (white) or secondary (#282828).
+/// Figma pill: 36 pt high, hugs its label, 14 pt. Primary (white) or secondary (#282828). Lifts a little on hover.
 struct PillButtonStyle: ButtonStyle {
     var primary = true
-    @Environment(\.theme) private var theme
-    @Environment(\.isEnabled) private var enabled
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(theme.font(theme.fonts.row))
-            .foregroundStyle((primary ? theme.colors.pillPrimaryText : theme.colors.pillSecondaryText).color)
-            .padding(.horizontal, primary ? 12 : 14)
-            .frame(height: 36)
-            .background(Capsule().fill((primary ? theme.colors.pillPrimary : theme.colors.pillSecondary).color))
-            .opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.4)
-            .contentShape(Capsule())
+        PillBody(configuration: configuration, primary: primary)
+    }
+
+    private struct PillBody: View {
+        let configuration: ButtonStyleConfiguration
+        let primary: Bool
+        @Environment(\.theme) private var theme
+        @Environment(\.isEnabled) private var enabled
+        @State private var hovering = false
+
+        var body: some View {
+            let fill = (primary ? theme.colors.pillPrimary : theme.colors.pillSecondary).color
+            let label = (primary ? theme.colors.pillPrimaryText : theme.colors.pillSecondaryText).color
+            configuration.label
+                .font(theme.font(theme.fonts.row))
+                .foregroundStyle(label)
+                .padding(.horizontal, primary ? 12 : 14)
+                .frame(height: 36)
+                .background(Capsule().fill(fill))
+                .overlay(Capsule().fill((primary ? Color.black : Color.white).opacity(hovering && enabled ? (primary ? 0.10 : 0.12) : 0)))
+                .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.4)
+                .contentShape(Capsule())
+                .onHover { hovering = $0 }
+                .animation(.easeOut(duration: 0.12), value: hovering)
+        }
+    }
+}
+
+/// The glyph Figma puts in front of "Connect to Box": a 14 pt square with only the top-left corner rounded.
+struct PillGlyph: View {
+    @Environment(\.theme) private var theme
+    var body: some View {
+        UnevenRoundedRectangle(topLeadingRadius: 14)
+            .fill(theme.colors.pillPrimaryText.color.opacity(0.15))
+            .frame(width: 14, height: 14)
+            .accessibilityHidden(true)
     }
 }
 

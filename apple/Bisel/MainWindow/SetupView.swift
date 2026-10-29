@@ -60,14 +60,11 @@ struct SetupView: View {
                     field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
                 }
                 ErrorLine(text: error)
-                if step == .local {
-                    Text(footer).font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.tertiaryText.color)
-                }
             }
         } actions: {
             switch step {
             case .welcome:
-                Button { go(.connect) } label: { Label("Connect to Box", systemImage: "shippingbox") }
+                Button { go(.connect) } label: { HStack(spacing: 8) { PillGlyph(); Text("Connect to Box") } }
                     .buttonStyle(PillButtonStyle()).accessibilityIdentifier("setup-mode-recover")
                 Button("Use locally") { go(.local) }
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-create")
@@ -97,7 +94,7 @@ struct SetupView: View {
     private var title: String {
         switch step {
         case .welcome: "Welcome to Bisel"
-        case .local: "Use this Mac"
+        case .local: "Set up on this Mac"
         case .connect: "Connect to a box"
         case .restore: "Restore a backup"
         }
@@ -105,19 +102,15 @@ struct SetupView: View {
 
     private var message: String {
         switch step {
-        case .welcome: "Bisel is the password manager you don’t wait for. You set up a box once, and open it with your biometrics on your Apple device."
-        case .local: "Your keys are made on this Mac. Nothing leaves it until you connect a server."
-        case .connect: "Enter your box’s server and its 24-word recovery phrase to bring it to this Mac."
-        case .restore: "Re-create the box on a fresh server from a .bisel-backup file and its recovery phrase."
+        case .welcome: "Bisel is the password manager you don’t wait for. You set up a box once, and after that it opens with your biometrics on your Apple devices."
+        case .local: "We make your keys right here on this Mac, and nothing leaves it until you decide to connect a server."
+        case .connect: "Add the server your box lives on and your 24-word recovery phrase, and this Mac joins it."
+        case .restore: "Pick your .bisel-backup file, point it at a fresh server and add your recovery phrase, and we rebuild the box there."
         }
     }
 
     private var actionTitle: String {
         switch step { case .local: "Create box"; case .connect: "Connect"; case .restore: "Restore"; case .welcome: "" }
-    }
-
-    private var footer: String {
-        BiselEnvironment.usesSoftwareKeys ? "Debug build: device keys are kept in a plain file, not the Secure Enclave." : "Device keys are created in the Secure Enclave and need Touch ID."
     }
 
     private var ready: Bool {
@@ -213,7 +206,7 @@ struct PhraseGateView: View {
 
     var body: some View {
         OnboardingFrame(progress: title == "Your recovery phrase" ? 0.8 : nil, title: title,
-                        message: "These 24 words are the only way back into your box if every device is lost. Write them down or store them somewhere safe. They are shown once and never saved by Bisel.") {
+                        message: "These 24 words are the only way back into your box if you lose every device, so write them down somewhere safe. We show them once and never keep a copy.") {
             VStack(alignment: .leading, spacing: theme.spacing.l) {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.s), count: 3), alignment: .leading, spacing: theme.spacing.s) {
                     ForEach(Array(phrase.words.enumerated()), id: \.offset) { i, w in
@@ -233,7 +226,7 @@ struct PhraseGateView: View {
                 Toggle("Show the words", isOn: $revealed).accessibilityIdentifier("phrase-reveal")
                 Toggle("I have stored it", isOn: $stored).accessibilityIdentifier("phrase-stored")
                 VStack(alignment: .leading, spacing: theme.spacing.s) {
-                    Caption("To check, type these words from your copy:")
+                    Caption("Quick check, type these words from your copy")
                     HStack(spacing: theme.spacing.m) {
                         ForEach(0..<3, id: \.self) { i in
                             TextField("", text: $answers[i], prompt: Text("Word \(picks[i])")).onboardingField(theme)
@@ -257,7 +250,7 @@ struct LockedView: View {
     @State private var working = false
 
     var body: some View {
-        OnboardingFrame(progress: nil, title: "Bisel is locked", message: "Unlock your box to search, fill and copy.") {
+        OnboardingFrame(progress: nil, title: "Bisel is locked", message: "Use Touch ID to open your box.") {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
                 ErrorLine(text: error)
                 SyncStatusView(service: service, compact: true)

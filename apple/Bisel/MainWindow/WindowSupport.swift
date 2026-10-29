@@ -48,14 +48,22 @@ enum DockPresence {
     }
 }
 
-/// The Dock icon: the mark on a macOS-style tile with the usual margin.
+/// The Dock icon: a black glass tile (no halo, soft top light, hairline edge) with the mark, on the standard icon grid.
 @MainActor
 enum BrandIcon {
     static let image: NSImage = {
-        let theme = ThemeStore.shared.current
-        let view = ZStack { BrandMark(size: 820) }
-            .frame(width: 1024, height: 1024)
-            .environment(\.theme, theme)
+        let tile: CGFloat = 824   // Apple's icon grid inside the 1024 canvas
+        let radius = tile * 0.2237
+        let view = ZStack {
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
+                .fill(LinearGradient(colors: [Color(white: 0.20), Color(white: 0.03)], startPoint: .top, endPoint: .bottom))
+                .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(0.28), Color.white.opacity(0.04)], startPoint: .top, endPoint: .bottom), lineWidth: 6))
+                .frame(width: tile, height: tile)
+                .shadow(color: .black.opacity(0.35), radius: 14, y: 10)
+            BevelShape().fill(.white).frame(width: tile * 0.40, height: tile * 0.40)
+        }
+        .frame(width: 1024, height: 1024)
         let r = ImageRenderer(content: view)
         r.scale = 1
         return r.nsImage ?? NSImage()

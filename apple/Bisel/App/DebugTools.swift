@@ -8,6 +8,11 @@ enum DebugTools {
     /// contents rendered in-process (works with the screen locked or the window behind others). Never compiled into Release.
     @MainActor
     static func installSnapshotListener() {
+        // BISEL_DEV_ICON_PATH=<png>: writes the Dock icon image once, to check it without opening the Dock.
+        if let path = ProcessInfo.processInfo.environment["BISEL_DEV_ICON_PATH"], let tiff = BrandIcon.image.tiffRepresentation,
+           let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: path))
+        }
         // `app.bisel.dev.snapshot.<pid>` reaches one process when several debug builds run at once.
         for name in ["app.bisel.dev.snapshot", "app.bisel.dev.snapshot.\(getpid())"] {
             DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: .main) { note in
