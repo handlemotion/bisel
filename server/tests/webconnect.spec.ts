@@ -183,7 +183,8 @@ test("a Mac that already has a box links it to an account, with Touch ID (admin 
   await expect(ada.page.getByText("another cannot be linked")).toBeVisible();
   await expect(ada.page.getByRole("button", { name: "Link this box" })).toHaveCount(0);
   await ada.page.getByRole("button", { name: "Not me" }).click();
-  expect(await m.poll(code.device_code)).toEqual({ status: "denied" });
+  // The click answers the request asynchronously: wait for the Mac to see it instead of polling once.
+  await expect.poll(async () => m.poll(code.device_code)).toEqual({ status: "denied" });
 
   // A new account links it.
   const second = (await (await api.call(device, "POST", "/v1/box/claim", { admin })).json()) as any;
