@@ -284,11 +284,25 @@ public actor Vault {
         try await config.gate.authenticate(reason: "Connect \(identity.deviceName) to a server")
         let device = WireDevice(id: identity.deviceID, name: identity.deviceName, kind: config.deviceKind, sigPubkey: me.sigPubkey,
                                 encPubkey: me.encPubkey, envelope: envelope)
-        try await SyncClient.bootstrap(baseURL: server, token: bootstrapToken, device: device, recoveryPublicKey: recoveryPub,
-                                       recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
-                                       adminPublicKey: try adminSigner(key).publicKey)
+        do {
+            try await SyncClient.bootstrap(baseURL: server, token: bootstrapToken, device: device, recoveryPublicKey: recoveryPub,
+                                           recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
+                                           adminPublicKey: try adminSigner(key).publicKey)
+        } catch SyncError.notAuthorized {
+            // The server refuses a second bootstrap with the same bare 404. If an earlier attempt of ours got through (its
+            // answer was lost, or the app died before saving), this device is already registered there: carry on.
+            guard await isRegistered(on: server, identity: identity, recoveryPublicKey: recoveryPub) else { throw SyncError.notAuthorized }
+        }
         identity.serverURL = server
         try store.setIdentity(identity)
+    }
+
+    /// Whether `server` already knows this device and holds this vault's recovery key (a signed read: only a registered device
+    /// gets an answer).
+    private func isRegistered(on server: URL, identity: LocalIdentity, recoveryPublicKey: Data) async -> Bool {
+        let client = SyncClient(baseURL: server, signer: DeviceSigner(deviceID: identity.deviceID, keyStore: config.keyStore))
+        guard let page = try? await client.pull(since: 0, limit: 1), let recovery = page.recovery else { return false }
+        return page.devices.contains { $0.id == identity.deviceID } && Data(base64URLEncoded: recovery.pubkey) == recoveryPublicKey
     }
 
     /// Disaster recovery from a healthy device: registers this device and the vault's recovery keys with a server that lost
@@ -310,9 +324,15 @@ public actor Vault {
                                 encPubkey: me.encPubkey, envelope: envelope)
         // Harmless if the call below fails: the flag only makes the next sync pull from the start and re-upload what is missing.
         try store.setReseedPending(true)
-        try await SyncClient.bootstrap(baseURL: server, token: bootstrapToken, device: device, recoveryPublicKey: recoveryPub,
-                                       recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
-                                       adminPublicKey: try adminSigner(key).publicKey)
+        do {
+            try await SyncClient.bootstrap(baseURL: server, token: bootstrapToken, device: device, recoveryPublicKey: recoveryPub,
+                                           recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
+                                           adminPublicKey: try adminSigner(key).publicKey)
+        } catch SyncError.notAuthorized {
+            // The server refuses a second bootstrap with the same bare 404. If an earlier attempt of ours got through (its
+            // answer was lost, or the app died before saving), this device is already registered there: carry on.
+            guard await isRegistered(on: server, identity: identity, recoveryPublicKey: recoveryPub) else { throw SyncError.notAuthorized }
+        }
         identity.serverURL = server
         identity.epoch = 1
         identity.recoveryEnvelope = recoveryEnv
@@ -939,8 +959,10 @@ public actor Vault {
                                     envelope: try keys.seal(vaultKey: vkData, epoch: 1))
         try await register(server: server, bootstrapToken: bootstrapToken, deviceName: deviceName, vaultKey: vkData, recovery: bundle)
         let skipped = try restore(file, vaultKey: vk)
-        if skipped > 0 { throw VaultError.badBackup("\(skipped) item(s) in the backup failed authentication and were skipped") }
+        // Upload what was restored before reporting problems: the vault exists from here on, so a thrown error must not leave
+        // the good items stuck behind it (a second import is refused as `alreadyConfigured`).
         _ = try await sync()
+        if skipped > 0 { throw VaultError.badBackup("\(skipped) item(s) in the backup failed authentication and were skipped; the rest was restored") }
     }
 
     /// Disaster recovery without any server (for example after the Secure Enclave key was invalidated by a fingerprint

@@ -323,6 +323,43 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("a connect whose answer was lost is adopted on retry instead of being refused for good")
+    func connectAfterLostAnswer() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            let phrase = try await a.vault.bootstrapLocal(deviceName: "a")
+            let item = try await a.vault.save(login("Local", password: "p-local"))
+            let id = try #require(try await a.vault.identity())
+            let me = try #require(id.roster.first { $0.deviceID == id.deviceID })
+
+            // The first attempt reached the server (it now holds this device and the recovery keys); the answer never came back.
+            try await SyncClient.bootstrap(
+                baseURL: server.url, token: TestServer.bootstrapToken,
+                device: WireDevice(id: id.deviceID, name: "a", kind: "test", sigPubkey: me.sigPubkey, encPubkey: me.encPubkey, envelope: id.envelope),
+                recoveryPublicKey: try #require(id.recoveryPublicKey), recoveryEncryptionPublicKey: try #require(id.recoveryEncryptionPublicKey),
+                recoveryEnvelope: try #require(id.recoveryEnvelope),
+                adminPublicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation)
+            #expect(try await a.vault.identity()?.serverURL == nil, "the app still believes it is local-only")
+
+            try await a.vault.connectServer(server.url, bootstrapToken: TestServer.bootstrapToken)
+            #expect(try await a.vault.identity()?.serverURL == server.url)
+            try await a.vault.sync()
+            let fresh = try Device("fresh")
+            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh")
+            try await fresh.vault.sync()
+            #expect(try await fresh.vault.revealPassword(id: item.id) == "p-local")
+
+            // Another vault's server is not adopted: this device is not registered there.
+            try await TestServer.with { other in
+                let b = try Device("b")
+                _ = try await b.vault.bootstrapLocal(deviceName: "b")
+                await #expect(throws: SyncError.notAuthorized) {
+                    try await b.vault.connectServer(other.url, bootstrapToken: "wrong-token")
+                }
+            }
+        }
+    }
+
     @Test("recover from the 24 words on a fresh store; wrong or rotated-away phrases do not work")
     func recoveryFromPhrase() async throws {
         try await TestServer.with { server in
