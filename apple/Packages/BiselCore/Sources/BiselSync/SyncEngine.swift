@@ -104,8 +104,20 @@ public struct SyncEngine: Sendable {
                 }
                 switch outcome {
                 case .accepted(let server):
-                    try store.confirmPushed(pushed: rec, server: server)
                     report.pushed += 1
+                    if !(try store.confirmPushed(pushed: rec, server: server)) {
+                        // The item was edited again while this push was in flight: that newer edit continues from the
+                        // revision the server just took, instead of colliding with this device's own earlier write.
+                        if let vk = vaultKey() {
+                            _ = try? store.rebasePending(id: rec.id, serverRev: server.rev) { cur, rev in
+                                try vk.withKey { key in
+                                    if cur.pending == .delete { return try ItemSealer.sealTombstone(id: cur.id, rev: rev, vaultKey: key) }
+                                    let payload = try ItemSealer.open(blob: cur.blob, id: cur.id, rev: cur.rev, vaultKey: key)
+                                    return try ItemSealer.seal(payload: payload, id: cur.id, rev: rev, vaultKey: key)
+                                }
+                            }
+                        }
+                    }
                 case .conflict(let current):
                     if !(try resolveConflict(local: rec, current: current, &report)) { skipped.insert(rec.id) }
                 case .staleEpoch:
@@ -129,6 +141,12 @@ public struct SyncEngine: Sendable {
             }
             return true
         }
+        // The server already holds exactly what this device pushed (the answer was lost): the push counts as accepted.
+        if current.rev == local.rev, current.blob == local.blob, current.deleted == (local.pending == .delete) {
+            try store.confirmPushed(pushed: local, server: current)
+            report.pushed += 1
+            return true
+        }
         // The manifest is shared by every device and edited by several: merge instead of choosing a side.
         if local.id == ReservedRecord.manifestID, local.pending == .put, !current.deleted, let vk = vaultKey() {
             let merged = try vk.withKey { key -> VaultManifest in
@@ -136,8 +154,7 @@ public struct SyncEngine: Sendable {
                 let theirs = try ManifestCodec.open(current, vaultKey: key)
                 return mine.merged(with: theirs)
             }
-            try store.overwrite(with: current)
-            try store.commitLocal(id: local.id, deleted: false) { rev in try vk.withKey { try ManifestCodec.seal(merged, rev: rev, vaultKey: $0) } }
+            try store.resolveManifestConflict(current: current, id: local.id) { rev in try vk.withKey { try ManifestCodec.seal(merged, rev: rev, vaultKey: $0) } }
             return true
         }
         if local.pending == .put {
@@ -192,13 +209,12 @@ public struct SyncEngine: Sendable {
         for tomb in try store.unverifiedTombstones() where !ReservedRecord.isReserved(tomb.id) {
             let ok = vk.withKeyOrFalse { ItemSealer.verifyTombstone(tomb.blob, id: tomb.id, rev: tomb.rev, vaultKey: $0) }
             if ok { try store.setTombstoneState(id: tomb.id, rev: tomb.rev, .verified); continue }
-            try store.setTombstoneState(id: tomb.id, rev: tomb.rev, .rejected)
             report.rejectedTombstones.append(tomb.id)
             // Bring back the newest live version this device held, as a new revision on top of the (forged) tombstone.
             guard let kept = try store.trashedRecords(id: tomb.id).first(where: { !$0.record.deleted }),
                   let payload = try? vk.withKey({ try ItemSealer.open(blob: kept.record.blob, id: kept.record.id, rev: kept.record.rev, vaultKey: $0) })
-            else { continue }
-            try store.commitLocal(id: tomb.id, deleted: false) { rev in
+            else { try store.rejectTombstone(id: tomb.id, rev: tomb.rev, restore: nil); continue }
+            try store.rejectTombstone(id: tomb.id, rev: tomb.rev) { rev in
                 try vk.withKey { try ItemSealer.seal(payload: payload, id: tomb.id, rev: rev, vaultKey: $0) }
             }
             restored = true

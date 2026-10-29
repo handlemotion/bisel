@@ -249,17 +249,40 @@ public final class LocalStore: Sendable {
     /// (`baseRev + 1`) so the AAD binds the right one (for a delete: the sealed tombstone marker).
     /// Atomic with the base-revision lookup.
     @discardableResult
-    public func commitLocal(id: String, deleted: Bool, now: Date = Date(),
+    public func commitLocal(id: String, deleted: Bool, now: Date = Date(), keepPrevious: Bool = false,
                             seal: (_ rev: Int) throws -> Data) throws -> StoredRecord {
+        try pool.write { db in try commit(db, id: id, deleted: deleted, now: now, keepPrevious: keepPrevious, seal: seal) }
+    }
+
+    /// `keepPrevious`: the version this edit replaces goes to the local trash (a vault without a server has no other history).
+    private func commit(_ db: Database, id: String, deleted: Bool, now: Date = Date(), keepPrevious: Bool = false,
+                        seal: (_ rev: Int) throws -> Data) throws -> StoredRecord {
+        let existing = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [id]).map(StoredRecord.init(row:))
+        let baseRev = existing.map { $0.pending == .none ? $0.rev : $0.baseRev } ?? 0
+        let rev = baseRev + 1
+        let record = StoredRecord(id: id, rev: rev, seq: existing?.seq ?? 0, deleted: deleted,
+                                  blob: try seal(rev), updatedAt: Int(now.timeIntervalSince1970),
+                                  pending: deleted ? .delete : .put, baseRev: baseRev)
+        if keepPrevious, let existing, !existing.deleted { try trash(existing, reason: deleted ? "local-delete" : "local-edit", db) }
+        try write(record, db)
+        return record
+    }
+
+    /// Conflict on the shared manifest: take the server's record and write the merged manifest on top of it, as one step.
+    public func resolveManifestConflict(current: StoredRecord, id: String, seal: (_ rev: Int) throws -> Data) throws {
         try pool.write { db in
-            let existing = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [id]).map(StoredRecord.init(row:))
-            let baseRev = existing.map { $0.pending == .none ? $0.rev : $0.baseRev } ?? 0
-            let rev = baseRev + 1
-            let record = StoredRecord(id: id, rev: rev, seq: existing?.seq ?? 0, deleted: deleted,
-                                      blob: try seal(rev), updatedAt: Int(now.timeIntervalSince1970),
-                                      pending: deleted ? .delete : .put, baseRev: baseRev)
-            try write(record, db)
-            return record
+            try write(current, db)
+            _ = try commit(db, id: id, deleted: false, seal: seal)
+        }
+    }
+
+    /// A remote delete whose marker did not verify: mark it rejected and, if `restore` is given, write the kept version back
+    /// as a new revision on top of it, in one transaction (a crash between the two would leave the forged delete honoured).
+    public func rejectTombstone(id: String, rev: Int, restore seal: ((_ rev: Int) throws -> Data)?) throws {
+        try pool.write { db in
+            try db.execute(sql: "UPDATE records SET tomb_ok = ? WHERE id = ? AND rev = ? AND deleted = 1 AND pending = 0",
+                           arguments: [StoredRecord.TombstoneState.rejected.rawValue, id, rev])
+            if let seal { _ = try commit(db, id: id, deleted: false, seal: seal) }
         }
     }
 
@@ -303,6 +326,22 @@ public final class LocalStore: Sendable {
         }
     }
 
+    /// Like `rebase`, for a record that is pending *now*: read and re-based in one transaction, so an edit saved a moment ago
+    /// is the one that gets re-sealed (`seal` receives that current record).
+    @discardableResult
+    public func rebasePending(id: String, serverRev: Int, seal: (_ current: StoredRecord, _ rev: Int) throws -> Data) throws -> Bool {
+        try pool.write { db in
+            guard let cur = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [id]).map(StoredRecord.init(row:)),
+                  cur.pending != .none, cur.baseRev != serverRev else { return false }
+            var next = cur
+            next.rev = serverRev + 1
+            next.baseRev = serverRev
+            next.blob = try seal(cur, next.rev)
+            try write(next, db)
+            return true
+        }
+    }
+
     /// Set by `Vault.acknowledgeServerReset`: the next complete pull re-uploads whatever the server no longer has.
     public func reseedPending() throws -> Bool { try getMeta("reseed") != nil }
     public func setReseedPending(_ on: Bool) throws {
@@ -311,16 +350,24 @@ public final class LocalStore: Sendable {
     }
 
     /// Marks a pending record as accepted by the server, unless it changed again in the meantime.
-    public func confirmPushed(pushed: StoredRecord, server: StoredRecord) throws {
+    /// Returns false when it did change: the caller must then re-base the newer edit on `server`.
+    @discardableResult
+    public func confirmPushed(pushed: StoredRecord, server: StoredRecord) throws -> Bool {
         try pool.write { db in
             guard let cur = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [pushed.id]).map(StoredRecord.init(row:)),
-                  cur.pending != .none, cur.blob == pushed.blob, cur.rev == pushed.rev else { return }
+                  cur.pending != .none, cur.blob == pushed.blob, cur.rev == pushed.rev else { return false }
             try write(server, db)
+            return true
         }
     }
 
     /// Replaces local state with the server's current record (conflict resolution: remote wins).
-    public func overwrite(with r: StoredRecord) throws { try pool.write { try write(r, $0) } }
+    /// A delete taken over this way still has to pass the marker check like one received by a pull.
+    public func overwrite(with r: StoredRecord) throws {
+        var incoming = r
+        incoming.tombstone = r.deleted ? .unverified : .verified
+        try pool.write { try write(incoming, $0) }
+    }
 
     // MARK: trash, tombstone verification, integrity state
 

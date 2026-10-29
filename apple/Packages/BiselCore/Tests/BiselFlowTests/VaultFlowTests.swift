@@ -362,6 +362,72 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("a push the server accepted but never answered is recognised on retry: no duplicate '(conflict)' item")
+    func lostPushResponse() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            try await a.bootstrap(server)
+            let item = try await a.vault.save(login("Once", password: "p"))
+            let id = try #require(try await a.vault.identity())
+            // The push reaches the server; the answer never comes back.
+            let store = try LocalStore(location: a.location, secrets: FileSecretStore(directory: a.location.directory))
+            let rec = try #require(try store.pendingRecords().first { $0.id == item.id })
+            let outcome = try await a.signedClientFactory(server.url, id.deviceID).put(id: rec.id, baseRev: rec.baseRev, blob: rec.blob, epoch: id.epoch)
+            guard case .accepted = outcome else { Issue.record("the first push should be accepted"); return }
+
+            let report = try await a.vault.sync()
+            #expect(report.conflicts.isEmpty && report.deferredConflicts.isEmpty)
+            #expect(try await a.vault.items().items.map(\.title) == ["Once"])
+            #expect(try await a.vault.pendingChanges() == 0)
+        }
+    }
+
+    @Test("an edit made while its own earlier version is being pushed continues from it: no '(conflict)' copy of the user's own item")
+    func editDuringPush() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            try await a.bootstrap(server)
+            var item = try await a.vault.save(login("Busy", password: "v0"))
+            try await a.vault.sync()
+            for round in 1...3 {
+                item.password = "v\(round)-a"
+                _ = try await a.vault.save(item)
+                let syncing = Task { try await a.vault.sync() }
+                for n in 0..<6 {
+                    item.password = "v\(round)-b\(n)"
+                    _ = try await a.vault.save(item)
+                    try await Task.sleep(for: .milliseconds(6))
+                }
+                _ = try await syncing.value
+                try await a.vault.sync()
+            }
+            let titles: [String]
+            do { titles = try await a.vault.items().items.map(\.title) } catch { Issue.record("items() threw \(error)"); return }
+            #expect(titles == ["Busy"], "no conflict copies of the user's own edits")
+            #expect(try await a.vault.revealPassword(id: item.id) == "v3-b5")
+            #expect(try await a.vault.pendingChanges() == 0)
+        }
+    }
+
+    @Test("a forged delete that arrives as the answer to a push is checked like any other: it is rejected, the user's edit survives")
+    func forgedDeleteThroughConflict() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            try await a.bootstrap(server)
+            var item = try await a.vault.save(login("Target", password: "v1"))
+            try await a.vault.sync()
+            try server.sql("UPDATE items SET deleted = 1, rev = rev + 1, blob = 'AAAA' WHERE id = '\(item.id)'")
+            item.password = "v2"
+            _ = try await a.vault.save(item)
+            let report = try await a.vault.sync()
+            #expect(report.rejectedTombstones == [item.id], "the marker did not verify")
+            #expect(report.conflicts.count == 1)
+            let listing = try await a.vault.items()
+            let copy = try #require(listing.items.first { $0.title == "Target (conflict)" })
+            #expect(try await a.vault.revealPassword(id: copy.id) == "v2", "the edit lives on in the copy")
+        }
+    }
+
     @Test("recover from the 24 words on a fresh store; wrong or rotated-away phrases do not work")
     func recoveryFromPhrase() async throws {
         try await TestServer.with { server in
