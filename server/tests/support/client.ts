@@ -69,6 +69,26 @@ export async function randomX25519Pub(): Promise<string> {
   return b64u(await subtle.exportKey("raw", k.publicKey));
 }
 
+/** The vault-admin key: Ed25519 by a key derived from VK (the real clients derive it with HKDF; the server only sees the public key). */
+export interface AdminKey {
+  pub: string;
+  sign(message: Uint8Array): Promise<Uint8Array>;
+}
+export async function newAdminKey(): Promise<AdminKey> {
+  const k = await recoveryKeyFromSeed(randomBytes(32));
+  return { pub: k.pub, sign: k.sign };
+}
+/** The admin key the tests' "owner" currently holds (moves on every successful rotation). */
+export const adminState: { key: AdminKey | null } = { key: null };
+
+/** Routes that need the second (vault-admin) signature. */
+export function needsAdmin(method: string, path: string): boolean {
+  return (
+    (method === "POST" && (path === "/v1/rotate" || path === "/v1/devices" || path === "/v1/recovery/rotate")) ||
+    (method === "DELETE" && path.startsWith("/v1/devices/"))
+  );
+}
+
 export function pct(s: string): string {
   return encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
 }
@@ -98,7 +118,13 @@ export async function prepare(
   principal: Principal,
   method: string,
   path: string,
-  opts: { query?: Record<string, string | number>; json?: unknown; rawBody?: Buffer } & SignOptions = {},
+  opts: {
+    query?: Record<string, string | number>;
+    json?: unknown;
+    rawBody?: Buffer;
+    /** undefined: sign with the owner's admin key when the route needs it; false: never; a key: that one. */
+    admin?: AdminKey | false;
+  } & SignOptions = {},
 ): Promise<Prepared> {
   const query = opts.query ?? {};
   const body = opts.rawBody ?? (opts.json === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(opts.json)));
@@ -107,6 +133,8 @@ export async function prepare(
   const bodyHash = createHash("sha256").update(body).digest("hex");
   const signed = [method, path, canonicalQuery(query), bodyHash, String(ts), nonce].join("\n");
   const sig = await principal.sign(new TextEncoder().encode(signed));
+  const adminKey = opts.admin === false ? null : (opts.admin ?? (needsAdmin(method, path) ? adminState.key : null));
+  const adminSig = adminKey ? b64u(await adminKey.sign(new TextEncoder().encode(`bisel-admin/v1\n${principal.id}\n${signed}`))) : null;
   return {
     method,
     path,
@@ -117,6 +145,7 @@ export async function prepare(
       "X-Bisel-Ts": String(ts),
       "X-Bisel-Nonce": nonce,
       "X-Bisel-Sig": b64u(sig),
+      ...(adminSig ? { "X-Bisel-Admin": adminSig } : {}),
       ...(body.length ? { "Content-Type": "application/json" } : {}),
     },
   };

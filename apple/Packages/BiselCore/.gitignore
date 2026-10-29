@@ -1,2 +1,9 @@
 .build/
 .swiftpm/
+
+software-keys.json
+secret-*
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.bisel-backup

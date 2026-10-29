@@ -19,10 +19,11 @@ struct CLIFlowTests {
     }()
 
     @discardableResult
-    static func run(_ args: [String], expectSuccess: Bool = true) throws -> Result {
+    static func run(_ args: [String], env: [String: String] = [:], expectSuccess: Bool = true) throws -> Result {
         let p = Process()
         p.executableURL = binary
         p.arguments = args
+        p.environment = ProcessInfo.processInfo.environment.merging(env) { $1 }
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
@@ -47,7 +48,7 @@ struct CLIFlowTests {
         try await TestServer.with { server in
             let srv = server.url.absoluteString
             // First device
-            let boot = try Self.run(["bootstrap"] + home("a") + ["--server", srv, "--token", token, "--name", "Mac A"])
+            let boot = try Self.run(["bootstrap"] + home("a") + ["--server", srv, "--name", "Mac A"], env: ["BISEL_TOKEN": token])
             phrase = try #require(boot.out.split(separator: "\n").last.map(String.init))
             #expect(phrase.split(separator: " ").count == 24)
             #expect(boot.err.contains("SOFTWARE KEY STORE IN USE"), "software keys must be loud")
@@ -60,6 +61,9 @@ struct CLIFlowTests {
             try Self.run(["enroll", "request"] + home("b") + ["--server", srv, "--name", "Mac B", "-o", req])
             try Self.run(["enroll", "approve"] + home("a") + [req])
             try Self.run(["enroll", "complete"] + home("b"))
+            let code = try Self.run(["verify-code"] + home("a")).out.trimmingCharacters(in: .whitespacesAndNewlines)
+            #expect(try Self.run(["verify-code"] + home("b")).out.trimmingCharacters(in: .whitespacesAndNewlines) == code, "both humans see the same code")
+            try Self.run(["confirm-enrollment"] + home("b") + [code])
             let onB = try Self.run(["get"] + home("b") + [itemID, "--reveal", "--json"])
             let json = try #require(try JSONSerialization.jsonObject(with: Data(onB.out.utf8)) as? [String: Any])
             #expect(json["password"] as? String == "pw-from-A")
@@ -76,7 +80,8 @@ struct CLIFlowTests {
             // Revoke B
             let devices = try Self.run(["devices"] + home("a")).out
             let bID = try #require(devices.split(separator: "\n").first { $0.contains("Mac B") }?.split(separator: " ").first.map(String.init))
-            try Self.run(["revoke"] + home("a") + [bID])
+            let revoked = try Self.run(["revoke"] + home("a") + ["--", bID])
+            #expect(revoked.out.contains("it may have read"))
             let after = try Self.run(["sync"] + home("b"), expectSuccess: false)
             #expect(after.status != 0)
             #expect(after.err.contains("notAuthorized"))
@@ -86,6 +91,7 @@ struct CLIFlowTests {
             try Self.run(["enroll", "request"] + home("h") + ["--server", srv, "--name", "Mac H", "-o", req3])
             try Self.run(["enroll", "approve"] + home("a") + [req3])
             try Self.run(["enroll", "complete"] + home("h"))
+            try Self.run(["confirm-enrollment"] + home("h") + [try Self.run(["verify-code"] + home("a")).out.trimmingCharacters(in: .whitespacesAndNewlines)])
             #expect(try Self.run(["rotate-key"] + home("a")).out.contains("epoch 3"), "revoke was epoch 2, this is 3")
             let adopted = try Self.run(["sync"] + home("h"))
             #expect(adopted.out.contains("rotated on another device"))
@@ -93,9 +99,9 @@ struct CLIFlowTests {
             #expect(try Self.run(["get"] + home("h") + [itemID, "--reveal"]).out.contains("A2"))
 
             // Recovery on an empty home
-            try Self.run(["recover"] + home("c") + ["--server", srv, "--phrase", phrase])
+            try Self.run(["recover"] + home("c") + ["--server", srv], env: ["BISEL_PHRASE": phrase])
             #expect(try Self.run(["list"] + home("c")).out.contains("GitHub (conflict)"))
-            let bad = try Self.run(["recover"] + home("d") + ["--server", srv, "--phrase", phrase.replacingOccurrences(of: "a", with: "b")], expectSuccess: false)
+            let bad = try Self.run(["recover"] + home("d") + ["--server", srv], env: ["BISEL_PHRASE": phrase.replacingOccurrences(of: "a", with: "b")], expectSuccess: false)
             #expect(bad.status != 0)
 
             try Self.run(["backup", "export"] + home("c") + [backupFile])
@@ -104,13 +110,13 @@ struct CLIFlowTests {
         // New server, restore from the file.
         try await TestServer.with { server in
             let srv = server.url.absoluteString
-            try Self.run(["backup", "import"] + home("f") + [backupFile, "--phrase", phrase, "--server", srv, "--token", token])
+            try Self.run(["backup", "import"] + home("f") + [backupFile, "--server", srv], env: ["BISEL_PHRASE": phrase, "BISEL_TOKEN": token])
             let titles = try Self.run(["list"] + home("f")).out
             #expect(titles.contains("GitHub") && titles.contains("(conflict)"))
             let pw = try Self.run(["get"] + home("f") + [itemID, "--reveal"]).out
             #expect(pw.contains("A2"), "the A edit (remote wins) is what the restore holds")
             // And the same phrase still opens a brand-new install on the restored server.
-            try Self.run(["recover"] + home("g") + ["--server", srv, "--phrase", phrase])
+            try Self.run(["recover"] + home("g") + ["--server", srv], env: ["BISEL_PHRASE": phrase])
         }
     }
 }

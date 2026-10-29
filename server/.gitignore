@@ -8,3 +8,11 @@ node_modules
 .env.*
 test-results
 playwright-report
+
+# never track local databases, keys or certificates
+*.sqlite
+*.sqlite-wal
+*.pem
+*.p12
+*.mobileprovision
+software-keys.json

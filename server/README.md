@@ -59,7 +59,7 @@ A test client can send its own value to get an isolated rate-limit bucket.
 
 ## How a client signs requests
 
-Every request except `POST /v1/bootstrap` carries four headers:
+Every request except `POST /v1/bootstrap` carries four headers (plus `X-Bisel-Admin` on the destructive routes, below):
 
 ```
 X-Bisel-Device: <device id>            (the literal string "recovery" for recovery-key requests)
@@ -117,6 +117,14 @@ PUT\n/v1/items/<id>\n\n44ea9931e45478b124af6fb811fcdfc8cbf68a330f748ea8b30ef56de
 
 A reference implementation (Node WebCrypto, ~100 lines) is in `tests/support/client.ts`.
 
+### The vault-admin signature (`X-Bisel-Admin`)
+
+`POST /v1/rotate`, `POST /v1/devices`, `DELETE /v1/devices/:id` and `POST /v1/recovery/rotate` need a second signature: Ed25519 by the
+**vault-admin key** (seed `HKDF(VK, "bisel/v1/admin-sig")`; its raw 32-byte public key is registered as `admin_pubkey` at bootstrap and
+replaced by `new_admin_pubkey` on every rotation). It signs the UTF-8 string `bisel-admin/v1\n<X-Bisel-Device>\n<the exact string the device signature covers>`,
+sent base64url in `X-Bisel-Admin`. A missing or wrong one is `403 {"error":"admin_signature_required"}` (the caller is already authenticated).
+Because the canonical string includes the nonce and body hash, a signature cannot be reused for another request or by another device.
+
 ### Errors for authenticated requests
 
 Once a request is authenticated, failures carry a JSON body `{"error": "<code>", ...}`:
@@ -126,6 +134,7 @@ Once a request is authenticated, failures carry a JSON body `{"error": "<code>",
 | 400 | `invalid_request` / `invalid_json` / `invalid_query` / `invalid_id` / `invalid_key` | bad body, query, id, or public key |
 | 404 | `not_found` | item or device id unknown (has a JSON body; auth failures have none) |
 | 409 | `conflict` | stale `base_rev`; body `{"error":"conflict","current": <item record or null>}`. For `/v1/rotate`: `{"error":"conflict","epoch","head_seq"}`, nothing was changed |
+| 403 | `admin_signature_required` | destructive route without a valid vault-admin signature |
 | 409 | `stale_epoch` | key material built for an older vault-key epoch; body has the current `epoch` |
 | 409 | `exists` | device id already registered |
 | 413 | `too_large` | blob over 256 KiB, or a body over the route's cap |
@@ -158,7 +167,8 @@ an already-bootstrapped server all return the uniform 404.
   },
   "recovery_pubkey": "<Ed25519 raw 32B>",
   "recovery_enc_pubkey": "<X25519 raw 32B>",
-  "recovery_envelope": "<recovery envelope>"
+  "recovery_envelope": "<recovery envelope>",
+  "admin_pubkey": "<Ed25519 raw 32B, derived from VK>"
 }
 ```
 `kind` is a free tag `^[a-z0-9_-]{1,32}$` (`mac`, `iphone`, ...). Response `201 {"device_id","head_seq":0,"epoch":1}`.
@@ -173,7 +183,8 @@ The server imports both public keys, so a malformed key gives `400 invalid_key` 
   "next_since": 42,               // seq of the last returned item (or `since` if none): pass it as the next `since`
   "head_seq": 42,                 // current head, consistent with this snapshot
   "epoch": 1,                     // current vault-key epoch
-  "devices": [ { "id","name","kind","sig_pubkey","enc_pubkey","created_at","last_seen_at","revoked_at" } ],
+  "devices": [ { "id","name","kind","sig_pubkey","enc_pubkey","created_at","last_seen_at" /* hour */,"revoked_at","activates_at" } ],
+  "events": [ { "id","ts","device_id","type","subject_id" } ],   // since `events_since` (omit: the latest 50); types: bootstrap approve revoke rotate recovery recovery_rotate
   "recovery": { "alg": "ed25519", "pubkey": "...", "enc_pubkey": "...", "envelope": "..." }   // for .bisel-backup files and rotation
 }
 ```
@@ -192,8 +203,14 @@ Body `{"base_rev": <int>, "epoch": <int>, "blob": "<b64url, 1..262144 bytes deco
 
 ### DELETE /v1/items/:id?base_rev=\<n\>
 
-Tombstones the item (`deleted: true`, empty blob, new `rev` and `seq`). `200 {"item": record}`;
+Body `{"epoch": <int>, "marker": "<b64url, <= 256 bytes>"}`: the marker is a short value sealed under VK that other devices verify before honouring the delete; it is stored as the tombstone's blob. Tombstones the item (`deleted: true`, blob = marker, new `rev` and `seq`); the previous state goes to `item_history`. `200 {"item": record}`;
 `409` on stale `base_rev` or if already deleted (with `current`); `404 not_found` if the id never existed.
+
+### GET /v1/history?id=&after=&limit=
+
+`200 {"entries":[{"id","item_id","rev","kind","blob","deleted","epoch","replaced_at"}]}`, oldest first, `after` = last `id` seen, `limit` 1..500.
+`kind` `overwrite` / `delete`: the whole previous blob (or tombstone marker); `rotate`: the previous 80-char wrapped item key. Rows older than
+`HISTORY_RETENTION_DAYS` (30) are pruned on writes. Ciphertext only.
 
 ### GET /v1/devices
 
@@ -222,6 +239,8 @@ Vault-key rotation (SPEC §4), optionally revoking a device, in one atomic D1 ba
   "base_epoch": 1,                 // epoch the client's snapshot is at
   "base_seq": 42,                  // head_seq the client's item snapshot is at
   "revoke": "<device id>" ,        // or null to rotate only; not the caller, not also listed in `devices`
+  "new_admin_pubkey": "<Ed25519 raw 32B, derived from the NEW VK>",   // the request itself is signed with the OLD admin key
+  "tombstones": [ { "id": "...", "rev": 2, "marker": "<tombstone marker sealed under the NEW VK>" } ],   // every deleted record
   "items": [ { "id": "...", "rev": 3, "key": "<80 b64url chars = new 60-byte wrapped item key>" } ],
   "devices": [ { "id": "...", "envelope": "<VK_new sealed to that device>" } ],   // every device that stays, the caller included
   "recovery_envelope": "<VK_new sealed to the recovery encryption key>"
@@ -230,13 +249,13 @@ Vault-key rotation (SPEC §4), optionally revoking a device, in one atomic D1 ba
 
 Applied only if **all** of this holds at the moment of the transaction, otherwise `409 conflict` and nothing changes:
 `epoch == base_epoch`; `head_seq == base_seq` (no item was written since the snapshot); `items` is exactly the set of live
-(not deleted) items, each at exactly the stated `rev`; `devices` is exactly the set of active devices minus `revoke`; `revoke`,
+(not deleted) items, each at exactly the stated `rev`, and `tombstones` is exactly the set of deleted records; `devices` is exactly the set of active devices minus `revoke`; `revoke`,
 if given, is an active device.
 
 Effects: each item's blob gets its first 80 characters replaced by `key` (payload, `rev` and AAD are untouched) and a fresh
-`seq` (`base_seq + 1 … base_seq + n` in request order); each listed device gets its new envelope; `recovery_envelope` is replaced;
+`seq` (`base_seq + 1 … base_seq + n` in request order, tombstones after them); each listed device gets its new envelope; `recovery_envelope` and the admin key are replaced; the replaced wrapped keys go to `item_history`;
 `revoke` is revoked and its envelope wiped; `epoch += 1`; `head_seq += n`.
-`200 {"epoch","head_seq","rotated_items","revoked"}`. Validation errors (shape, duplicates, caller missing from `devices`,
+`200 {"epoch","head_seq","rotated_items","rotated_tombstones","revoked"}`. Validation errors (shape, duplicates, caller missing from `devices`,
 `revoke` equal to the caller) are `400` and never reach the database.
 
 ### GET /v1/envelope
@@ -249,7 +268,7 @@ Signed with the **Ed25519 recovery key** (`X-Bisel-Device: recovery`), no device
 - Empty body: `200 {"recovery_envelope","head_seq","epoch"}`. Use it to fetch the envelope and derive VK.
 - Body `{"device": {id,name,kind,sig_pubkey,enc_pubkey,envelope}, "epoch": <from step 1>}`: additionally registers that
   replacement device (its `envelope` is VK encrypted to its own `enc_pubkey`, which the client can build after step one).
-  `200 {"recovery_envelope","head_seq","epoch","device":{...}}`; `409 exists` if the id is taken, `409 stale_epoch` if the
+  `200 {"recovery_envelope","head_seq","epoch","device":{..., "activates_at"}}` (`activates_at` is non-null when `RECOVERY_ACTIVATION_DELAY_SECONDS` > 0: the new device gets the bare 404 until then); `409 exists` if the id is taken, `409 stale_epoch` if the
   key was rotated between the two calls (repeat from step 1). From then on the new device authenticates normally.
 
 A fresh-install recovery is therefore: (1) session with empty body, (2) decrypt VK, (3) session with `device`,

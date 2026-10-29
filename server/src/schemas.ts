@@ -36,9 +36,16 @@ const epoch = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
 /** Client-chosen opaque ids (devices, items). E.g. 16 random bytes as base64url, or a UUID. */
 export const IdSchema = z.string().regex(/^[A-Za-z0-9_-]{16,64}$/);
 
+/** Device names are shown in UIs and logs: no control, format (bidi override) or line/paragraph separator characters. */
+const deviceName = z
+  .string()
+  .min(1)
+  .max(100)
+  .regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]+$/u, "control or format characters are not allowed");
+
 export const DeviceRegistrationSchema = z.strictObject({
   id: IdSchema,
-  name: z.string().min(1).max(100),
+  name: deviceName,
   kind: z.string().regex(/^[a-z0-9_-]{1,32}$/),
   /** P-256 public key, X9.63 uncompressed (65 bytes), base64url. */
   sig_pubkey: b64(65),
@@ -59,6 +66,8 @@ export const BootstrapSchema = z.strictObject({
   /** X25519 public key, raw 32 bytes, base64url: the recovery envelope is HPKE-sealed to it. */
   recovery_enc_pubkey: b64(32),
   recovery_envelope: b64(MAX_KEY_ENVELOPE_BYTES),
+  /** Ed25519 public key derived from VK: the vault-admin key (second signature on destructive routes). */
+  admin_pubkey: b64(32),
 });
 
 export const RecoverySessionSchema = z.strictObject({ device: DeviceRegistrationSchema, epoch });
@@ -69,6 +78,11 @@ export const RecoveryRotateSchema = z.strictObject({
   recovery_envelope: b64(MAX_KEY_ENVELOPE_BYTES),
   epoch,
 });
+
+/** Tombstone: a marker sealed under VK (AAD id|rev|tomb), so other devices can tell a real delete from a forged one. */
+const marker = z.string().min(1).refine(isB64url, "must be unpadded base64url").refine((s) => b64urlByteLength(s) <= 256, "too large");
+
+export const DeleteItemSchema = z.strictObject({ epoch, marker });
 
 export const PutItemSchema = z.strictObject({
   base_rev: uint,
@@ -89,6 +103,13 @@ export const RotateSchema = z.strictObject({
   base_seq: uint,
   /** Revoke this device in the same transaction (null = rotate only). */
   revoke: IdSchema.nullable(),
+  /** Ed25519 public key derived from the new VK. The request's admin signature (made with the old key) authorises it. */
+  new_admin_pubkey: b64(32),
+  /** Every tombstone, re-sealed under the new VK. */
+  tombstones: z
+    .array(z.strictObject({ id: IdSchema, rev: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER), marker }))
+    .max(MAX_ROTATE_ITEMS)
+    .refine((a) => unique(a.map((i) => i.id)), "duplicate tombstone id"),
   items: z
     .array(
       z.strictObject({
@@ -118,11 +139,20 @@ const intParam = (def: number) =>
 
 export const SyncQuerySchema = z.strictObject({
   since: intParam(0),
+  /** Only events with a larger id (omit: the latest 50). */
+  events_since: z.string().regex(/^\d{1,15}$/).transform(Number).optional(),
   limit: intParam(200).pipe(z.number().int().min(1).max(500)),
 });
 
 export const DeleteQuerySchema = z.strictObject({
   base_rev: z.string().regex(/^\d{1,15}$/).transform(Number),
+});
+
+export const HistoryQuerySchema = z.strictObject({
+  id: IdSchema.optional(),
+  /** History row id cursor: only rows after it. */
+  after: intParam(0),
+  limit: intParam(100).pipe(z.number().int().min(1).max(500)),
 });
 
 export const EmptyQuerySchema = z.strictObject({});

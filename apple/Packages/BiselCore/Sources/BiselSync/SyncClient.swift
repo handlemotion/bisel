@@ -69,7 +69,20 @@ public struct SyncPage: Sendable {
     /// Epoch of the vault key currently in force.
     public let epoch: Int
     public let devices: [DeviceInfo]
+    public let events: [ServerEvent]
     public let recovery: RecoveryMaterial?
+}
+
+/// A previous state of an item, as the server retained it (30 days).
+public struct HistoryEntry: Sendable, Equatable {
+    public enum Kind: String, Sendable { case overwrite, delete, rotate }
+    public let serverID: Int
+    public let itemID: String
+    public let rev: Int
+    public let kind: Kind
+    public let blob: Data
+    public let epoch: Int
+    public let replacedAt: Date
 }
 
 /// Signed HTTP client for SPEC §6. Stateless apart from the URLSession.
@@ -86,28 +99,43 @@ public struct SyncClient: Sendable {
             config.timeoutIntervalForRequest = 20
             config.urlCache = nil
             config.httpCookieStorage = nil
-            self.session = URLSession(configuration: config)
+            config.waitsForConnectivity = false
+            // Never follow a redirect: the signed headers must not travel to another origin, and the real server does not redirect.
+            self.session = URLSession(configuration: config, delegate: RefuseRedirects(), delegateQueue: nil)
         }
     }
+
+    /// https only; plain http is accepted solely for a server on this machine (development).
+    static func isAcceptable(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased() else { return false }
+        if scheme == "https" { return true }
+        return scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1" || host.hasSuffix(".localhost"))
+    }
+
+    /// No response bigger than this is read (a page of 200 items of 256 KiB is the worst legitimate answer).
+    static let maxResponseBytes = 64 * 1024 * 1024
 
     // MARK: endpoints
 
     public static func bootstrap(baseURL: URL, token: String, device: WireDevice, recoveryPublicKey: Data,
-                                 recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data) async throws {
+                                 recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, adminPublicKey: Data) async throws {
         let client = SyncClient(baseURL: baseURL, signer: nil)
         let body = try JSONCoding.encoder.encode(BootstrapRequest(device: device, recoveryPubkey: recoveryPublicKey.base64URLEncoded(),
                                                                  recoveryEncPubkey: recoveryEncryptionPublicKey.base64URLEncoded(),
-                                                                 recoveryEnvelope: recoveryEnvelope.base64URLEncoded()))
+                                                                 recoveryEnvelope: recoveryEnvelope.base64URLEncoded(),
+                                                                 adminPubkey: adminPublicKey.base64URLEncoded()))
         _ = try await client.send("POST", "/v1/bootstrap", body: body, headers: ["X-Bisel-Bootstrap": token])
     }
 
-    public func pull(since: Int, limit: Int = 200) async throws -> SyncPage {
-        let (data, _) = try await send("GET", "/v1/sync", query: [("since", String(since)), ("limit", String(limit))])
+    public func pull(since: Int, limit: Int = 200, eventsSince: Int? = nil) async throws -> SyncPage {
+        var query = [("since", String(since)), ("limit", String(limit))]
+        if let eventsSince { query.append(("events_since", String(eventsSince))) }
+        let (data, _) = try await send("GET", "/v1/sync", query: query)
         let page = try decode(SyncPageWire.self, data)
         let records = page.items.compactMap(\.record)
         guard records.count == page.items.count else { throw SyncError.malformedResponse }
         return SyncPage(records: records, hasMore: page.hasMore, nextSince: page.nextSince, headSeq: page.headSeq,
-                        epoch: page.epoch, devices: page.devices, recovery: page.recovery)
+                        epoch: page.epoch, devices: page.devices, events: page.events ?? [], recovery: page.recovery)
     }
 
     /// `epoch` is the epoch of the vault key the blob's item key is wrapped under.
@@ -116,8 +144,22 @@ public struct SyncClient: Sendable {
         return try await mutate("PUT", "/v1/items/\(id)", body: body)
     }
 
-    public func delete(id: String, baseRev: Int) async throws -> PutOutcome {
-        try await mutate("DELETE", "/v1/items/\(id)", query: [("base_rev", String(baseRev))])
+    /// `marker` is the sealed tombstone marker (`ItemSealer.sealTombstone`), stored as the tombstone's blob.
+    public func delete(id: String, baseRev: Int, marker: Data, epoch: Int) async throws -> PutOutcome {
+        let body = try JSONCoding.encoder.encode(DeleteItemRequest(epoch: epoch, marker: marker.base64URLEncoded()))
+        return try await mutate("DELETE", "/v1/items/\(id)", query: [("base_rev", String(baseRev))], body: body)
+    }
+
+    /// Previous states of items (overwritten, deleted, re-keyed) the server still holds.
+    public func history(itemID: String? = nil, after: Int = 0, limit: Int = 100) async throws -> [HistoryEntry] {
+        var query = [("after", String(after)), ("limit", String(limit))]
+        if let itemID { query.append(("id", itemID)) }
+        let (data, _) = try await send("GET", "/v1/history", query: query)
+        return try decode(HistoryResponse.self, data).entries.compactMap { e in
+            guard let kind = HistoryEntry.Kind(rawValue: e.kind), let blob = Data(base64URLEncoded: e.blob) else { return nil }
+            return HistoryEntry(serverID: e.id, itemID: e.itemId, rev: e.rev, kind: kind, blob: blob, epoch: e.epoch,
+                                replacedAt: Date(timeIntervalSince1970: TimeInterval(e.replacedAt)))
+        }
     }
 
     public func devices() async throws -> [DeviceInfo] {
@@ -125,12 +167,14 @@ public struct SyncClient: Sendable {
         return try decode(DevicesResponse.self, data).devices
     }
 
-    public func addDevice(_ device: WireDevice) async throws {
-        _ = try await send("POST", "/v1/devices", body: try JSONCoding.encoder.encode(device))
+    /// Needs the vault-admin signature (unlocked vault).
+    public func addDevice(_ device: WireDevice, admin: AdminSigner) async throws {
+        _ = try await send("POST", "/v1/devices", body: try JSONCoding.encoder.encode(device), admin: admin)
     }
 
-    public func revokeDevice(id: String) async throws {
-        _ = try await send("DELETE", "/v1/devices/\(id)")
+    /// Revoke without rotating (emergency). Needs the vault-admin signature.
+    public func revokeDevice(id: String, admin: AdminSigner) async throws {
+        _ = try await send("DELETE", "/v1/devices/\(id)", admin: admin)
     }
 
     /// This device's own envelope and the epoch of the vault key inside it.
@@ -142,11 +186,11 @@ public struct SyncClient: Sendable {
     }
 
     /// Replaces the recovery key (new phrase). `epoch` is the epoch of the VK the new envelope was sealed from.
-    public func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int) async throws {
+    public func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int, admin: AdminSigner) async throws {
         let body = try JSONCoding.encoder.encode(RecoveryRotateRequest(recoveryPubkey: publicKey.base64URLEncoded(),
                                                                       recoveryEncPubkey: encryptionPublicKey.base64URLEncoded(),
                                                                       recoveryEnvelope: envelope.base64URLEncoded(), epoch: epoch))
-        _ = try await send("POST", "/v1/recovery/rotate", body: body)
+        _ = try await send("POST", "/v1/recovery/rotate", body: body, admin: admin)
     }
 
     /// Step 1 of recovery: empty body, returns the recovery envelope and the epoch it belongs to. Client must be signed with `RecoverySigner`.
@@ -158,20 +202,27 @@ public struct SyncClient: Sendable {
     }
 
     /// Step 3 of recovery: registers the replacement device. `epoch` is the one step 1 returned.
-    public func recoveryRegister(device: WireDevice, epoch: Int) async throws {
-        _ = try await send("POST", "/v1/recovery/session", body: try JSONCoding.encoder.encode(RecoverySessionRequest(device: device, epoch: epoch)))
+    /// Returns when the server will let the new device sign requests (nil = immediately).
+    @discardableResult
+    public func recoveryRegister(device: WireDevice, epoch: Int) async throws -> Date? {
+        let (data, _) = try await send("POST", "/v1/recovery/session", body: try JSONCoding.encoder.encode(RecoverySessionRequest(device: device, epoch: epoch)))
+        return (try? JSONCoding.decoder.decode(RecoverySessionResponse.self, from: data))?.device?.activatesAt
+            .map { Date(timeIntervalSince1970: TimeInterval($0)) }
     }
 
     /// Vault-key rotation, atomically (`POST /v1/rotate`): new wrapped key for each live item, new envelope for each
     /// remaining device, new recovery envelope, optionally revoking one device. The server applies all of it or none.
-    public func rotate(baseEpoch: Int, baseSeq: Int, revoke: String?, items: [(id: String, rev: Int, wrappedKey: Data)],
-                       devices: [(id: String, envelope: Data)], recoveryEnvelope: Data) async throws -> RotateOutcome {
+    public func rotate(baseEpoch: Int, baseSeq: Int, revoke: String?, newAdminPublicKey: Data,
+                       items: [(id: String, rev: Int, wrappedKey: Data)], tombstones: [(id: String, rev: Int, marker: Data)],
+                       devices: [(id: String, envelope: Data)], recoveryEnvelope: Data,
+                       admin: AdminSigner) async throws -> RotateOutcome {
         let body = try JSONCoding.encoder.encode(RotateRequest(
-            baseEpoch: baseEpoch, baseSeq: baseSeq, revoke: revoke,
+            baseEpoch: baseEpoch, baseSeq: baseSeq, revoke: revoke, newAdminPubkey: newAdminPublicKey.base64URLEncoded(),
+            tombstones: tombstones.map { RotateTombstoneWire(id: $0.id, rev: $0.rev, marker: $0.marker.base64URLEncoded()) },
             items: items.map { RotateItemWire(id: $0.id, rev: $0.rev, key: $0.wrappedKey.base64URLEncoded()) },
             devices: devices.map { RotateDeviceWire(id: $0.id, envelope: $0.envelope.base64URLEncoded()) },
             recoveryEnvelope: recoveryEnvelope.base64URLEncoded()))
-        let (data, http) = try await perform("POST", "/v1/rotate", body: body)
+        let (data, http) = try await perform("POST", "/v1/rotate", body: body, admin: admin)
         if http.statusCode == 409, let c = try? JSONCoding.decoder.decode(ConflictResponse.self, from: data), c.error == "conflict" {
             return .conflict(epoch: c.epoch, headSeq: c.headSeq)
         }
@@ -199,15 +250,16 @@ public struct SyncClient: Sendable {
     }
 
     private func send(_ method: String, _ path: String, query: [(String, String)] = [], body: Data = Data(),
-                      headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
-        let (data, http) = try await perform(method, path, query: query, body: body, headers: headers)
+                      headers: [String: String] = [:], admin: AdminSigner? = nil) async throws -> (Data, HTTPURLResponse) {
+        let (data, http) = try await perform(method, path, query: query, body: body, headers: headers, admin: admin)
         try check(data, http)
         return (data, http)
     }
 
     /// Builds, signs and sends the request; returns whatever the server answered, whatever the status.
     private func perform(_ method: String, _ path: String, query: [(String, String)] = [], body: Data = Data(),
-                         headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+                         headers: [String: String] = [:], admin: AdminSigner? = nil) async throws -> (Data, HTTPURLResponse) {
+        guard Self.isAcceptable(baseURL) else { throw SyncError.network("the server address must be https") }
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else { throw SyncError.malformedResponse }
         let basePath = components.path.hasSuffix("/") ? String(components.path.dropLast()) : components.path
         let fullPath = basePath + path
@@ -231,10 +283,22 @@ public struct SyncClient: Sendable {
             request.setValue(ts, forHTTPHeaderField: "X-Bisel-Ts")
             request.setValue(nonce, forHTTPHeaderField: "X-Bisel-Nonce")
             request.setValue(try signer.sign(Data(canonical.utf8)).base64URLEncoded(), forHTTPHeaderField: "X-Bisel-Sig")
+            if let admin {
+                request.setValue(try admin.signature(device: signer.deviceHeader, canonicalRequest: canonical).base64URLEncoded(),
+                                 forHTTPHeaderField: "X-Bisel-Admin")
+            }
         }
 
-        let data: Data, response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
+        var data = Data()
+        let response: URLResponse
+        do {
+            let (bytes, r) = try await session.bytes(for: request)
+            response = r
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count > Self.maxResponseBytes { throw SyncError.malformedResponse }
+            }
+        } catch let e as SyncError { throw e }
         catch { throw SyncError.network(error.localizedDescription) }
         guard let http = response as? HTTPURLResponse else { throw SyncError.malformedResponse }
         return (data, http)
@@ -246,6 +310,8 @@ public struct SyncClient: Sendable {
         case 200..<300: return
         case 404 where data.isEmpty: throw SyncError.notAuthorized
         case 404: throw SyncError.notFound
+        case 403 where (try? JSONCoding.decoder.decode(ConflictResponse.self, from: data))?.error == "admin_signature_required":
+            throw SyncError.server(status: 403, code: "admin_signature_required")
         case 409:
             let body = try? JSONCoding.decoder.decode(ConflictResponse.self, from: data)
             if body?.error == "exists" { throw SyncError.exists }
@@ -262,4 +328,12 @@ public struct SyncClient: Sendable {
 enum JSONCoding {
     static let encoder: JSONEncoder = { let e = JSONEncoder(); e.keyEncodingStrategy = .convertToSnakeCase; return e }()
     static let decoder: JSONDecoder = { let d = JSONDecoder(); d.keyDecodingStrategy = .convertFromSnakeCase; return d }()
+}
+
+/// Answers every redirect with "no": the response is then the 3xx itself, which `check` reports as a server error.
+private final class RefuseRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
 }

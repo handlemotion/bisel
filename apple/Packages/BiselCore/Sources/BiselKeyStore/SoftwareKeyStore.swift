@@ -19,6 +19,13 @@ public final class SoftwareDeviceKeyStore: DeviceKeyStore, @unchecked Sendable {
     private static let log = Logger(subsystem: "app.bisel", category: "keystore")
 
     public init(directory: URL) {
+        #if !DEBUG
+        // The software store keeps device keys in a plain file. A non-Debug build must never run it by accident
+        // (for example an archive made from a project that enabled the SoftwareKeys trait).
+        guard ProcessInfo.processInfo.environment["BISEL_ALLOW_SOFTWARE_KEYS"] == "1" else {
+            fatalError("SoftwareDeviceKeyStore in a non-Debug build: set BISEL_ALLOW_SOFTWARE_KEYS=1 only for headless test tools")
+        }
+        #endif
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         url = directory.appendingPathComponent("software-keys.json")
         let message = "BISEL_SOFTWARE_KEYS: SOFTWARE KEY STORE IN USE. Device keys are in a plain file (\(url.path)). TEST ONLY, NOT SECURE."

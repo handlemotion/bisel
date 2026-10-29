@@ -10,6 +10,7 @@ public final class TestServer: @unchecked Sendable {
     private let process: Process
     private let stateDirectory: URL
     private let logURL: URL
+    private let serverDirectory: String
 
     public enum Failure: Error, CustomStringConvertible {
         case serverDirectoryMissing(String)
@@ -23,8 +24,8 @@ public final class TestServer: @unchecked Sendable {
     }
 
     /// Runs `body` against a fresh, un-bootstrapped server and always shuts it down.
-    public static func with<T>(_ body: (TestServer) async throws -> T) async throws -> T {
-        let server = try await TestServer.start()
+    public static func with<T>(vars: [String: String] = [:], _ body: (TestServer) async throws -> T) async throws -> T {
+        let server = try await TestServer.start(vars: vars)
         do {
             let result = try await body(server)
             server.stop()
@@ -35,7 +36,8 @@ public final class TestServer: @unchecked Sendable {
         }
     }
 
-    public static func start(serverDirectory: String? = nil) async throws -> TestServer {
+    /// `vars` are extra Worker variables for this instance, for example `["RECOVERY_ACTIVATION_DELAY_SECONDS": "3"]`.
+    public static func start(serverDirectory: String? = nil, vars: [String: String] = [:]) async throws -> TestServer {
         let dir = serverDirectory ?? ProcessInfo.processInfo.environment["BISEL_SERVER_DIR"] ?? defaultServerDirectory()
         guard FileManager.default.fileExists(atPath: dir + "/wrangler.jsonc") else { throw Failure.serverDirectoryMissing(dir) }
         let state = FileManager.default.temporaryDirectory.appendingPathComponent("bisel-test-\(UUID().uuidString)")
@@ -44,10 +46,11 @@ public final class TestServer: @unchecked Sendable {
         let log = state.appendingPathComponent("server.log")
         FileManager.default.createFile(atPath: log.path, contents: nil)
 
+        let varArguments = vars.map { "--var '\($0.key):\($0.value)'" }.joined(separator: " ")
         // A login shell so pnpm/node from mise/nvm/homebrew are on PATH.
         let script = """
         cd '\(dir)' && pnpm exec wrangler d1 migrations apply bisel --local --persist-to '\(state.path)' >/dev/null 2>&1 \
-        && exec pnpm exec wrangler dev --port \(port) --inspector-port \(inspector) --persist-to '\(state.path)'
+        && exec pnpm exec wrangler dev --port \(port) --inspector-port \(inspector) --persist-to '\(state.path)' \(varArguments)
         """
         let p = Process()
         // setsid() makes the child a process-group leader so `stop()` can take down pnpm, node and workerd together.
@@ -58,7 +61,7 @@ public final class TestServer: @unchecked Sendable {
         p.standardError = handle
         try p.run()
 
-        let server = TestServer(url: URL(string: "http://localhost:\(port)")!, process: p, state: state, log: log)
+        let server = TestServer(url: URL(string: "http://localhost:\(port)")!, process: p, state: state, log: log, directory: dir)
         for _ in 0..<240 {
             if !p.isRunning { break }
             if await server.responds() { return server }
@@ -69,8 +72,24 @@ public final class TestServer: @unchecked Sendable {
         throw Failure.didNotStart(text)
     }
 
-    private init(url: URL, process: Process, state: URL, log: URL) {
-        self.url = url; self.process = process; self.stateDirectory = state; self.logURL = log
+    private init(url: URL, process: Process, state: URL, log: URL, directory: String) {
+        self.url = url; self.process = process; self.stateDirectory = state; self.logURL = log; self.serverDirectory = directory
+    }
+
+    /// Runs SQL against this instance's local database, the way a hostile server operator (or a breach) could change it.
+    /// Test-only: lets flows tamper with what the server holds and check that clients notice.
+    public func sql(_ statement: String) throws {
+        let escaped = statement.replacingOccurrences(of: "'", with: "'\\''")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        p.arguments = ["-lc", "cd '\(serverDirectory)' && pnpm exec wrangler d1 execute bisel --local --persist-to '\(stateDirectory.path)' --command '\(escaped)'"]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
+        try p.run()
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { throw Failure.didNotStart("sql failed: \(text)") }
     }
 
     public func stop() {

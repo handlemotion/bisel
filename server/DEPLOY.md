@@ -111,6 +111,12 @@ Why it is needed: the Worker's own failed-auth counter only *delays* repeat offe
 
 Do **not** add a WAF rule that blocks unknown paths: Cloudflare's block page would differ from the Worker's bare 404 and reveal that the hostname is live.
 
+## 7b. Settings that matter (in `wrangler.jsonc`, `env.prod.vars`)
+
+- `RECOVERY_ACTIVATION_DELAY_SECONDS` = `86400`: a device added through the 24 words cannot sign requests for 24 h, every enrolled device announces it at its next sync, and any of them can cancel it by revoking. This protects you if the phrase is ever seen by someone else. The price: **recovering after losing every device takes a day** before the new Mac can sync (you can restore a `.bisel-backup` onto a new server at once instead). Set `"0"` to recover instantly.
+- `HISTORY_RETENTION_DAYS` = `30`: the server keeps the previous version of every overwritten, deleted or re-keyed item for 30 days, so a bad write by a stolen device key can be undone from the app.
+- Destructive routes (rotate, approve, revoke, replace the recovery key) need a vault-admin signature that only an unlocked app can make; there is nothing to configure.
+
 ## 8. First start
 
 1. In the Mac app onboarding enter `https://<label>.bisel.app`, the bootstrap token, and a device name. Write the 24 words on paper.

@@ -6,6 +6,7 @@ import {
   clientIp,
   decoyVerify,
   deny,
+  requireAdmin,
   readBodyCapped,
   recordFailure,
   type AppEnv,
@@ -14,9 +15,11 @@ import { b64urlByteLength, b64urlDecode } from "./encoding";
 import {
   BODY_LIMITS,
   BootstrapSchema,
+  DeleteItemSchema,
   DeleteQuerySchema,
   DeviceApprovalSchema,
   EmptyQuerySchema,
+  HistoryQuerySchema,
   IdSchema,
   MAX_BLOB_BYTES,
   PutItemSchema,
@@ -58,6 +61,8 @@ app.use("*", async (c, next) => {
 
 const deviceAuth = authenticate("device");
 const recoveryAuth = authenticate("recovery");
+/** Destructive routes: the device signature is not enough, the vault-admin signature (needs VK) must follow. */
+const adminAuth = requireAdmin();
 
 app.onError((err, c) => {
   // Auth and bootstrap catch their own errors and answer 404; anything reaching here happened
@@ -133,13 +138,33 @@ async function validRecoveryKeys(sigPub: string, encPub: string): Promise<boolea
   }
 }
 
-function insertDevice(db: D1Database, d: DeviceRegistration, now: number, epoch: number) {
+function insertDevice(db: D1Database, d: DeviceRegistration, now: number, epoch: number, activatesAt: number | null = null) {
   return db
     .prepare(
-      `INSERT INTO devices (id, name, kind, sig_alg, sig_pubkey, enc_pubkey, envelope, envelope_epoch, created_at)
-       VALUES (?1, ?2, ?3, 'p256', ?4, ?5, ?6, ?7, ?8)`,
+      `INSERT INTO devices (id, name, kind, sig_alg, sig_pubkey, enc_pubkey, envelope, envelope_epoch, created_at, activates_at)
+       VALUES (?1, ?2, ?3, 'p256', ?4, ?5, ?6, ?7, ?8, ?9)`,
     )
-    .bind(d.id, d.name, d.kind, d.sig_pubkey, d.enc_pubkey, d.envelope, epoch, now);
+    .bind(d.id, d.name, d.kind, d.sig_pubkey, d.enc_pubkey, d.envelope, epoch, now, activatesAt);
+}
+
+const retentionSeconds = (env: Env) => (Number(env.HISTORY_RETENTION_DAYS) || 30) * 86400;
+
+/** Previous state of an item, kept for the retention period. Same guard as the write it precedes (bound by the caller). */
+function pruneHistory(env: Env, now: number) {
+  return env.DB.prepare(
+    "DELETE FROM item_history WHERE id IN (SELECT id FROM item_history WHERE replaced_at < ?1 LIMIT 100)",
+  ).bind(now - retentionSeconds(env));
+}
+
+async function validAdminKey(pub: string): Promise<boolean> {
+  try {
+    const raw = b64urlDecode(pub);
+    if (raw.length !== 32) return false;
+    await crypto.subtle.importKey("raw", raw, { name: "Ed25519" }, false, ["verify"]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function insertEvent(db: D1Database, now: number, deviceId: string | null, type: string, subject: string | null) {
@@ -174,7 +199,7 @@ interface ItemRow {
 const itemJson = (r: ItemRow) => ({ ...r, deleted: r.deleted === 1 });
 const ITEM_COLS = "id, rev, seq, deleted, blob, updated_at";
 
-const DEVICE_PUBLIC_COLS = "id, name, kind, sig_pubkey, enc_pubkey, created_at, last_seen_at, revoked_at";
+const DEVICE_PUBLIC_COLS = "id, name, kind, sig_pubkey, enc_pubkey, created_at, last_seen_at, revoked_at, activates_at";
 
 // ---------------------------------------------------------------------------------------------
 // POST /v1/bootstrap  (one time; shared-secret auth, not signed)
@@ -216,17 +241,21 @@ app.post("/v1/bootstrap", async (c) => {
   c.set("body", body);
   const parsed = parseJson(c, BootstrapSchema, BODY_LIMITS.bootstrap);
   if (!parsed.ok) return parsed.res;
-  const { device, recovery_pubkey, recovery_enc_pubkey, recovery_envelope } = parsed.data;
-  if (!(await validDeviceKeys(device)) || !(await validRecoveryKeys(recovery_pubkey, recovery_enc_pubkey))) {
+  const { device, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey } = parsed.data;
+  if (
+    !(await validDeviceKeys(device)) ||
+    !(await validRecoveryKeys(recovery_pubkey, recovery_enc_pubkey)) ||
+    !(await validAdminKey(admin_pubkey))
+  ) {
     return bad(c, "invalid_key");
   }
 
   try {
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO meta (id, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, head_seq, epoch, created_at)
-         VALUES (1, 'ed25519', ?1, ?2, ?3, 0, 1, ?4)`,
-      ).bind(recovery_pubkey, recovery_enc_pubkey, recovery_envelope, now),
+        `INSERT INTO meta (id, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, head_seq, epoch, created_at)
+         VALUES (1, 'ed25519', ?1, ?2, ?3, ?4, 0, 1, ?5)`,
+      ).bind(recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, now),
       insertDevice(env.DB, device, now, 1),
       insertEvent(env.DB, now, device.id, "bootstrap", device.id),
     ]);
@@ -251,10 +280,18 @@ app.get("/v1/sync", deviceAuth, async (c) => {
   const db = c.env.DB;
 
   // One batch = one transaction: items, head_seq, epoch and the device list are a consistent snapshot.
-  const [itemsRes, metaRes, devicesRes] = await db.batch([
+  const { events_since } = q.data;
+  const [itemsRes, metaRes, devicesRes, eventsRes] = await db.batch([
     db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2`).bind(since, limit + 1),
     db.prepare("SELECT head_seq, epoch, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope FROM meta WHERE id = 1"),
     db.prepare(`SELECT ${DEVICE_PUBLIC_COLS} FROM devices ORDER BY created_at ASC, id ASC`),
+    events_since === undefined
+      ? db.prepare(
+          "SELECT id, ts, device_id, type, subject_id FROM (SELECT id, ts, device_id, type, subject_id FROM events ORDER BY id DESC LIMIT 50) ORDER BY id ASC",
+        )
+      : db
+          .prepare("SELECT id, ts, device_id, type, subject_id FROM events WHERE id > ?1 ORDER BY id ASC LIMIT 100")
+          .bind(events_since),
   ]);
   const rows = itemsRes!.results as unknown as ItemRow[];
   const meta = metaRes!.results[0] as {
@@ -274,6 +311,7 @@ app.get("/v1/sync", deviceAuth, async (c) => {
     head_seq: meta.head_seq,
     epoch: meta.epoch,
     devices: devicesRes!.results,
+    events: eventsRes!.results,
     recovery: {
       alg: meta.recovery_alg,
       pubkey: meta.recovery_pubkey,
@@ -304,8 +342,16 @@ app.put("/v1/items/:id", deviceAuth, async (c) => {
   const db = c.env.DB;
   const now = c.get("now");
   const REV_GUARD = "COALESCE((SELECT rev FROM items WHERE id = ?1), 0) = ?2";
-  const [bump, , current, state] = await db.batch([
+  const [bump, , , current, state] = await db.batch([
     db.prepare(`UPDATE meta SET head_seq = head_seq + 1 WHERE id = 1 AND epoch = ?3 AND ${REV_GUARD}`).bind(id, base_rev, epoch),
+    // The state being replaced stays recoverable for the retention period (same guard as the write).
+    db
+      .prepare(
+        `INSERT INTO item_history (item_id, rev, kind, blob, deleted, epoch, replaced_at)
+         SELECT id, rev, CASE deleted WHEN 1 THEN 'delete' ELSE 'overwrite' END, blob, deleted, ?3, ?4 FROM items
+         WHERE id = ?1 AND rev = ?2 AND (SELECT epoch FROM meta WHERE id = 1) = ?3`,
+      )
+      .bind(id, base_rev, epoch, now),
     db
       .prepare(
         `INSERT INTO items (id, rev, seq, deleted, blob, updated_at)
@@ -317,6 +363,7 @@ app.put("/v1/items/:id", deviceAuth, async (c) => {
     db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ?1`).bind(id),
     db.prepare("SELECT epoch FROM meta WHERE id = 1"),
   ]);
+  await pruneHistory(c.env, now).run();
   const row = current!.results[0] as ItemRow | undefined;
   if (bump!.meta.changes !== 1) {
     const serverEpoch = (state!.results[0] as { epoch: number }).epoch;
@@ -330,29 +377,62 @@ app.put("/v1/items/:id", deviceAuth, async (c) => {
 app.delete("/v1/items/:id", deviceAuth, async (c) => {
   const id = c.req.param("id");
   if (!IdSchema.safeParse(id).success) return bad(c, "invalid_id");
-  const nb = noBody(c);
-  if (nb) return nb;
   const q = parseQuery(c, DeleteQuerySchema);
   if (!q.ok) return q.res;
   const { base_rev } = q.data;
+  const parsed = parseJson(c, DeleteItemSchema, BODY_LIMITS.small);
+  if (!parsed.ok) return parsed.res;
+  const { epoch, marker } = parsed.data;
 
   const db = c.env.DB;
   const now = c.get("now");
-  const guard = "EXISTS (SELECT 1 FROM items WHERE id = ?1 AND rev = ?2 AND deleted = 0)";
-  const [bump, , current] = await db.batch([
-    db.prepare(`UPDATE meta SET head_seq = head_seq + 1 WHERE id = 1 AND ${guard}`).bind(id, base_rev),
+  const guard = "EXISTS (SELECT 1 FROM items WHERE id = ?1 AND rev = ?2 AND deleted = 0) AND (SELECT epoch FROM meta WHERE id = 1) = ?3";
+  const [bump, , , current, state] = await db.batch([
+    db.prepare(`UPDATE meta SET head_seq = head_seq + 1 WHERE id = 1 AND ${guard}`).bind(id, base_rev, epoch),
     db
       .prepare(
-        `UPDATE items SET rev = rev + 1, seq = (SELECT head_seq FROM meta WHERE id = 1), deleted = 1, blob = '', updated_at = ?3
-         WHERE id = ?1 AND rev = ?2 AND deleted = 0`,
+        `INSERT INTO item_history (item_id, rev, kind, blob, deleted, epoch, replaced_at)
+         SELECT id, rev, 'overwrite', blob, deleted, ?3, ?4 FROM items
+         WHERE id = ?1 AND rev = ?2 AND deleted = 0 AND (SELECT epoch FROM meta WHERE id = 1) = ?3`,
       )
-      .bind(id, base_rev, now),
+      .bind(id, base_rev, epoch, now),
+    // The tombstone keeps a sealed marker instead of an empty blob: other devices verify it before honouring the delete.
+    db
+      .prepare(
+        `UPDATE items SET rev = rev + 1, seq = (SELECT head_seq FROM meta WHERE id = 1), deleted = 1, blob = ?4, updated_at = ?3
+         WHERE id = ?1 AND rev = ?2 AND deleted = 0 AND (SELECT epoch FROM meta WHERE id = 1) = ?5`,
+      )
+      .bind(id, base_rev, now, marker, epoch),
     db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ?1`).bind(id),
+    db.prepare("SELECT epoch FROM meta WHERE id = 1"),
   ]);
+  await pruneHistory(c.env, now).run();
   const row = current!.results[0] as ItemRow | undefined;
   if (!row) return c.json({ error: "not_found" }, 404);
-  if (bump!.meta.changes !== 1) return c.json({ error: "conflict", current: itemJson(row) }, 409);
+  if (bump!.meta.changes !== 1) {
+    const serverEpoch = (state!.results[0] as { epoch: number }).epoch;
+    if (serverEpoch !== epoch) return c.json({ error: "stale_epoch", epoch: serverEpoch }, 409);
+    return c.json({ error: "conflict", current: itemJson(row) }, 409);
+  }
   return c.json({ item: itemJson(row) });
+});
+
+// GET /v1/history[?id=][&after=][&limit=]: previous states of items, newest last. Ciphertext only; a client that
+// holds VK opens them and re-saves the wanted one as a new revision (the AAD binds the old rev, so it cannot be
+// pushed back verbatim). 'rotate' rows hold just the previous wrapped item key.
+app.get("/v1/history", deviceAuth, async (c) => {
+  const nb = noBody(c);
+  if (nb) return nb;
+  const q = parseQuery(c, HistoryQuerySchema);
+  if (!q.ok) return q.res;
+  const { id, after, limit } = q.data;
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, item_id, rev, kind, blob, deleted, epoch, replaced_at FROM item_history
+     WHERE id > ?1 AND (?2 IS NULL OR item_id = ?2) ORDER BY id ASC LIMIT ?3`,
+  )
+    .bind(after, id ?? null, limit)
+    .all();
+  return c.json({ entries: results });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -369,7 +449,7 @@ app.get("/v1/devices", deviceAuth, async (c) => {
   return c.json({ devices: results });
 });
 
-app.post("/v1/devices", deviceAuth, async (c) => {
+app.post("/v1/devices", deviceAuth, adminAuth, async (c) => {
   const parsed = parseJson(c, DeviceApprovalSchema, BODY_LIMITS.small);
   if (!parsed.ok) return parsed.res;
   const { epoch, ...d } = parsed.data;
@@ -397,7 +477,7 @@ app.post("/v1/devices", deviceAuth, async (c) => {
  * server at once, but it still holds VK, which stays valid for everything it already copied and for
  * anything it can obtain from the server's storage. Clients revoke through POST /v1/rotate.
  */
-app.delete("/v1/devices/:id", deviceAuth, async (c) => {
+app.delete("/v1/devices/:id", deviceAuth, adminAuth, async (c) => {
   const id = c.req.param("id");
   if (!IdSchema.safeParse(id).success) return bad(c, "invalid_id");
   const nb = noBody(c);
@@ -446,7 +526,7 @@ app.get("/v1/envelope", deviceAuth, async (c) => {
 // head_seq (so no item was written), same live-item set at the same revs, same active-device set.
 // Otherwise the whole D1 batch rolls back and the client gets 409 and retries from a fresh sync.
 
-app.post("/v1/rotate", deviceAuth, async (c) => {
+app.post("/v1/rotate", deviceAuth, adminAuth, async (c) => {
   const parsed = parseJson(c, RotateSchema, BODY_LIMITS.rotate);
   if (!parsed.ok) return parsed.res;
   const r = parsed.data;
@@ -455,13 +535,16 @@ app.post("/v1/rotate", deviceAuth, async (c) => {
   if (r.revoke === callerId) return bad(c, "cannot_revoke_self");
   if (!r.devices.some((d) => d.id === callerId)) return bad(c, "caller_not_in_devices");
   if (r.revoke && r.devices.some((d) => d.id === r.revoke)) return bad(c, "revoked_device_in_devices");
+  if (!(await validAdminKey(r.new_admin_pubkey))) return bad(c, "invalid_key");
 
   const db = c.env.DB;
   const now = c.get("now");
   const n = r.items.length;
+  const t = r.tombstones.length;
   const m = r.devices.length;
   const newEpoch = r.base_epoch + 1;
   const keys = JSON.stringify(r.items.map((i) => ({ id: i.id, rev: i.rev, k: i.key })));
+  const markers = JSON.stringify(r.tombstones.map((i) => ({ id: i.id, rev: i.rev, k: i.marker })));
   const envelopes = JSON.stringify(r.devices);
 
   try {
@@ -473,6 +556,13 @@ app.post("/v1/rotate", deviceAuth, async (c) => {
             db.prepare("UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND revoked_at IS NULL").bind(now, r.revoke),
           ]
         : []),
+      // The wrapped item keys being replaced stay recoverable for the retention period.
+      db
+        .prepare(
+          `INSERT INTO item_history (item_id, rev, kind, blob, deleted, epoch, replaced_at)
+           SELECT id, rev, 'rotate', substr(blob, 1, ${WRAPPED_KEY_CHARS}), 0, ?1, ?2 FROM items WHERE deleted = 0`,
+        )
+        .bind(r.base_epoch, now),
       // New wrapped item keys. `seq` is assigned in request order, base_seq + 1 .. base_seq + n, all above every existing seq.
       db
         .prepare(
@@ -483,21 +573,33 @@ app.post("/v1/rotate", deviceAuth, async (c) => {
            WHERE items.id = r.id AND items.rev = r.rev AND items.deleted = 0 AND length(items.blob) > ${WRAPPED_KEY_CHARS}`,
         )
         .bind(keys, r.base_seq, now),
+      // Tombstone markers are sealed under VK, so they are re-sealed too; seqs follow the items'.
+      db
+        .prepare(
+          `WITH r AS (SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.rev') AS rev,
+                             json_extract(value, '$.k') AS k, key AS pos FROM json_each(?1))
+           UPDATE items SET blob = r.k, seq = ?2 + ?4 + 1 + r.pos, updated_at = ?3
+           FROM r WHERE items.id = r.id AND items.rev = r.rev AND items.deleted = 1`,
+        )
+        .bind(markers, r.base_seq, now, n),
       db
         .prepare(
           `WITH r AS (SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.envelope') AS envelope FROM json_each(?1))
            UPDATE devices SET envelope = r.envelope, envelope_epoch = ?2 FROM r WHERE devices.id = r.id AND devices.revoked_at IS NULL`,
         )
         .bind(envelopes, newEpoch),
+      // The admin key moves with VK; this request was authorised by the old one.
       db
-        .prepare("UPDATE meta SET epoch = ?1, head_seq = head_seq + ?2, recovery_envelope = ?3 WHERE id = 1")
-        .bind(newEpoch, n, r.recovery_envelope),
-      // Every live item was rotated (none omitted, none at another rev, none appeared) and every active device got its envelope.
+        .prepare("UPDATE meta SET epoch = ?1, head_seq = head_seq + ?2, recovery_envelope = ?3, admin_pubkey = ?4 WHERE id = 1")
+        .bind(newEpoch, n + t, r.recovery_envelope, r.new_admin_pubkey),
+      // Every live item and tombstone was rotated (none omitted, none at another rev, none appeared) and every active device got its envelope.
       assertThat(
         db,
-        `(SELECT COUNT(*) FROM items WHERE deleted = 0) = ?1 AND (SELECT COUNT(*) FROM items WHERE deleted = 0 AND seq > ?2) = ?1`,
+        `(SELECT COUNT(*) FROM items WHERE deleted = 0) = ?1 AND (SELECT COUNT(*) FROM items WHERE deleted = 0 AND seq > ?2) = ?1
+         AND (SELECT COUNT(*) FROM items WHERE deleted = 1) = ?3 AND (SELECT COUNT(*) FROM items WHERE deleted = 1 AND seq > ?2) = ?3`,
         n,
         r.base_seq,
+        t,
       ),
       assertThat(
         db,
@@ -511,11 +613,12 @@ app.post("/v1/rotate", deviceAuth, async (c) => {
   } catch (err) {
     if (!isAssertionFailure(err)) throw err;
     const state = await metaState(db);
-    console.log(JSON.stringify({ evt: "rotate_conflict", device: callerId, base_epoch: r.base_epoch, epoch: state.epoch }));
+    console.log(JSON.stringify({ evt: "rotate_conflict", device: callerId.slice(0, 8), base_epoch: r.base_epoch, epoch: state.epoch }));
     return c.json({ error: "conflict", epoch: state.epoch, head_seq: state.head_seq }, 409);
   }
-  console.log(JSON.stringify({ evt: "rotate", device: callerId, epoch: newEpoch, items: n, devices: m, revoked: r.revoke }));
-  return c.json({ epoch: newEpoch, head_seq: r.base_seq + n, rotated_items: n, revoked: r.revoke });
+  await pruneHistory(c.env, now).run();
+  console.log(JSON.stringify({ evt: "rotate", device: callerId.slice(0, 8), epoch: newEpoch, items: n, tombstones: t, devices: m, revoked: !!r.revoke }));
+  return c.json({ epoch: newEpoch, head_seq: r.base_seq + n + t, rotated_items: n, rotated_tombstones: t, revoked: r.revoke });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -535,12 +638,14 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
     const nq = parseQuery(c, EmptyQuerySchema);
     if (!nq.ok) return nq.res;
   }
+  const delay = Math.max(0, Number(c.env.RECOVERY_ACTIVATION_DELAY_SECONDS) || 0);
+  const activatesAt = delay > 0 ? now + delay : null;
   if (device) {
     if (!(await validDeviceKeys(device))) return bad(c, "invalid_key");
     try {
       await db.batch([
         assertThat(db, "EXISTS (SELECT 1 FROM meta WHERE id = 1 AND epoch = ?1)", epoch),
-        insertDevice(db, device, now, epoch),
+        insertDevice(db, device, now, epoch, activatesAt),
         insertEvent(db, now, null, "recovery", device.id),
         clearAssertions(db),
       ]);
@@ -559,11 +664,11 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
     recovery_envelope: meta!.recovery_envelope,
     head_seq: meta!.head_seq,
     epoch: meta!.epoch,
-    ...(device ? { device: { id: device.id, name: device.name, kind: device.kind, created_at: now } } : {}),
+    ...(device ? { device: { id: device.id, name: device.name, kind: device.kind, created_at: now, activates_at: activatesAt } } : {}),
   });
 });
 
-app.post("/v1/recovery/rotate", deviceAuth, async (c) => {
+app.post("/v1/recovery/rotate", deviceAuth, adminAuth, async (c) => {
   const parsed = parseJson(c, RecoveryRotateSchema, BODY_LIMITS.small);
   if (!parsed.ok) return parsed.res;
   const { recovery_pubkey, recovery_enc_pubkey, recovery_envelope, epoch } = parsed.data;

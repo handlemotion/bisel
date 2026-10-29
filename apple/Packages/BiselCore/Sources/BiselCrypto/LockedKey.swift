@@ -11,13 +11,20 @@ public final class LockedKey: @unchecked Sendable, CustomStringConvertible, Cust
 
     private let pointer: UnsafeMutableRawPointer
     private let count: Int
+    private let mapped: Int
     private let lock = NSLock()
     private var live = true
 
     public init(_ key: Data) {
         count = key.count
-        pointer = UnsafeMutableRawPointer.allocate(byteCount: max(key.count, 1), alignment: 16)
-        _ = mlock(pointer, count)          // best effort; failure only means the page may be swappable
+        // Each key gets its own anonymous page(s), so `mlock`/`munlock` and the wipe never touch another key's memory
+        // (a shared heap page would be unlocked while a neighbour still needs it).
+        mapped = Int(getpagesize()) * max(1, (key.count + Int(getpagesize()) - 1) / Int(getpagesize()))
+        guard let region = mmap(nil, mapped, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0), region != MAP_FAILED else {
+            preconditionFailure("mmap failed")   // cannot hold a key safely; refusing is better than falling back to the heap
+        }
+        pointer = region
+        _ = mlock(pointer, mapped)         // best effort; failure only means the page may be swappable
         key.withUnsafeBytes { source in
             if let base = source.baseAddress, count > 0 { pointer.copyMemory(from: base, byteCount: count) }
         }
@@ -32,6 +39,9 @@ public final class LockedKey: @unchecked Sendable, CustomStringConvertible, Cust
         }
     }
 
+    /// Predicate helper: false if the key is already zeroed.
+    public func withKeyOrFalse(_ body: (SymmetricKey) -> Bool) -> Bool { (try? withKey(body)) ?? false }
+
     public func rawBytes() throws -> Data {
         try lock.withLock {
             guard live else { throw BiselCryptoError.authenticationFailed }
@@ -42,17 +52,15 @@ public final class LockedKey: @unchecked Sendable, CustomStringConvertible, Cust
     public func zero() {
         lock.withLock {
             guard live else { return }
-            memset_s(pointer, count, 0, count)
-            munlock(pointer, count)
+            memset_s(pointer, mapped, 0, mapped)
+            munlock(pointer, mapped)
             live = false
         }
     }
 
     deinit {
-        if live {
-            memset_s(pointer, count, 0, count)
-            munlock(pointer, count)
-        }
-        pointer.deallocate()
+        memset_s(pointer, mapped, 0, mapped)
+        munlock(pointer, mapped)
+        munmap(pointer, mapped)
     }
 }

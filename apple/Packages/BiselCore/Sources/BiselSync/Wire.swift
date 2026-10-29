@@ -31,7 +31,24 @@ public struct DeviceInfo: Codable, Sendable, Equatable, Identifiable {
     public var createdAt: Int
     public var lastSeenAt: Int?
     public var revokedAt: Int?
+    /// Set while a device registered through the recovery phrase is held back; it cannot sign requests before then.
+    public var activatesAt: Int?
     public var isRevoked: Bool { revokedAt != nil }
+    public func isPending(at now: Date = Date()) -> Bool { (activatesAt ?? 0) > Int(now.timeIntervalSince1970) && !isRevoked }
+
+    // Names come from the server (and ultimately from other devices): strip control, bidi and separator characters.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = Data.sanitizedName(try c.decode(String.self, forKey: .name))
+        kind = try c.decode(String.self, forKey: .kind)
+        sigPubkey = try c.decode(String.self, forKey: .sigPubkey)
+        encPubkey = try c.decode(String.self, forKey: .encPubkey)
+        createdAt = try c.decode(Int.self, forKey: .createdAt)
+        lastSeenAt = try c.decodeIfPresent(Int.self, forKey: .lastSeenAt)
+        revokedAt = try c.decodeIfPresent(Int.self, forKey: .revokedAt)
+        activatesAt = try c.decodeIfPresent(Int.self, forKey: .activatesAt)
+    }
 }
 
 struct WireItem: Codable, Sendable {
@@ -56,6 +73,16 @@ public struct RecoveryMaterial: Codable, Sendable, Equatable {
     public var envelope: String
 }
 
+/// Something that happened to the vault on the server: `bootstrap`, `approve`, `revoke`, `rotate`, `recovery`, `recovery_rotate`.
+public struct ServerEvent: Codable, Sendable, Equatable, Identifiable {
+    public var id: Int
+    public var ts: Int
+    public var deviceId: String?
+    public var type: String
+    public var subjectId: String?
+    public var date: Date { Date(timeIntervalSince1970: TimeInterval(ts)) }
+}
+
 struct SyncPageWire: Codable, Sendable {
     var items: [WireItem]
     var hasMore: Bool
@@ -63,25 +90,45 @@ struct SyncPageWire: Codable, Sendable {
     var headSeq: Int
     var epoch: Int
     var devices: [DeviceInfo]
+    var events: [ServerEvent]?
     var recovery: RecoveryMaterial?
 }
+
+struct HistoryEntryWire: Codable, Sendable {
+    var id: Int
+    var itemId: String
+    var rev: Int
+    var kind: String
+    var blob: String
+    var deleted: Int
+    var epoch: Int
+    var replacedAt: Int
+}
+struct HistoryResponse: Codable { var entries: [HistoryEntryWire] }
 
 struct ItemResponse: Codable { var item: WireItem }
 struct ConflictResponse: Codable { var error: String; var current: WireItem?; var epoch: Int?; var headSeq: Int? }
 struct DevicesResponse: Codable { var devices: [DeviceInfo] }
 struct EnvelopeResponse: Codable { var deviceId: String; var envelope: String; var epoch: Int }
-struct BootstrapRequest: Codable { var device: WireDevice; var recoveryPubkey: String; var recoveryEncPubkey: String; var recoveryEnvelope: String }
+struct BootstrapRequest: Codable {
+    var device: WireDevice; var recoveryPubkey: String; var recoveryEncPubkey: String; var recoveryEnvelope: String; var adminPubkey: String
+}
+struct DeleteItemRequest: Codable { var epoch: Int; var marker: String }
 struct PutRequest: Codable { var baseRev: Int; var epoch: Int; var blob: String }
 struct RecoveryRotateRequest: Codable { var recoveryPubkey: String; var recoveryEncPubkey: String; var recoveryEnvelope: String; var epoch: Int }
 struct RecoverySessionRequest: Codable { var device: WireDevice; var epoch: Int }
-struct RecoverySessionResponse: Codable { var recoveryEnvelope: String; var headSeq: Int; var epoch: Int }
+struct RecoveredDeviceWire: Codable { var id: String; var activatesAt: Int? }
+struct RecoverySessionResponse: Codable { var recoveryEnvelope: String; var headSeq: Int; var epoch: Int; var device: RecoveredDeviceWire? }
 
 struct RotateItemWire: Codable { var id: String; var rev: Int; var key: String }
 struct RotateDeviceWire: Codable { var id: String; var envelope: String }
+struct RotateTombstoneWire: Codable { var id: String; var rev: Int; var marker: String }
 struct RotateRequest: Codable {
     var baseEpoch: Int
     var baseSeq: Int
     var revoke: String?
+    var newAdminPubkey: String
+    var tombstones: [RotateTombstoneWire]
     var items: [RotateItemWire]
     var devices: [RotateDeviceWire]
     var recoveryEnvelope: String
@@ -92,6 +139,8 @@ struct RotateRequest: Codable {
         try c.encode(baseEpoch, forKey: .baseEpoch)
         try c.encode(baseSeq, forKey: .baseSeq)
         try c.encode(revoke, forKey: .revoke)
+        try c.encode(newAdminPubkey, forKey: .newAdminPubkey)
+        try c.encode(tombstones, forKey: .tombstones)
         try c.encode(items, forKey: .items)
         try c.encode(devices, forKey: .devices)
         try c.encode(recoveryEnvelope, forKey: .recoveryEnvelope)

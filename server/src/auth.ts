@@ -6,7 +6,13 @@ export type Principal = { kind: "device"; id: string } | { kind: "recovery" };
 
 export type AppEnv = {
   Bindings: Env;
-  Variables: { principal: Principal; body: Uint8Array<ArrayBuffer>; now: number };
+  Variables: {
+    principal: Principal;
+    body: Uint8Array<ArrayBuffer>;
+    now: number;
+    /** The canonical string the request signature covered, reused for the admin signature. */
+    signed: string;
+  };
 };
 
 /** The single response for every authentication failure and every unknown route. */
@@ -88,6 +94,11 @@ function limits(env: Env) {
   };
 }
 
+/** First 8 hex chars of SHA-256: enough to correlate log lines, not enough to recover an address from a log. */
+export async function shortHash(value: string): Promise<string> {
+  return hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))).slice(0, 8);
+}
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
@@ -118,8 +129,19 @@ export async function recordFailure(env: Env, req: Request, now: number, reason:
   } catch (err) {
     console.log(JSON.stringify({ evt: "error", where: "recordFailure", message: String(err) }));
   }
+  // Logs carry a short hash of the address and a prefix of the device id, never the raw values.
+  const extraSafe = { ...extra } as Record<string, unknown>;
+  if (typeof extraSafe.device === "string") extraSafe.device = extraSafe.device.slice(0, 8);
   console.log(
-    JSON.stringify({ evt: "auth_fail", reason, ip, over_budget: overBudget, method: req.method, path: new URL(req.url).pathname, ...extra }),
+    JSON.stringify({
+      evt: "auth_fail",
+      reason,
+      ip: await shortHash(ip),
+      over_budget: overBudget,
+      method: req.method,
+      path: new URL(req.url).pathname,
+      ...extraSafe,
+    }),
   );
   if (overBudget && backoffMs > 0) await sleep(backoffMs + Math.random() * backoffMs * 0.25);
 }
@@ -136,6 +158,7 @@ interface PrincipalRow {
   sig_pubkey: string;
   revoked_at: number | null;
   last_seen_at: number | null;
+  activates_at?: number | null;
 }
 
 type Mode = "device" | "recovery";
@@ -201,7 +224,7 @@ export function authenticate(mode: Mode) {
       if (!body) return await fail("body_too_large");
 
       const row = await (mode === "device"
-        ? env.DB.prepare("SELECT id, sig_alg, sig_pubkey, revoked_at, last_seen_at FROM devices WHERE id = ?1").bind(deviceId)
+        ? env.DB.prepare("SELECT id, sig_alg, sig_pubkey, revoked_at, last_seen_at, activates_at FROM devices WHERE id = ?1").bind(deviceId)
         : env.DB.prepare("SELECT recovery_alg AS sig_alg, recovery_pubkey AS sig_pubkey, NULL AS revoked_at, NULL AS last_seen_at FROM meta WHERE id = 1")
       ).first<PrincipalRow>();
 
@@ -217,6 +240,7 @@ export function authenticate(mode: Mode) {
       // Evaluated only after the verification so every outcome did the same work.
       if (!row) return await fail(mode === "device" ? "unknown_device" : "not_bootstrapped", { device: deviceId });
       if (row.revoked_at != null) return await fail("revoked_device", { device: deviceId });
+      if (row.activates_at != null && row.activates_at > now) return await fail("pending_activation", { device: deviceId });
       if (Math.abs(now - Number(ts)) > MAX_SKEW_SECONDS) return await fail("clock_skew", { device: deviceId, skew: now - Number(ts) });
       if (!valid) return await fail("bad_signature", { device: deviceId });
 
@@ -226,16 +250,22 @@ export function authenticate(mode: Mode) {
           now - NONCE_TTL_SECONDS,
           PRUNE_BATCH,
         ),
+        // Failure counters of quiet addresses (the owner's own, after a clock-skew slip) do not linger in the database.
+        env.DB.prepare(
+          "DELETE FROM auth_failures WHERE ip IN (SELECT ip FROM auth_failures WHERE window_start <= ?1 - ?2 LIMIT ?3)",
+        ).bind(now, limits(env).window, PRUNE_BATCH),
       ]);
       if (ins!.meta.changes !== 1) return await fail("replayed_nonce", { device: deviceId });
 
-      if (mode === "device" && (row.last_seen_at ?? 0) < now - 60) {
-        await env.DB.prepare("UPDATE devices SET last_seen_at = ?1 WHERE id = ?2").bind(now, deviceId).run();
+      // "Last seen" is kept to the hour: enough for a device list, little for traffic analysis.
+      if (mode === "device" && (row.last_seen_at ?? 0) < now - 3600) {
+        await env.DB.prepare("UPDATE devices SET last_seen_at = ?1 WHERE id = ?2").bind(now - (now % 3600), deviceId).run();
       }
 
       c.set("principal", mode === "device" ? { kind: "device", id: deviceId } : { kind: "recovery" });
       c.set("body", body);
       c.set("now", now);
+      c.set("signed", new TextDecoder().decode(signed));
     } catch (err) {
       return await fail("auth_error", { message: String(err) });
     }
@@ -245,11 +275,45 @@ export function authenticate(mode: Mode) {
     console.log(
       JSON.stringify({
         evt: "req",
-        who: p.kind === "device" ? p.id : "recovery",
+        who: p.kind === "device" ? p.id.slice(0, 8) : "recovery",
         method: req.method,
         path: new URL(req.url).pathname,
         status: c.res.status,
       }),
     );
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Vault-admin signature (SECURITY-REVIEW H1)
+
+/**
+ * Second signature, Ed25519 by a key derived from VK, over `bisel-admin/v1 \n device \n <the canonical request string>`.
+ * Producing it needs VK, i.e. an unlocked vault; the device signing key alone (which never prompts) cannot.
+ * The canonical string includes the method, path, query, body hash, timestamp and single-use nonce.
+ */
+export function requireAdmin() {
+  return createMiddleware<AppEnv>(async (c, next) => {
+    const refuse = () => c.json({ error: "admin_signature_required" }, 403);
+    const header = c.req.header("x-bisel-admin") ?? "";
+    const meta = await c.env.DB.prepare("SELECT admin_pubkey FROM meta WHERE id = 1").first<{ admin_pubkey: string }>();
+    let ok = false;
+    try {
+      const sig = b64urlDecode(header);
+      if (meta && meta.admin_pubkey && sig.length === 64) {
+        const p = c.get("principal");
+        const message = new TextEncoder().encode(
+          `bisel-admin/v1\n${p.kind === "device" ? p.id : "recovery"}\n${c.get("signed")}`,
+        ) as Uint8Array<ArrayBuffer>;
+        ok = await verifySignature("ed25519", meta.admin_pubkey, sig, message);
+      }
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      console.log(JSON.stringify({ evt: "admin_refused", path: c.req.path, who: c.get("principal").kind }));
+      return refuse();
+    }
+    await next();
   });
 }

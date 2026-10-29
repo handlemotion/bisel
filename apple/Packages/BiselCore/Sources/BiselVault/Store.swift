@@ -1,6 +1,7 @@
 import Foundation
 import GRDB
 import BiselCrypto
+import BiselKeyStore
 
 /// Where the local SQLite store lives. Inject any directory for flows; use `appGroup` in apps and
 /// extensions so they all open the same file (§7).
@@ -18,7 +19,7 @@ public struct StoreLocation: Sendable {
     }
 }
 
-public enum StoreError: Error, Sendable, Equatable { case noAppGroupContainer(String) }
+public enum StoreError: Error, Sendable, Equatable { case noAppGroupContainer(String), serverAddressMissing }
 
 /// Ciphertext record exactly as the server holds it, plus local pending state.
 public struct StoredRecord: Sendable, Equatable {
@@ -31,16 +32,21 @@ public struct StoredRecord: Sendable, Equatable {
     public var updatedAt: Int    // unix seconds
     public var pending: Pending
     public var baseRev: Int      // revision the server last confirmed (0 = never pushed)
+    /// A tombstone from the server counts only once its sealed marker verified under VK (`.unverified` until then).
+    public var tombstone: TombstoneState
+
+    public enum TombstoneState: Int, Sendable { case verified = 1, unverified = 0, rejected = 2 }
 
     public init(id: String, rev: Int, seq: Int, deleted: Bool, blob: Data, updatedAt: Int,
-                pending: Pending = .none, baseRev: Int = 0) {
+                pending: Pending = .none, baseRev: Int = 0, tombstone: TombstoneState = .verified) {
         self.id = id; self.rev = rev; self.seq = seq; self.deleted = deleted; self.blob = blob
-        self.updatedAt = updatedAt; self.pending = pending; self.baseRev = baseRev
+        self.updatedAt = updatedAt; self.pending = pending; self.baseRev = baseRev; self.tombstone = tombstone
     }
 
     init(row: Row) {
         self.init(id: row["id"], rev: row["rev"], seq: row["seq"], deleted: row["deleted"], blob: row["blob"],
-                  updatedAt: row["updated_at"], pending: Pending(rawValue: row["pending"]) ?? .none, baseRev: row["base_rev"])
+                  updatedAt: row["updated_at"], pending: Pending(rawValue: row["pending"]) ?? .none, baseRev: row["base_rev"],
+                  tombstone: TombstoneState(rawValue: row["tomb_ok"]) ?? .verified)
     }
 }
 
@@ -62,6 +68,21 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
     /// The envelope that held the previous vault key, kept only while local edits made under it still await
     /// re-wrapping (it needs the same biometric unlock as `envelope`, so it protects nothing extra).
     public var previousEnvelope: Data?
+    /// Devices this one knows to be the owner's, with their public keys. Written only by bootstrap, approval, recovery,
+    /// an explicit `trustDevice`, and the VK-sealed vault manifest. Rotation seals the new vault key only to these.
+    public var roster: [RosterEntry] = []
+    /// Generation of the recovery keys recorded in `recoveryPublicKey`/`recoveryEncryptionPublicKey`.
+    public var recoveryGeneration: Int = 1
+    /// True once the recovery keys are pinned (set by this device or taken from the vault manifest). From then on the server cannot change them.
+    public var recoveryPinned: Bool = false
+    /// The server reported recovery keys that differ from the pinned ones.
+    public var recoveryMismatch: Bool = false
+    /// The phrase was shown but the user has not proved they wrote it down.
+    public var recoveryUnconfirmed: Bool = false
+    /// This device was enrolled through another device and the verification code has not been confirmed yet.
+    public var enrollmentUnconfirmed: Bool = false
+    /// Recovery-registered device: unix time before which the server refuses its requests.
+    public var activatesAt: Int?
 
     public init(deviceID: String, deviceName: String, serverURL: URL, keyStore: String, envelope: Data? = nil,
                 recoveryPublicKey: Data? = nil, recoveryEnvelope: Data? = nil,
@@ -85,14 +106,26 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
         recoveryEncryptionPublicKey = try c.decodeIfPresent(Data.self, forKey: .recoveryEncryptionPublicKey)
         epoch = try c.decodeIfPresent(Int.self, forKey: .epoch) ?? 1
         previousEnvelope = try c.decodeIfPresent(Data.self, forKey: .previousEnvelope)
+        roster = try c.decodeIfPresent([RosterEntry].self, forKey: .roster) ?? []
+        recoveryGeneration = try c.decodeIfPresent(Int.self, forKey: .recoveryGeneration) ?? 1
+        recoveryPinned = try c.decodeIfPresent(Bool.self, forKey: .recoveryPinned) ?? false
+        recoveryMismatch = try c.decodeIfPresent(Bool.self, forKey: .recoveryMismatch) ?? false
+        recoveryUnconfirmed = try c.decodeIfPresent(Bool.self, forKey: .recoveryUnconfirmed) ?? false
+        enrollmentUnconfirmed = try c.decodeIfPresent(Bool.self, forKey: .enrollmentUnconfirmed) ?? false
+        activatesAt = try c.decodeIfPresent(Int.self, forKey: .activatesAt)
     }
 }
 
 /// SQLite (GRDB) store of ciphertext records and the sync cursor. Holds no key material.
 public final class LocalStore: Sendable {
     private let pool: DatabasePool
+    private let secrets: (any SecretStore)?
+    private static let serverURLKey = "server-url"
+    /// In the database, the server's address is replaced by this marker when a `SecretStore` holds the real one.
+    private static let serverURLPlaceholder = URL(string: "bisel-secret://server-url")!
 
-    public init(location: StoreLocation) throws {
+    public init(location: StoreLocation, secrets: (any SecretStore)? = nil) throws {
+        self.secrets = secrets
         try FileManager.default.createDirectory(at: location.directory, withIntermediateDirectories: true)
         var config = Configuration()
         config.busyMode = .timeout(5)       // the app and its extensions share this file
@@ -114,6 +147,22 @@ public final class LocalStore: Sendable {
                 t.column("value", .blob).notNull()
             }
         }
+        migrator.registerMigration("v2-trash-and-tombstones") { db in
+            try db.alter(table: "records") { t in t.add(column: "tomb_ok", .integer).notNull().defaults(to: 1) }
+            // Previous contents of records the server overwrote or deleted, kept for 30 days (a forged or mistaken delete is undoable).
+            try db.create(table: "trash") { t in
+                t.autoIncrementedPrimaryKey("key")
+                t.column("id", .text).notNull()
+                t.column("rev", .integer).notNull()
+                t.column("seq", .integer).notNull()
+                t.column("deleted", .boolean).notNull()
+                t.column("blob", .blob).notNull()
+                t.column("updated_at", .integer).notNull()
+                t.column("replaced_at", .integer).notNull()
+                t.column("reason", .text).notNull()
+            }
+            try db.create(index: "trash_id", on: "trash", columns: ["id"])
+        }
         try migrator.migrate(pool)
     }
 
@@ -128,11 +177,26 @@ public final class LocalStore: Sendable {
     }
 
     public func identity() throws -> LocalIdentity? {
-        try getMeta("identity").map { try JSONDecoder().decode(LocalIdentity.self, from: $0) }
+        guard var id = try getMeta("identity").map({ try JSONDecoder().decode(LocalIdentity.self, from: $0) }) else { return nil }
+        guard let secrets else { return id }
+        if id.serverURL == Self.serverURLPlaceholder {
+            guard let data = try secrets.get(Self.serverURLKey), let url = URL(string: String(decoding: data, as: UTF8.self)) else {
+                throw StoreError.serverAddressMissing
+            }
+            id.serverURL = url
+        } else {
+            try setIdentity(id)   // written before secrets existed: move the address out of the database now
+        }
+        return id
     }
 
     public func setIdentity(_ identity: LocalIdentity) throws {
-        try setMeta("identity", try JSONEncoder().encode(identity))
+        var stored = identity
+        if let secrets {
+            try secrets.set(Self.serverURLKey, Data(identity.serverURL.absoluteString.utf8))
+            stored.serverURL = Self.serverURLPlaceholder
+        }
+        try setMeta("identity", try JSONEncoder().encode(stored))
     }
 
     public func cursor() throws -> Int {
@@ -167,7 +231,8 @@ public final class LocalStore: Sendable {
     }
 
     /// Records a local edit. `seal` receives the revision the blob will have on the server
-    /// (`baseRev + 1`) so the AAD binds the right one. Atomic with the base-revision lookup.
+    /// (`baseRev + 1`) so the AAD binds the right one (for a delete: the sealed tombstone marker).
+    /// Atomic with the base-revision lookup.
     @discardableResult
     public func commitLocal(id: String, deleted: Bool, now: Date = Date(),
                             seal: (_ rev: Int) throws -> Data) throws -> StoredRecord {
@@ -176,7 +241,7 @@ public final class LocalStore: Sendable {
             let baseRev = existing.map { $0.pending == .none ? $0.rev : $0.baseRev } ?? 0
             let rev = baseRev + 1
             let record = StoredRecord(id: id, rev: rev, seq: existing?.seq ?? 0, deleted: deleted,
-                                      blob: deleted ? Data() : try seal(rev), updatedAt: Int(now.timeIntervalSince1970),
+                                      blob: try seal(rev), updatedAt: Int(now.timeIntervalSince1970),
                                       pending: deleted ? .delete : .put, baseRev: baseRev)
             try write(record, db)
             return record
@@ -191,8 +256,15 @@ public final class LocalStore: Sendable {
             if let existing = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [r.id]).map(StoredRecord.init(row:)) {
                 if existing.pending != .none { return false }
                 if existing.rev > r.rev || (existing.rev == r.rev && existing.seq >= r.seq) { return false }
+                // A new revision (or a delete) replaces content this device holds: keep the old ciphertext for 30 days.
+                // (Same revision, new seq = a key rotation re-wrapping the item: nothing to keep.)
+                if existing.rev != r.rev, !existing.deleted {
+                    try trash(existing, reason: r.deleted ? "remote-delete" : "remote-overwrite", db)
+                }
             }
-            try write(r, db)
+            var incoming = r
+            incoming.tombstone = r.deleted ? .unverified : .verified   // a delete is honoured only after its marker verified
+            try write(incoming, db)
             return true
         }
     }
@@ -209,6 +281,53 @@ public final class LocalStore: Sendable {
     /// Replaces local state with the server's current record (conflict resolution: remote wins).
     public func overwrite(with r: StoredRecord) throws { try pool.write { try write(r, $0) } }
 
+    // MARK: trash, tombstone verification, integrity state
+
+    public struct TrashedRecord: Sendable, Equatable {
+        public var key: Int
+        public var record: StoredRecord
+        public var replacedAt: Date
+        public var reason: String
+    }
+
+    /// Ciphertext the server replaced or deleted, newest first (30 days).
+    public func trashedRecords(id: String? = nil) throws -> [TrashedRecord] {
+        try pool.read { db in
+            let cutoff = Int(Date().timeIntervalSince1970) - Self.trashRetention
+            let rows = try Row.fetchAll(db, sql: "SELECT * FROM trash WHERE replaced_at >= ? AND (? IS NULL OR id = ?) ORDER BY key DESC",
+                                        arguments: [cutoff, id, id])
+            return rows.map { row in
+                TrashedRecord(key: row["key"],
+                              record: StoredRecord(id: row["id"], rev: row["rev"], seq: row["seq"], deleted: row["deleted"], blob: row["blob"], updatedAt: row["updated_at"]),
+                              replacedAt: Date(timeIntervalSince1970: TimeInterval(row["replaced_at"] as Int)), reason: row["reason"])
+            }
+        }
+    }
+
+    public func removeFromTrash(key: Int) throws { try pool.write { try $0.execute(sql: "DELETE FROM trash WHERE key = ?", arguments: [key]) } }
+
+    /// Tombstones that came from the server and have not been checked against their sealed marker yet.
+    public func unverifiedTombstones() throws -> [StoredRecord] {
+        try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM records WHERE deleted = 1 AND pending = 0 AND tomb_ok = 0").map(StoredRecord.init(row:))
+        }
+    }
+
+    public func setTombstoneState(id: String, rev: Int, _ state: StoredRecord.TombstoneState) throws {
+        try pool.write { db in
+            try db.execute(sql: "UPDATE records SET tomb_ok = ? WHERE id = ? AND rev = ? AND deleted = 1 AND pending = 0", arguments: [state.rawValue, id, rev])
+        }
+    }
+
+    /// Highest `head_seq` this device has ever seen from the server (rollback detection).
+    public func knownHeadSeq() throws -> Int { try getMeta("head_seq").flatMap { Int(String(decoding: $0, as: UTF8.self)) } ?? 0 }
+    public func setKnownHeadSeq(_ seq: Int) throws { try setMeta("head_seq", Data(String(seq).utf8)) }
+
+    public func eventCursor() throws -> Int { try getMeta("event_cursor").flatMap { Int(String(decoding: $0, as: UTF8.self)) } ?? 0 }
+    public func setEventCursor(_ id: Int) throws { try setMeta("event_cursor", Data(String(id).utf8)) }
+    public func recentEventsJSON() throws -> Data? { try getMeta("events") }
+    public func setRecentEventsJSON(_ json: Data) throws { try setMeta("events", json) }
+
     /// Drops a record that never reached the server (local create followed by local delete).
     public func forget(_ id: String) throws {
         try pool.write { try $0.execute(sql: "DELETE FROM records WHERE id = ?", arguments: [id]) }
@@ -219,19 +338,30 @@ public final class LocalStore: Sendable {
         guard var identity = try identity(),
               let pub = Data(base64URLEncoded: pubkeyB64), let env = Data(base64URLEncoded: envelopeB64) else { return }
         let enc = encB64.flatMap { $0.isEmpty ? nil : Data(base64URLEncoded: $0) }
+        if identity.recoveryPinned {
+            // The keys were recorded by this vault's own devices: the server may not change them. A different pubkey is
+            // reported, not adopted (the envelope is only taken when it belongs to the pinned keys).
+            let sameKeys = identity.recoveryPublicKey == pub && (enc == nil || identity.recoveryEncryptionPublicKey == enc)
+            if !sameKeys {
+                if !identity.recoveryMismatch { identity.recoveryMismatch = true; try setIdentity(identity) }
+                return
+            }
+            if identity.recoveryMismatch { identity.recoveryMismatch = false }
+        }
         if identity.recoveryPublicKey == pub && identity.recoveryEnvelope == env
-            && (enc == nil || identity.recoveryEncryptionPublicKey == enc) { return }
+            && (enc == nil || identity.recoveryEncryptionPublicKey == enc) && !identity.recoveryMismatch { return }
         identity.recoveryPublicKey = pub
         identity.recoveryEnvelope = env
         if let enc { identity.recoveryEncryptionPublicKey = enc }
         try setIdentity(identity)
     }
 
-    /// Replaces the sealed blob of a record that is still pending (used to re-wrap local edits after a key rotation).
+    /// Replaces the sealed blob (item blob, or tombstone marker) of a record that is still pending, used to re-seal local
+    /// edits and deletes after a key rotation.
     public func replacePendingBlob(id: String, expectedRev: Int, with blob: Data) throws {
         try pool.write { db in
-            try db.execute(sql: "UPDATE records SET blob = ? WHERE id = ? AND rev = ? AND pending = ?",
-                           arguments: [blob, id, expectedRev, StoredRecord.Pending.put.rawValue])
+            try db.execute(sql: "UPDATE records SET blob = ? WHERE id = ? AND rev = ? AND pending != 0",
+                           arguments: [blob, id, expectedRev])
         }
     }
 
@@ -244,16 +374,28 @@ public final class LocalStore: Sendable {
     }
 
     public func removeAll() throws {
+        try? secrets?.delete(Self.serverURLKey)
         try pool.write { db in
             try db.execute(sql: "DELETE FROM records")
+            try db.execute(sql: "DELETE FROM trash")
             try db.execute(sql: "DELETE FROM meta")
         }
     }
 
     private func write(_ r: StoredRecord, _ db: Database) throws {
         try db.execute(sql: """
-            INSERT OR REPLACE INTO records(id, rev, seq, deleted, blob, updated_at, pending, base_rev)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, arguments: [r.id, r.rev, r.seq, r.deleted, r.blob, r.updatedAt, r.pending.rawValue, r.baseRev])
+            INSERT OR REPLACE INTO records(id, rev, seq, deleted, blob, updated_at, pending, base_rev, tomb_ok)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [r.id, r.rev, r.seq, r.deleted, r.blob, r.updatedAt, r.pending.rawValue, r.baseRev, r.tombstone.rawValue])
     }
+
+    private func trash(_ r: StoredRecord, reason: String, _ db: Database) throws {
+        let now = Int(Date().timeIntervalSince1970)
+        try db.execute(sql: """
+            INSERT INTO trash(id, rev, seq, deleted, blob, updated_at, replaced_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, arguments: [r.id, r.rev, r.seq, r.deleted, r.blob, r.updatedAt, now, reason])
+        try db.execute(sql: "DELETE FROM trash WHERE replaced_at < ?", arguments: [now - Self.trashRetention])
+    }
+
+    static let trashRetention = 30 * 86_400
 }

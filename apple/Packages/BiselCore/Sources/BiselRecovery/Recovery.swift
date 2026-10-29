@@ -18,11 +18,11 @@ public struct RecoveryBundle: Sendable, CustomStringConvertible, CustomReflectab
 
 public enum RecoveryService {
     /// New phrase + recovery envelope for `vaultKey`.
-    public static func makeBundle(vaultKey: Data) throws -> RecoveryBundle {
+    public static func makeBundle(vaultKey: Data, epoch: Int) throws -> RecoveryBundle {
         let phrase = try RecoveryPhrase.generate()
         let keys = try RecoveryKeys(phrase: phrase)
         return RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
-                              envelope: try keys.seal(vaultKey: vaultKey))
+                              envelope: try keys.seal(vaultKey: vaultKey, epoch: epoch))
     }
 
     /// Rebuild-from-phrase, steps 1-2: authenticate to the server with RK-sig, fetch the recovery envelope
@@ -31,7 +31,7 @@ public enum RecoveryService {
         let keys = try RecoveryKeys(phrase: phrase)
         let client = SyncClient(baseURL: server, signer: RecoverySigner(keys: keys))
         let (envelope, epoch) = try await client.recoveryEnvelope()
-        return (try keys.open(envelope: envelope), keys, epoch)
+        return (try keys.open(envelope: envelope, epoch: epoch), keys, epoch)
     }
 }
 
@@ -60,10 +60,13 @@ public struct BackupFile: Codable, Sendable {
     public var recoveryPubkey: String
     public var recoveryEncPubkey: String
     public var recoveryEnvelope: String
+    /// Vault-key epoch the recovery envelope (and the item keys) belong to; part of the envelope's HPKE binding.
+    public var epoch: Int
     public var items: [Record]
 
-    public init(recoveryPublicKey: Data, recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, records: [StoredRecord],
+    public init(recoveryPublicKey: Data, recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, epoch: Int, records: [StoredRecord],
                 createdAt: Date = Date()) {
+        self.epoch = epoch
         format = Self.format; version = Self.currentVersion; self.createdAt = Int(createdAt.timeIntervalSince1970)
         recoveryAlg = "ed25519"
         recoveryPubkey = recoveryPublicKey.base64URLEncoded()
@@ -97,7 +100,7 @@ public struct BackupFile: Codable, Sendable {
         guard Data(base64URLEncoded: recoveryPubkey) == keys.publicKey,
               Data(base64URLEncoded: recoveryEncPubkey) == keys.encryptionPublicKey,
               let env = Data(base64URLEncoded: recoveryEnvelope) else { throw VaultError.badBackup("wrong recovery phrase for this backup") }
-        do { return (try keys.open(envelope: env), keys) } catch { throw VaultError.badBackup("wrong recovery phrase for this backup") }
+        do { return (try keys.open(envelope: env, epoch: epoch), keys) } catch { throw VaultError.badBackup("wrong recovery phrase for this backup") }
     }
 
     public var records: [StoredRecord] {

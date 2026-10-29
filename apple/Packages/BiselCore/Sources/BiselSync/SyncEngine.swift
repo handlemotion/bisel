@@ -16,6 +16,12 @@ public struct SyncReport: Sendable, Equatable {
     /// Another device rotated the vault key. This device fetched its new envelope and must be unlocked again
     /// (the vault facade has already locked itself). Local edits made under the old key are re-wrapped at unlock.
     public var rotationAdopted = false
+    /// Things that happened on the server since this device last synced (device added/revoked, key rotated, recovery used).
+    /// Empty on a device's very first sync. Show them: "a device was added with the recovery phrase" is the alarm.
+    public var events: [ServerEvent] = []
+    /// Deletes that arrived from the server without a valid sealed marker (forged, or made by a key that is not this vault's).
+    /// The item was restored from the local trash as a new revision.
+    public var rejectedTombstones: [String] = []
     public init() {}
 }
 
@@ -38,6 +44,12 @@ public struct SyncEngine: Sendable {
         let serverEpoch = try await pull(&report)
         if staleEpoch || serverEpoch > epoch {
             try await adoptRotation(&report)
+        } else if let vk = vaultKey() {
+            // Honour a remote delete only if its sealed marker verifies; a forged one is undone from the local trash.
+            if try verifyTombstones(vk, &report) {
+                var again = false
+                try await push(&report, epoch: epoch, staleEpoch: &again)   // push the restored items right away
+            }
         }
         return report
     }
@@ -66,7 +78,7 @@ public struct SyncEngine: Sendable {
             if pending.isEmpty { return }
             for rec in pending {
                 let outcome = rec.pending == .delete
-                    ? try await client.delete(id: rec.id, baseRev: rec.baseRev)
+                    ? try await client.delete(id: rec.id, baseRev: rec.baseRev, marker: rec.blob, epoch: epoch)
                     : try await client.put(id: rec.id, baseRev: rec.baseRev, blob: rec.blob, epoch: epoch)
                 switch outcome {
                 case .accepted(let server):
@@ -92,6 +104,17 @@ public struct SyncEngine: Sendable {
             report.deferredConflicts.append(local.id)
             return false
         }
+        // The manifest is shared by every device and edited by several: merge instead of choosing a side.
+        if local.id == ReservedRecord.manifestID, local.pending == .put, !current.deleted, let vk = vaultKey() {
+            let merged = try vk.withKey { key -> VaultManifest in
+                let mine = try ManifestCodec.open(local, vaultKey: key)
+                let theirs = try ManifestCodec.open(current, vaultKey: key)
+                return mine.merged(with: theirs)
+            }
+            try store.overwrite(with: current)
+            try store.commitLocal(id: local.id, deleted: false) { rev in try vk.withKey { try ManifestCodec.seal(merged, rev: rev, vaultKey: $0) } }
+            return true
+        }
         if local.pending == .put {
             guard let vk = vaultKey() else {
                 report.deferredConflicts.append(local.id)
@@ -114,17 +137,53 @@ public struct SyncEngine: Sendable {
 
     // MARK: pull
 
+    private func verifyTombstones(_ vk: LockedKey, _ report: inout SyncReport) throws -> Bool {
+        var restored = false
+        for tomb in try store.unverifiedTombstones() where !ReservedRecord.isReserved(tomb.id) {
+            let ok = vk.withKeyOrFalse { ItemSealer.verifyTombstone(tomb.blob, id: tomb.id, rev: tomb.rev, vaultKey: $0) }
+            if ok { try store.setTombstoneState(id: tomb.id, rev: tomb.rev, .verified); continue }
+            try store.setTombstoneState(id: tomb.id, rev: tomb.rev, .rejected)
+            report.rejectedTombstones.append(tomb.id)
+            // Bring back the newest live version this device held, as a new revision on top of the (forged) tombstone.
+            guard let kept = try store.trashedRecords(id: tomb.id).first(where: { !$0.record.deleted }),
+                  let payload = try? vk.withKey({ try ItemSealer.open(blob: kept.record.blob, id: kept.record.id, rev: kept.record.rev, vaultKey: $0) })
+            else { continue }
+            try store.commitLocal(id: tomb.id, deleted: false) { rev in
+                try vk.withKey { try ItemSealer.seal(payload: payload, id: tomb.id, rev: rev, vaultKey: $0) }
+            }
+            restored = true
+        }
+        return restored
+    }
+
     /// Returns the server's epoch as of the last page.
     private func pull(_ report: inout SyncReport) async throws -> Int {
         var since = try store.cursor()
+        let knownHead = try store.knownHeadSeq()
+        let eventCursor = try store.eventCursor()
+        var newEvents: [ServerEvent] = []
         while true {
-            let page = try await client.pull(since: since)
+            let page = try await client.pull(since: since, eventsSince: eventCursor == 0 ? nil : eventCursor)
+            // A server that reports less than it already told us, or a cursor/records beyond its own head, is rolling us back or lying.
+            if page.headSeq < knownHead { throw IntegrityError.serverRolledBack(known: knownHead, reported: page.headSeq) }
+            if page.nextSince < since || page.nextSince > page.headSeq || (page.hasMore && page.nextSince == since)
+                || page.records.contains(where: { $0.seq <= since || $0.seq > page.headSeq }) {
+                throw IntegrityError.invalidCursor
+            }
             for rec in page.records where try store.applyRemote(rec) { report.pulled += 1 }
             since = page.nextSince
             try store.setCursor(since)
+            try store.setKnownHeadSeq(page.headSeq)
             report.headSeq = page.headSeq
             if let devices = try? JSONEncoder().encode(page.devices) { try store.setDeviceListJSON(devices) }
+            newEvents = page.events
             if !page.hasMore {
+                if let top = page.events.last?.id {
+                    // The first sync of a device only learns the current position; nothing in it is news.
+                    if eventCursor != 0 { report.events = page.events.filter { $0.id > eventCursor } }
+                    try store.setEventCursor(top)
+                }
+                if let json = try? JSONEncoder().encode(newEvents) { try store.setRecentEventsJSON(json) }
                 // Recovery material is only recorded from a complete pull, so a backup never pairs a rotated
                 // recovery envelope with half-rotated items.
                 if let recovery = page.recovery {

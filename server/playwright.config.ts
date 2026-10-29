@@ -18,7 +18,7 @@ export default defineConfig({
     command: [
       "rm -rf .wrangler/test-state",
       "pnpm exec wrangler d1 migrations apply bisel --local --persist-to .wrangler/test-state",
-      `pnpm exec wrangler dev --port ${PORT} --persist-to .wrangler/test-state --var BOOTSTRAP_TOKEN:${TEST_BOOTSTRAP_TOKEN} --var AUTH_BACKOFF_MS:400`,
+      `pnpm exec wrangler dev --port ${PORT} --persist-to .wrangler/test-state --var BOOTSTRAP_TOKEN:${TEST_BOOTSTRAP_TOKEN} --var AUTH_BACKOFF_MS:400 --var RECOVERY_ACTIVATION_DELAY_SECONDS:2`,
     ].join(" && "),
     port: PORT,
     reuseExistingServer: false,

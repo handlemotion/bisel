@@ -26,6 +26,18 @@ public struct RecoverySigner: RequestSigner {
     public func sign(_ message: Data) throws -> Data { try key.signature(for: message) }
 }
 
+/// The vault-admin signature (SECURITY-REVIEW H1): Ed25519 by a key derived from VK, sent as `X-Bisel-Admin` on the routes
+/// that can destroy or re-key the vault. Only an unlocked vault can make one.
+public struct AdminSigner: Sendable {
+    let key: Curve25519.Signing.PrivateKey
+    public init(key: Curve25519.Signing.PrivateKey) { self.key = key }
+    public init(vaultKey: Data) throws { key = try VaultAdmin.signingKey(vaultKey: vaultKey) }
+    public var publicKey: Data { key.publicKey.rawRepresentation }
+    func signature(device: String, canonicalRequest: String) throws -> Data {
+        try key.signature(for: VaultAdmin.message(device: device, canonicalRequest: canonicalRequest))
+    }
+}
+
 enum Canonical {
     private static let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 

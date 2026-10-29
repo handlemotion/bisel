@@ -24,7 +24,11 @@
     // AUTH_BACKOFF_MS late. Valid signatures are never refused because of this counter.
     "AUTH_FAIL_LIMIT": "20",
     "AUTH_FAIL_WINDOW_SECONDS": "600",
-    "AUTH_BACKOFF_MS": "1000"
+    "AUTH_BACKOFF_MS": "1000",
+    // Previous item blobs / wrapped keys are kept this long so a bad write can be undone by the owner.
+    "HISTORY_RETENTION_DAYS": "30",
+    // A device registered through the recovery phrase can only sign requests after this delay (0 = immediately).
+    "RECOVERY_ACTIVATION_DELAY_SECONDS": "0"
   },
 
   // ---- production --------------------------------------------------------------------------
@@ -52,7 +56,11 @@
       "vars": {
         "AUTH_FAIL_LIMIT": "20",
         "AUTH_FAIL_WINDOW_SECONDS": "600",
-        "AUTH_BACKOFF_MS": "1000"
+        "AUTH_BACKOFF_MS": "1000",
+        "HISTORY_RETENTION_DAYS": "30",
+        // 24 h: someone who has seen the 24 words once cannot silently take the vault; every enrolled device is
+        // told on its next sync and can cancel. Set to "0" to recover instantly.
+        "RECOVERY_ACTIVATION_DELAY_SECONDS": "86400"
       }
     }
   }

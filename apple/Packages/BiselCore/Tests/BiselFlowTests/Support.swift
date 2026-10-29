@@ -17,12 +17,14 @@ struct Device {
         location = StoreLocation(directory: dir)
         keyStore = SoftwareDeviceKeyStore(directory: dir)
         self.gate = gate
-        vault = try Vault(.init(location: location, keyStore: keyStore, gate: gate, fillWindow: fillWindow, deviceKind: "test"))
+        vault = try Vault(.init(location: location, keyStore: keyStore, gate: gate, fillWindow: fillWindow, deviceKind: "test",
+                                secrets: FileSecretStore(directory: dir)))
     }
 
     /// Re-opens the same store and keys as a new process would.
     func relaunched(fillWindow: TimeInterval = 300) throws -> Vault {
-        try Vault(.init(location: location, keyStore: keyStore, gate: gate, fillWindow: fillWindow, deviceKind: "test"))
+        try Vault(.init(location: location, keyStore: keyStore, gate: gate, fillWindow: fillWindow, deviceKind: "test",
+                        secrets: FileSecretStore(directory: location.directory)))
     }
 
     var signedClientFactory: (URL, String) -> SyncClient {
@@ -56,6 +58,8 @@ extension Device {
         try await approver.vault.approveEnrollment(request)
         try await vault.completeEnrollment()
         try await vault.unlock()
+        // What the two humans do: compare the code the approving device shows with the new one's.
+        try await vault.confirmEnrollment(code: try await approver.vault.verificationCode())
         try await vault.sync()
     }
 }

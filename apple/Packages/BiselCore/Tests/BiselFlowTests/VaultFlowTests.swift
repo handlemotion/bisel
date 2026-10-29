@@ -24,9 +24,9 @@ struct VaultFlowTests {
             let relaunched = try a.relaunched()
             try await relaunched.unlock()
             #expect(try await relaunched.items().items.map(\.title) == ["GitHub"])
-            #expect(try await relaunched.pendingChanges() == 1)
+            #expect(try await relaunched.pendingChanges() == 2, "the item and the vault manifest")
             let report = try await relaunched.sync()
-            #expect(report.pushed == 1)
+            #expect(report.pushed == 2)
 
             try await b.enroll(through: a, server: server)
             let onB = try await b.vault.items().items
@@ -52,7 +52,7 @@ struct VaultFlowTests {
             // Zero knowledge: pull the raw records as a device would and look for plaintext.
             let id = try #require(try await a.vault.identity())
             let page = try await a.signedClientFactory(server.url, id.deviceID).pull(since: 0)
-            #expect(page.records.count == 2)   // GitHub + the Temp tombstone
+            #expect(page.records.count == 3)   // GitHub, the Temp tombstone, and the sealed vault manifest
             for record in page.records {
                 for needle in ["GitHub", "github.com", "rotated-by-b", "correct-horse", "rodrigo", "JBSWY3DPEHPK3PXP"] {
                     #expect(record.blob.range(of: Data(needle.utf8)) == nil, "server record leaks \(needle)")
@@ -123,7 +123,7 @@ struct VaultFlowTests {
             await #expect(throws: VaultError.locked) { _ = try await a.vault.item(id: "anything") }
             // Background sync works while locked (no VK needed to move ciphertext).
             let report = try await a.vault.sync()
-            #expect(report.pushed == 1)
+            #expect(report.pushed == 2)   // the item and the manifest
         }
     }
 
@@ -314,9 +314,8 @@ struct VaultFlowTests {
     }
 
     /// Tries to open a stored record with a raw vault key; nil when it does not authenticate.
-    private func open(_ record: StoredRecord, with vk: Data) -> Item? {
-        guard let payload = try? ItemSealer.open(blob: record.blob, id: record.id, rev: record.rev, vaultKey: SymmetricKey(data: vk)) else { return nil }
-        return try? ItemCodec.decode(payload, id: record.id)
+    private func open(_ record: StoredRecord, with vk: Data) -> Data? {
+        record.deleted ? nil : try? ItemSealer.open(blob: record.blob, id: record.id, rev: record.rev, vaultKey: SymmetricKey(data: vk))
     }
 
     @Test("revoking a device rotates the vault key: the revoked device keeps nothing it can use against the server's data")
@@ -334,7 +333,7 @@ struct VaultFlowTests {
             let bIdentity = try #require(try await b.vault.identity())
             let oldVK = try await b.keyStore.openEnvelope(try #require(bIdentity.envelope), reason: "test")
             let before = try await serverRecords(server, as: a)
-            #expect(before.allSatisfy { open($0, with: oldVK) != nil }, "sanity: the old key opens the pre-revoke ciphertext")
+            #expect(before.filter { !$0.deleted }.allSatisfy { open($0, with: oldVK) != nil }, "sanity: the old key opens the pre-revoke ciphertext")
 
             try await a.vault.revoke(deviceID: bIdentity.deviceID)
 
@@ -350,7 +349,7 @@ struct VaultFlowTests {
             let fresh = try await a.vault.save(login("Created after revoke", password: "new-pw"))
             try await a.vault.sync()
             let after = try await serverRecords(server, as: a)
-            #expect(after.count == 3)
+            #expect(after.filter { !$0.deleted }.count == 4)   // three items and the manifest
             #expect(after.allSatisfy { open($0, with: oldVK) == nil }, "the revoked device's key opens nothing the server holds now")
             // Item payloads and revisions are not rewritten by a rotation: Mail only had its key re-wrapped.
             let mailBefore = try #require(before.first { $0.id == mail.id }), mailAfter = try #require(after.first { $0.id == mail.id })
@@ -358,7 +357,7 @@ struct VaultFlowTests {
             #expect(mailAfter.blob.dropFirst(ItemSealer.wrappedKeyLength) == mailBefore.blob.dropFirst(ItemSealer.wrappedKeyLength))
             #expect(mailAfter.blob.prefix(ItemSealer.wrappedKeyLength) != mailBefore.blob.prefix(ItemSealer.wrappedKeyLength))
             // (What B already copied stays readable to B: that data left the vault before the revoke.)
-            #expect(before.allSatisfy { open($0, with: oldVK) != nil })
+            #expect(before.filter { !$0.deleted }.allSatisfy { open($0, with: oldVK) != nil })
 
             // The remaining devices carry on. C learns of the rotation on its next sync, locks, and unlocks into the new key.
             #expect(try await a.vault.revealPassword(id: mail.id) == "mail-pw")
@@ -447,7 +446,7 @@ struct VaultFlowTests {
             try await b.enroll(through: a, server: server)
 
             // B keeps editing and syncing while A rotates the key and revokes nobody.
-            async let rotation: Void = a.vault.rotateVaultKey()
+            async let rotation = a.vault.rotateVaultKey()
             var written: [String: String] = [:]
             for n in 0..<8 {
                 let item = try await b.vault.save(login("Race \(n)", password: "race-\(n)"))
@@ -455,7 +454,7 @@ struct VaultFlowTests {
                 do { try await b.vault.sync() } catch is VaultError { try await b.vault.unlock() }
                 if await !b.vault.isUnlocked { try await b.vault.unlock() }
             }
-            try await rotation
+            _ = try await rotation
             // Informational: how often the server turned a rotation away because B's writes landed in between.
             print("race flow: server rotate conflicts = \(server.log.components(separatedBy: "rotate_conflict").count - 1)")
 

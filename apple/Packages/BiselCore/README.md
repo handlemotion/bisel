@@ -7,6 +7,36 @@ extensions and tools.
 
 ## CHANGES
 
+**Security-review fixes (SECURITY-REVIEW.md H1-H3, M1-M5, M8, M17, Lows).** For the Mac-app session. The `Vault` facade methods you call
+keep their signatures; this is what is new or behaves differently.
+
+- **Reset your dev server and vaults.** Blob format (AAD labels `|wrap`/`|body`), tombstones (sealed markers instead of empty blobs), recovery envelope
+  (HPKE `info` binds epoch + RK-sig), backup file (adds `epoch`) and server schema (migration 0003) all changed. `pnpm reset` in `server/`, then bootstrap again.
+- **Needs an unlocked vault now** (internally they sign with the vault-admin key): `approveEnrollment`, `revoke`, `rotateVaultKey`, `rotateRecovery`, `revokeWithoutRotation`.
+- **`revoke(deviceID:)` returns `RotationReport` (`@discardableResult`)**: `.secretsToChange` / `.exposed` are the items the device could have read; show them and offer to change those passwords.
+  `rotateVaultKey` returns the same type. It now throws **`IntegrityError.unknownDevices([UnknownDevice])`** when the server lists an active device nobody approved on this device
+  (name, 96-bit fingerprint, `pendingActivation`); offer "Revoke" (`revoke(deviceID:)`) or, after the user compared the fingerprint on the device itself, `trustDevice(id:fingerprint:)`.
+- **Enrollment**: after `completeEnrollment()` + `unlock()`, show `verificationCode()` on both devices (approver and new) and have the user compare / type it:
+  `confirmEnrollment(code:)` (mismatch locks the vault and throws `IntegrityError.verificationCodeMismatch`). `enrollmentNeedsConfirmation` says it is still open.
+  `sync()` throws `IntegrityError.keyConfirmationFailed` (and locks) if the received vault key does not open the vault's manifest.
+- **Recovery phrase**: `recoveryNeedsConfirmation` is true after `bootstrap` and after `rotateRecovery` until the user proves the phrase is written down:
+  use `RecoveryPhrase.quizPositions()` + `phrase.verify(answers:)` while you still hold the phrase, then `markRecoveryConfirmed()`; or `confirmRecovery(phrase:)` with all 24 words.
+  If it stays true after a restart, call `rotateRecovery()` to get a phrase you can show again. `recoveryMaterialChanged` (server tried to swap the recovery keys) should raise a loud alert; `exportBackup` refuses then.
+- **`sync()`** also: reports `events` (device added/revoked, key rotated, recovery used: show them), `rejectedTombstones` (a forged delete was ignored and the item restored), may throw
+  `IntegrityError.serverRolledBack` / `.invalidCursor` / `.pendingActivation(until:)`. A device added with the recovery phrase may be held back by the server for 24 h in production:
+  `recover()` returns normally, `activationDate()` tells until when, `sync()` throws `.pendingActivation` before that.
+- **Trash and history**: `trash()` (what the server deleted or overwrote, 30 days, local), `serverHistory(itemID:)` (retained by the server, readable with the current key), `restore(_:)`.
+- **Biometry** (Secure Enclave, cannot be exercised unsigned): DK-enc is `.biometryCurrentSet`. `deviceKeyStatus()` is `.biometryChanged` after a fingerprint change, `unlock()` then throws `DeviceKeyError.biometryChanged`;
+  show "add this Mac again" and call `removeLocalDevice()` before enrolling or recovering again.
+- **Server address** is no longer in `bisel.sqlite`: with the Secure Enclave key store `Vault.Configuration` defaults `secrets` to a Keychain store in the same access group (pass your own `SecretStore` to override).
+  A database written before this change is migrated on first open.
+- `SyncClient` refuses non-https URLs (except localhost), does not follow redirects, caps responses at 64 MiB. `DeviceInfo.name` is stripped of control/bidi characters on decode. Fingerprints are 96 bits.
+- `bisel-dev`: `--token`/`--phrase` take `-` (stdin) or `$BISEL_TOKEN`/`$BISEL_PHRASE`; new `verify-code`, `confirm-enrollment`, `trust`, `roster`, `trash`, `history`, `events`, `confirm-recovery`; device ids that start with `-` need `--` before them.
+- Lower level: `SyncClient.delete(id:baseRev:marker:epoch:)`, admin-signed calls take an `AdminSigner`, `rotate(…newAdminPublicKey:tombstones:…admin:)`, `RecoveryKeys.seal/open` take the epoch,
+  `ItemSealer.sealTombstone/verifyTombstone`, `VaultAdmin` (admin key, verification code), reserved record `ReservedRecord.manifestID` (never shown by `items()`).
+
+**Earlier: vault-key rotation.**
+
 **Vault-key rotation (this change).** What the Mac app can rely on, and what moved:
 
 - **Source-compatible for the `Vault` facade.** Every existing `Vault` call still compiles with the same signature.

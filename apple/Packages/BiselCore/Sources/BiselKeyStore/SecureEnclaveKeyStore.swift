@@ -12,7 +12,8 @@ import BiselCrypto
 public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Sendable {
     public let implementation = "secure-enclave"
 
-    private let accessGroup: String?
+    /// The keychain access group the keys live in (nil = the app's default group).
+    public let accessGroup: String?
     private let tagPrefix: String
     private let persistent: Bool
     private let lock = NSLock()
@@ -33,11 +34,23 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
 
     public func createKeys() throws -> DevicePublicKeys {
         try deleteKeys()
-        let enc = try makeKey(.enc, flags: [.biometryAny, .privateKeyUsage],
+        // `.biometryCurrentSet`: adding or removing a fingerprint invalidates DK-enc. With `.biometryAny` someone who only
+        // knows the Mac password could enrol their own finger and open the vault. Recovery is a re-enrolment (DeviceKeyError).
+        let enc = try makeKey(.enc, flags: [.biometryCurrentSet, .privateKeyUsage],
                               accessible: kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+        recordBiometryDomainState()
         let sig = try makeKey(.sig, flags: [.privateKeyUsage],
                               accessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
         return DevicePublicKeys(sig: try publicBytes(sig), enc: try publicBytes(enc))
+    }
+
+    public func status() -> DeviceKeyStatus {
+        guard persistent else { return cache["enc"] == nil ? .missing : .ok }
+        let sigPresent = ((try? loadKey(.sig, context: nil)) ?? nil) != nil
+        let encPresent = ((try? loadKey(.enc, context: nil)) ?? nil) != nil
+        if !sigPresent { return .missing }
+        if !encPresent { return .biometryChanged }
+        return biometryDomainStateChanged() ? .biometryChanged : .ok
     }
 
     public func publicKeys() throws -> DevicePublicKeys? {
@@ -69,7 +82,12 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
             let context = LAContext()                 // one context: the first decrypt authenticates, the rest reuse it
             context.localizedReason = reason
             context.localizedFallbackTitle = ""
-            guard let key = try loadKey(.enc, context: context) else { throw KeyStoreError.noKeys }
+            if persistent, self.biometryDomainStateChanged(using: context) { throw DeviceKeyError.biometryChanged }
+            guard let key = try loadKey(.enc, context: context) else {
+                // DK-sig survives, DK-enc does not: the Secure Enclave invalidated it after a fingerprint change.
+                if persistent, (try? loadKey(.sig, context: nil)) ?? nil != nil { throw DeviceKeyError.encryptionKeyMissing }
+                throw KeyStoreError.noKeys
+            }
             return try envelopes.map { envelope in
                 var err: Unmanaged<CFError>?
                 guard let out = SecKeyCreateDecryptedData(key, DeviceEnvelope.algorithm, envelope as CFData, &err) else {
@@ -99,9 +117,49 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
         }
     }
 
+    // MARK: biometric enrolment tracking (belt and braces next to .biometryCurrentSet)
+
+    private var domainStateAccount: String { "\(tagPrefix).biometry-domain" }
+
+    private func domainStateQuery() -> [CFString: Any] {
+        var q: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: "app.bisel.keystore", kSecAttrAccount: domainStateAccount]
+        if let accessGroup { q[kSecAttrAccessGroup] = accessGroup }
+        #if os(macOS)
+        q[kSecUseDataProtectionKeychain] = true
+        #endif
+        return q
+    }
+
+    /// `LAContext.domainState.biometry.stateHash` changes whenever the set of enrolled fingerprints/faces changes.
+    private func currentDomainState(using context: LAContext?) -> Data? {
+        let ctx = context ?? LAContext()
+        var error: NSError?
+        guard ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else { return nil }
+        return ctx.domainState.biometry.stateHash
+    }
+
+    private func recordBiometryDomainState() {
+        guard persistent, let state = currentDomainState(using: nil) else { return }
+        SecItemDelete(domainStateQuery() as CFDictionary)
+        var add = domainStateQuery()
+        add[kSecValueData] = state
+        add[kSecAttrAccessible] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        SecItemAdd(add as CFDictionary, nil)
+    }
+
+    private func biometryDomainStateChanged(using context: LAContext? = nil) -> Bool {
+        var q = domainStateQuery()
+        q[kSecReturnData] = true
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess, let stored = item as? Data,
+              let current = currentDomainState(using: context) else { return false }
+        return !stored.constantTimeEquals(current)
+    }
+
     public func deleteKeys() throws {
         lock.withLock { cache.removeAll() }
         guard persistent else { return }
+        SecItemDelete(domainStateQuery() as CFDictionary)
         for role in [Role.enc, .sig] {
             let status = SecItemDelete(query(role, context: nil) as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else {

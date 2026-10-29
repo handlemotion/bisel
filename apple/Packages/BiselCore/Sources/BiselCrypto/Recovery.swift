@@ -65,31 +65,60 @@ public struct RecoveryKeys: Sendable, CustomStringConvertible, CustomDebugString
     public var encryptionPublicKey: Data { encryptionKey.publicKey.rawRepresentation }
 
     private static let suite = HPKE.Ciphersuite(kem: .Curve25519_HKDF_SHA256, kdf: .HKDF_SHA256, aead: .AES_GCM_256)
-    private static let info = Data("bisel/v1|recovery-envelope".utf8)
     private static let encapsulatedKeyLength = 32
 
+    /// The envelope is bound to the vault-key epoch and to the recovery signing key it belongs to, so a server cannot hand back
+    /// an envelope from another epoch (an old VK) or from another recovery key as if it were current.
+    private static func info(epoch: Int, signingKey: Data) -> Data {
+        Data("bisel/v1|recovery-envelope|epoch=\(epoch)|rk-sig=\(signingKey.base64URLEncoded())".utf8)
+    }
+
     /// Recovery envelope: a copy of VK sealed to `encryptionPublicKey`. Layout: encapsulated key (32) || ciphertext.
-    public static func seal(vaultKey: Data, toEncryptionKey publicKey: Data) throws -> Data {
+    public static func seal(vaultKey: Data, toEncryptionKey publicKey: Data, signingKey: Data, epoch: Int) throws -> Data {
         do {
             let recipient = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: publicKey)
-            var sender = try HPKE.Sender(recipientKey: recipient, ciphersuite: suite, info: info)
+            var sender = try HPKE.Sender(recipientKey: recipient, ciphersuite: suite, info: info(epoch: epoch, signingKey: signingKey))
             return sender.encapsulatedKey + (try sender.seal(vaultKey, authenticating: Data()))
         } catch {
             throw BiselCryptoError.envelopeFailed("recovery envelope: \(type(of: error))")
         }
     }
 
-    /// Seals to this phrase's own public key (bootstrap).
-    public func seal(vaultKey: Data) throws -> Data { try Self.seal(vaultKey: vaultKey, toEncryptionKey: encryptionPublicKey) }
+    /// Seals to this phrase's own public keys (bootstrap, or re-sealing after a new phrase).
+    public func seal(vaultKey: Data, epoch: Int) throws -> Data {
+        try Self.seal(vaultKey: vaultKey, toEncryptionKey: encryptionPublicKey, signingKey: publicKey, epoch: epoch)
+    }
 
-    public func open(envelope: Data) throws -> Data {
-        guard envelope.count > Self.encapsulatedKeyLength + Aead.overhead - 12 else { throw BiselCryptoError.malformedCiphertext }
+    public func open(envelope: Data, epoch: Int) throws -> Data {
+        guard envelope.count > Self.encapsulatedKeyLength + 16 else { throw BiselCryptoError.malformedCiphertext }
         do {
-            var recipient = try HPKE.Recipient(privateKey: encryptionKey, ciphersuite: Self.suite, info: Self.info,
+            var recipient = try HPKE.Recipient(privateKey: encryptionKey, ciphersuite: Self.suite,
+                                               info: Self.info(epoch: epoch, signingKey: publicKey),
                                                encapsulatedKey: envelope.prefix(Self.encapsulatedKeyLength))
             return try recipient.open(envelope.dropFirst(Self.encapsulatedKeyLength), authenticating: Data())
         } catch {
             throw BiselCryptoError.authenticationFailed
+        }
+    }
+}
+
+public extension RecoveryPhrase {
+    /// `count` distinct random positions (1-based) the user must type back to prove the phrase was written down.
+    static func quizPositions(count: Int = 3) -> [Int] {
+        var pool = Array(1...24)
+        var out: [Int] = []
+        for _ in 0..<min(count, pool.count) {
+            let i = Int(BiselRandom.bytes(1)[0]) % pool.count
+            out.append(pool.remove(at: i))
+        }
+        return out.sorted()
+    }
+
+    /// True if every answer (position -> word, case and surrounding space ignored) matches this phrase.
+    func verify(answers: [Int: String]) -> Bool {
+        guard !answers.isEmpty else { return false }
+        return answers.allSatisfy { position, word in
+            (1...24).contains(position) && words[position - 1] == word.trimmingCharacters(in: .whitespaces).lowercased()
         }
     }
 }
