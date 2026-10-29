@@ -279,6 +279,32 @@ public final class LocalStore: Sendable {
         }
     }
 
+    /// Re-bases a record on top of what the server holds (`serverRev`, 0 = nothing): it becomes a pending edit sealed for
+    /// `serverRev + 1`. Used when the server lost or rolled back state this device still has. Skipped (false) if the record
+    /// changed since `record` was read.
+    @discardableResult
+    public func rebase(_ record: StoredRecord, serverRev: Int, seal: (_ rev: Int) throws -> Data) throws -> Bool {
+        try pool.write { db in
+            guard let cur = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [record.id]).map(StoredRecord.init(row:)),
+                  cur.rev == record.rev, cur.pending == record.pending, cur.blob == record.blob else { return false }
+            var next = cur
+            next.rev = serverRev + 1
+            next.baseRev = serverRev
+            next.pending = cur.deleted ? .delete : .put
+            next.tombstone = .verified
+            next.blob = try seal(next.rev)
+            try write(next, db)
+            return true
+        }
+    }
+
+    /// Set by `Vault.acknowledgeServerReset`: the next complete pull re-uploads whatever the server no longer has.
+    public func reseedPending() throws -> Bool { try getMeta("reseed") != nil }
+    public func setReseedPending(_ on: Bool) throws {
+        if on { try setMeta("reseed", Data("1".utf8)) }
+        else { try pool.write { try $0.execute(sql: "DELETE FROM meta WHERE key = 'reseed'") } }
+    }
+
     /// Marks a pending record as accepted by the server, unless it changed again in the meantime.
     public func confirmPushed(pushed: StoredRecord, server: StoredRecord) throws {
         try pool.write { db in

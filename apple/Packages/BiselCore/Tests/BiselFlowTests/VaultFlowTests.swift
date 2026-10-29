@@ -256,6 +256,73 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("after the server's database is restored from an earlier point, the device uploads again what the restore lost")
+    func deviceReseedsARestoredServer() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            let phrase = try await a.bootstrap(server)
+            var x = try await a.vault.save(login("Kept", password: "x1"))
+            try await a.vault.sync()
+            x.password = "x2"
+            _ = try await a.vault.save(x)
+            let y = try await a.vault.save(login("Newer", password: "y1"))
+            try await a.vault.sync()
+
+            // Restore point: Y does not exist yet and X is back at its first revision.
+            try server.sql("DELETE FROM items WHERE id = '\(y.id)'")
+            try server.sql("UPDATE items SET rev = 1 WHERE id = '\(x.id)'")
+            try server.sql("UPDATE meta SET head_seq = head_seq - 1")
+            do { _ = try await a.vault.sync(); Issue.record("a rolled-back server must be refused") }
+            catch IntegrityError.serverRolledBack {}
+
+            try await a.vault.acknowledgeServerReset()
+            let report = try await a.vault.sync()
+            #expect(report.pushed >= 2, "both the lost item and the lost revision go back up")
+            #expect(report.conflicts.isEmpty)
+            #expect(try await a.vault.pendingChanges() == 0)
+            let fresh = try Device("fresh")
+            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh")
+            try await fresh.vault.sync()
+            #expect(try await fresh.vault.revealPassword(id: x.id) == "x2")
+            #expect(try await fresh.vault.revealPassword(id: y.id) == "y1")
+        }
+    }
+
+    @Test("a healthy device re-seeds a rebuilt server, and a pending edit against a record the server lost is uploaded, not stuck")
+    func deviceReseedsAnEmptyServer() async throws {
+        try await TestServer.with { old in
+            let a = try Device("a")
+            let phrase = try await a.bootstrap(old)
+            let one = try await a.vault.save(login("One", password: "p1"))
+            let two = try await a.vault.save(login("Two", password: "p2"))
+            try await a.vault.sync()
+            try await a.vault.delete(id: two.id)
+            try await a.vault.sync()
+
+            try await TestServer.with { rebuilt in
+                try await a.vault.reconnectServer(rebuilt.url, bootstrapToken: TestServer.bootstrapToken)
+                let report = try await a.vault.sync()
+                #expect(report.pushed >= 1)
+                #expect(try await a.vault.pendingChanges() == 0)
+                let fresh = try Device("fresh")
+                try await fresh.vault.recover(server: rebuilt.url, phrase: phrase, deviceName: "fresh")
+                try await fresh.vault.sync()
+                #expect(try await fresh.vault.items().items.map(\.id) == [one.id], "the live item came back, the deleted one stays deleted")
+                #expect(try await fresh.vault.revealPassword(id: one.id) == "p1")
+
+                // An edit made against the old revision when the server has lost the record altogether.
+                try rebuilt.sql("DELETE FROM items WHERE id = '\(one.id)'")
+                try rebuilt.sql("UPDATE meta SET head_seq = (SELECT COALESCE(MAX(seq), 0) FROM items)")
+                var edited = try await a.vault.item(id: one.id)
+                edited.password = "p1-edited"
+                _ = try await a.vault.save(edited)
+                let again = try await a.vault.sync()
+                #expect(again.deferredConflicts.isEmpty)
+                #expect(try await a.vault.pendingChanges() == 0, "the edit was not left stuck")
+            }
+        }
+    }
+
     @Test("recover from the 24 words on a fresh store; wrong or rotated-away phrases do not work")
     func recoveryFromPhrase() async throws {
         try await TestServer.with { server in

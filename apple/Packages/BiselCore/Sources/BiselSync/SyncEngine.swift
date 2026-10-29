@@ -41,10 +41,17 @@ public struct SyncEngine: Sendable {
         let epoch = try store.identity()?.epoch ?? 1
         var staleEpoch = false
         try await push(&report, epoch: epoch, staleEpoch: &staleEpoch)
-        let serverEpoch = try await pull(&report)
+        var serverRevs: [String: Int] = [:]
+        let reseeding = try store.reseedPending()
+        let serverEpoch = try await pull(&report, serverRevs: &serverRevs, fromStart: reseeding)
         if staleEpoch || serverEpoch > epoch {
             try await adoptRotation(&report)
         } else if let vk = vaultKey() {
+            if reseeding {
+                // The server was reset (restored from an older state, or rebuilt): put back what only this device still has.
+                try reseed(serverRevs: serverRevs, vk)
+                try await push(&report, epoch: epoch, staleEpoch: &staleEpoch)
+            }
             // Honour a remote delete only if its sealed marker verifies; a forged one is undone from the local trash.
             if try verifyTombstones(vk, &report) {
                 var again = false
@@ -99,10 +106,13 @@ public struct SyncEngine: Sendable {
     /// Remote wins; a conflicting local edit survives as a new item. Returns false if it had to be deferred.
     private func resolveConflict(local: StoredRecord, current: StoredRecord?, _ report: inout SyncReport) throws -> Bool {
         guard let current else {
-            // Server has no such record (e.g. wiped): nothing to keep or merge with; re-push as a new item next time.
+            // Server has no such record (e.g. wiped): nothing to keep or merge with; upload it again as a new item.
             if local.pending == .delete { try store.forget(local.id); return true }
-            report.deferredConflicts.append(local.id)
-            return false
+            guard let vk = vaultKey(), (try? rebase(local, onto: 0, vk)) == true else {
+                report.deferredConflicts.append(local.id)
+                return false
+            }
+            return true
         }
         // The manifest is shared by every device and edited by several: merge instead of choosing a side.
         if local.id == ReservedRecord.manifestID, local.pending == .put, !current.deleted, let vk = vaultKey() {
@@ -135,6 +145,31 @@ public struct SyncEngine: Sendable {
         return true
     }
 
+    // MARK: reseed
+
+    /// Re-seals `record` for `serverRev + 1` (its payload is unchanged) so it can be pushed on top of what the server holds.
+    private func rebase(_ record: StoredRecord, onto serverRev: Int, _ vk: LockedKey) throws -> Bool {
+        try store.rebase(record, serverRev: serverRev) { rev in
+            try vk.withKey { key in
+                if record.deleted { return try ItemSealer.sealTombstone(id: record.id, rev: rev, vaultKey: key) }
+                let payload = try ItemSealer.open(blob: record.blob, id: record.id, rev: record.rev, vaultKey: key)
+                return try ItemSealer.seal(payload: payload, id: record.id, rev: rev, vaultKey: key)
+            }
+        }
+    }
+
+    /// After a complete pull from the start: every record this device holds in a newer revision than the server (or that the
+    /// server lacks) becomes a pending edit on top of the server's revision. Records the server has at the same revision
+    /// or newer were already taken by the pull.
+    private func reseed(serverRevs: [String: Int], _ vk: LockedKey) throws {
+        for rec in try store.allRecords() where rec.pending == .none {
+            let serverRev = serverRevs[rec.id] ?? 0
+            guard rec.rev > serverRev, !(rec.deleted && serverRev == 0) else { continue }
+            _ = try rebase(rec, onto: serverRev, vk)
+        }
+        try store.setReseedPending(false)
+    }
+
     // MARK: pull
 
     private func verifyTombstones(_ vk: LockedKey, _ report: inout SyncReport) throws -> Bool {
@@ -157,8 +192,8 @@ public struct SyncEngine: Sendable {
     }
 
     /// Returns the server's epoch as of the last page.
-    private func pull(_ report: inout SyncReport) async throws -> Int {
-        var since = try store.cursor()
+    private func pull(_ report: inout SyncReport, serverRevs: inout [String: Int], fromStart: Bool) async throws -> Int {
+        var since = fromStart ? 0 : try store.cursor()
         let knownHead = try store.knownHeadSeq()
         let eventCursor = try store.eventCursor()
         var newEvents: [ServerEvent] = []
@@ -170,7 +205,10 @@ public struct SyncEngine: Sendable {
                 || page.records.contains(where: { $0.seq <= since || $0.seq > page.headSeq }) {
                 throw IntegrityError.invalidCursor
             }
-            for rec in page.records where try store.applyRemote(rec) { report.pulled += 1 }
+            for rec in page.records {
+                serverRevs[rec.id] = rec.rev
+                if try store.applyRemote(rec) { report.pulled += 1 }
+            }
             since = page.nextSince
             try store.setCursor(since)
             try store.setKnownHeadSeq(page.headSeq)

@@ -291,6 +291,38 @@ public actor Vault {
         try store.setIdentity(identity)
     }
 
+    /// Disaster recovery from a healthy device: registers this device and the vault's recovery keys with a server that lost
+    /// everything (a rebuilt or replaced box, bootstrap token required). The next unlocked `sync()` uploads every item this
+    /// device holds. Other devices were registered with the old server: enrol them again.
+    public func reconnectServer(_ server: URL, bootstrapToken: String) async throws {
+        let key = try requireKey()
+        var identity = try requireIdentity()
+        guard identity.serverURL != nil else { throw VaultError.noServer }   // a local-only vault uses `connectServer`
+        guard let me = identity.roster.first(where: { $0.deviceID == identity.deviceID }), let envelope = identity.envelope,
+              let recoveryPub = identity.recoveryPublicKey, let recoveryEncPub = identity.recoveryEncryptionPublicKey,
+              !recoveryEncPub.isEmpty else { throw VaultError.notConfigured }
+        try await config.gate.authenticate(reason: "Connect \(identity.deviceName) to a new server")
+        var raw = try key.rawBytes()
+        defer { raw.zeroize() }
+        // A fresh server starts at epoch 1 and the recovery envelope is bound to the epoch: seal it again for that.
+        let recoveryEnv = try RecoveryKeys.seal(vaultKey: raw, toEncryptionKey: recoveryEncPub, signingKey: recoveryPub, epoch: 1)
+        let device = WireDevice(id: identity.deviceID, name: identity.deviceName, kind: config.deviceKind, sigPubkey: me.sigPubkey,
+                                encPubkey: me.encPubkey, envelope: envelope)
+        // Harmless if the call below fails: the flag only makes the next sync pull from the start and re-upload what is missing.
+        try store.setReseedPending(true)
+        try await SyncClient.bootstrap(baseURL: server, token: bootstrapToken, device: device, recoveryPublicKey: recoveryPub,
+                                       recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
+                                       adminPublicKey: try adminSigner(key).publicKey)
+        identity.serverURL = server
+        identity.epoch = 1
+        identity.recoveryEnvelope = recoveryEnv
+        identity.previousEnvelope = nil
+        try store.setIdentity(identity)
+        try store.setKnownHeadSeq(0)
+        try store.setCursor(0)
+        try store.setEventCursor(0)
+    }
+
     private func register(server: URL, bootstrapToken: String, deviceName: String, vaultKey vk: Data, recovery: RecoveryBundle) async throws {
         let pub = try config.keyStore.createKeys()
         let deviceID = BiselRandom.identifier()
@@ -845,7 +877,11 @@ public actor Vault {
 
     /// The server reported an older state than this device saw (restored from a backup?). After the owner has checked that
     /// this is expected, forget the old position and pull everything again.
+    ///
+    /// Anything this device holds that the server no longer has (or holds in an older revision) is uploaded again by the
+    /// next unlocked `sync()`, so a restore of the server's database from an earlier point does not lose newer edits.
     public func acknowledgeServerReset() throws {
+        try store.setReseedPending(true)
         try store.setKnownHeadSeq(0)
         try store.setCursor(0)
         try store.setEventCursor(0)
