@@ -32,6 +32,14 @@ pnpm install --frozen-lockfile
 pnpm typecheck && pnpm test          # 26 flow tests, local worker + local D1 only
 ```
 
+Pre-deploy checklist (from the repo root, local only; stop on the first red):
+
+```bash
+cd /Users/rodrigo/Workspace/Product/bisel
+scripts/check-all.sh                   # server (typecheck, pnpm test, pnpm test:legacy), BiselCore flow suite, Mac app build
+scripts/check-all.sh --release         # before shipping the Mac app: Release build contains no BISEL_DEV_ hooks
+```
+
 ## 1. Log in to Cloudflare  [OWNER]
 
 Opens the owner's browser for OAuth; the token stays in wrangler's local config and is never shown to a session.

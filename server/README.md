@@ -24,6 +24,23 @@ pnpm typecheck
 node scripts/smoke.ts   # manual walk through bootstrap/put/conflict/delete/approve/revoke/recovery against :8787
 ```
 
+### Verify everything with one command
+
+From the repo root (`bisel/`), no untracked file needed (`server/.dev.vars` is created from the example), nothing touches Cloudflare, Doppler or production:
+
+```sh
+scripts/check-all.sh            # server + core + app, then a PASS/FAIL summary with timings (about 11 min cold)
+scripts/check-all.sh --server   # pnpm install --frozen-lockfile, typecheck (worker + dashboard), pnpm test, pnpm test:legacy
+scripts/check-all.sh --core     # BiselCore Swift flow suite: swift test --traits SoftwareKeys (starts its own wrangler dev servers)
+scripts/check-all.sh --app      # xcodegen with project.dev.yml, then a Debug build of the Mac app (software keys)
+scripts/check-all.sh --release  # opt-in: Release build and scripts/check-release-hooks.sh
+scripts/check-all.sh -v         # stream each step's output; flags combine, e.g. --server --core
+```
+
+`scripts/check-release-hooks.sh` builds Release and fails if any `BISEL_DEV_` string (the Debug-only hooks) is in the shipped bundle;
+`--control` also builds Debug and requires the strings there, so a broken grep cannot pass silently.
+Every step runs in its own process group that is killed when the step ends, so no dev server survives the script. `pnpm test` needs `:8788` free.
+
 Local dev bootstrap token (from `.dev.vars`, created from `.dev.vars.example`): `dev-bootstrap-token`.
 The server holds **many boxes** (one per account, plus unowned ones made with the operator token). `POST /v1/bootstrap` with the token
 creates another unowned box every time; with `X-Bisel-Connect` it creates the box of the account that approved a device code.
