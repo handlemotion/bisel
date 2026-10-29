@@ -8,6 +8,8 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
     var progress: Double?
     var title: String
     var message: String?
+    /// Centre the content vertically between the text above and the actions below (otherwise it sits under the text and scrolls).
+    var centered = false
     @ViewBuilder var content: Content
     @ViewBuilder var actions: Actions
     private let theme = Theme.biselDark   // onboarding is always the solid black frame from Figma
@@ -30,13 +32,22 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
                     }
                 }
             }
-            ScrollView {
-                content
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, theme.spacing.l)
+            if centered {
+                VStack(spacing: 0) {
+                    Spacer(minLength: theme.spacing.l)
+                    content.frame(maxWidth: .infinity, alignment: .leading)
+                    Spacer(minLength: theme.spacing.l)
+                }
+                .frame(maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    content
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, theme.spacing.l)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollIndicators(.never)
             }
-            .scrollBounceBehavior(.basedOnSize)
-            .scrollIndicators(.never)
             HStack(spacing: theme.spacing.m) { actions }
                 .padding(.top, theme.spacing.l)
         }

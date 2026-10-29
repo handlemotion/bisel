@@ -107,18 +107,19 @@ struct PhraseGateView: View {
 
     var body: some View {
         OnboardingFrame(progress: title == "Your recovery phrase" ? 0.6 : nil, title: title,
-                        message: "These 24 words are the only way back into your box if you lose every device. Keep them somewhere safe, we show them once and never keep a copy.") {
+                        message: "These 24 words are the only way back into your box if you lose every device. Keep them somewhere safe, we show them once and never keep a copy.",
+                        centered: true) {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.s), count: 4), alignment: .leading, spacing: theme.spacing.s) {
                     ForEach(Array(phrase.words.enumerated()), id: \.offset) { i, w in
                         HStack(spacing: theme.spacing.s) {
                             Text("\(i + 1)").font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.tertiaryText.color)
-                                .frame(width: 20, alignment: .trailing)
+                            Spacer(minLength: theme.spacing.s)
                             Text(w).font(theme.font(theme.fonts.value, weight: .medium)).textSelection(.disabled)
                                 .accessibilityIdentifier("phrase-word-\(i + 1)")
                         }
-                        .padding(.vertical, theme.spacing.s).padding(.horizontal, theme.spacing.s)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, theme.spacing.s).padding(.horizontal, theme.spacing.m)
+                        .frame(maxWidth: .infinity)
                         .background(RoundedRectangle(cornerRadius: theme.radii.field, style: .continuous).fill(theme.colors.field.color))
                     }
                 }
