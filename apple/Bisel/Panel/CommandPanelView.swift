@@ -327,7 +327,7 @@ private struct DetailPane: View {
                 ValuesCard(model: model, item: r)
                     .padding(.top, theme.card.valuesLabelGap)
                 Spacer(minLength: 0)
-                ShortcutLegend()
+                ShortcutLegend(item: r)
             } else {
                 Spacer()
             }
@@ -345,12 +345,14 @@ private struct MoreActionsMenu: View {
 
     var body: some View {
         Menu {
-            actionButton(.copyPassword); actionButton(.copyUsername); actionButton(.copyTOTP)
+            let available = PanelAction.available(for: item)
+            ForEach(available.filter { [.copyPassword, .copyUsername, .copyTOTP].contains($0) }) { actionButton($0) }
             Divider()
-            actionButton(.fill); actionButton(.fillUserTabPassword)
-            actionButton(.fillUsername); actionButton(.fillPassword); actionButton(.fillTOTP)
-            Divider()
-            actionButton(.openURL)
+            ForEach(available.filter { [.fill, .fillUserTabPassword, .fillUsername, .fillPassword, .fillTOTP].contains($0) }) { actionButton($0) }
+            if available.contains(.openURL) {
+                Divider()
+                actionButton(.openURL)
+            }
         } label: {
             Image(systemName: "ellipsis")
                 .font(theme.font(theme.fonts.pillIcon))
@@ -374,14 +376,16 @@ private struct MoreActionsMenu: View {
 
 /// Quiet legend of the keyboard shortcuts at the bottom of the detail pane (replaces the old action pills).
 private struct ShortcutLegend: View {
+    let item: VaultSearchResult
     @Environment(\.theme) private var theme
     @Environment(\.glassMode) private var glass
     private var items: [(key: String, label: String, spoken: String)] {
-        [("↩", String(localized: "Copy password"), String(localized: "Return copies the password")),
-         ("⇧↩", String(localized: "Username"), String(localized: "Shift Return copies the username")),
-         ("⌘↩", String(localized: "OTP"), String(localized: "Command Return copies the one-time code")),
-         ("⌥↩", String(localized: "Fill"), String(localized: "Option Return fills the focused field")),
-         ("⌘K", String(localized: "More"), String(localized: "Command K shows more actions"))]
+        var out = [("↩", String(localized: "Copy password"), String(localized: "Return copies the password")),
+                   ("⇧↩", String(localized: "Username"), String(localized: "Shift Return copies the username"))]
+        if item.hasTOTP { out.append(("⌘↩", String(localized: "OTP"), String(localized: "Command Return copies the one-time code"))) }
+        out += [("⌥↩", String(localized: "Fill"), String(localized: "Option Return fills the focused field")),
+                ("⌘K", String(localized: "More"), String(localized: "Command K shows more actions"))]
+        return out
     }
 
     var body: some View {
@@ -426,11 +430,13 @@ private struct ValuesCard: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: theme.radii.valuesCard, style: .continuous)
+        // Only the rows the item has: no OTP row for an item without a one-time code, no Password row without a password.
+        let rows = ValueRowID.allCases.filter { ($0 != .otp || item.hasTOTP) && ($0 != .password || item.hasPassword) }
         VStack(spacing: 0) {
-            ForEach(Array(ValueRowID.allCases.enumerated()), id: \.element.id) { i, row in
+            ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
                 ValueRow(model: model, item: item, row: row)
                     .trackValue(row, model: model)
-                if i < ValueRowID.allCases.count - 1 { Hairline() }
+                if i < rows.count - 1 { Hairline() }
             }
         }
         .clipShape(shape)

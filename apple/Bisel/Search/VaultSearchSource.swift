@@ -8,6 +8,9 @@ struct VaultSearchResult: Identifiable, Hashable, Sendable {
     let username: String
     let domain: String
     let tags: [String]
+    /// What the item actually holds, so the panel only offers rows and actions that can work.
+    var hasPassword = true
+    var hasTOTP = true
 }
 
 enum SecretKind: String, Sendable {

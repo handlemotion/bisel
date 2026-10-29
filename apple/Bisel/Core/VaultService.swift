@@ -12,12 +12,13 @@ struct ItemRow: Identifiable, Hashable, Sendable {
     let username: String
     let tags: [String]
     let updatedAt: Date
+    let hasPassword: Bool
     let hasTOTP: Bool
     let totpPeriod: Int
 
     init(_ item: Item) {
         id = item.id; type = item.type; title = item.title; urls = item.urls; username = item.username ?? ""
-        tags = item.tags; updatedAt = item.updatedAt; hasTOTP = item.totp != nil; totpPeriod = item.totp?.period ?? 30
+        tags = item.tags; updatedAt = item.updatedAt; hasPassword = !(item.password ?? "").isEmpty; hasTOTP = item.totp != nil; totpPeriod = item.totp?.period ?? 30
     }
 
     var domain: String { SearchRecord.domain(of: urls.first) }
@@ -391,7 +392,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     func search(_ query: String, limit: Int) -> [VaultSearchResult] {
         guard isUnlocked else { return [] }
         return index.search(query, limit: limit).map {
-            VaultSearchResult(id: $0.id, title: $0.title, username: $0.username, domain: $0.domain, tags: $0.tags)
+            VaultSearchResult(id: $0.id, title: $0.title, username: $0.username, domain: $0.domain, tags: $0.tags,
+                              hasPassword: rowsByID[$0.id]?.hasPassword ?? true, hasTOTP: rowsByID[$0.id]?.hasTOTP ?? true)
         }
     }
 

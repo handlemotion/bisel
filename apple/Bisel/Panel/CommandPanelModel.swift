@@ -45,6 +45,19 @@ enum PanelAction: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The actions that can work for this item: no one-time code, no OTP actions; no password, no password actions; and so on.
+    static func available(for item: VaultSearchResult) -> [PanelAction] {
+        allCases.filter { a in
+            switch a {
+            case .copyTOTP, .fillTOTP: item.hasTOTP
+            case .copyPassword, .fillPassword, .fillUserTabPassword: item.hasPassword
+            case .copyUsername, .fillUsername: !item.username.isEmpty
+            case .openURL: !item.domain.isEmpty
+            case .fill: true
+            }
+        }
+    }
+
     var symbol: String {
         switch self {
         case .copyPassword, .copyUsername, .copyTOTP: "doc.on.doc"
@@ -182,7 +195,10 @@ final class CommandPanelModel {
     @ObservationIgnored var lastKeyboardAt: ContinuousClock.Instant = .now
 
     var isUnlocked: Bool { source.isUnlocked }
-    var actions: [PanelAction] { PanelAction.allCases }
+    var actions: [PanelAction] {
+        if case .actions(let item) = mode { return PanelAction.available(for: item) }
+        return PanelAction.allCases
+    }
     var selectedResult: VaultSearchResult? { results.indices.contains(selected) ? results[selected] : nil }
 
     init(source: VaultSearchSource, secrets: VaultSecretProvider) {
