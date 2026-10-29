@@ -114,14 +114,14 @@ struct SetupView: View {
     private func field(_ title: String, _ prompt: String, _ text: Binding<String>, id: String) -> some View {
         VStack(alignment: .leading, spacing: theme.spacing.s) {
             Caption(title)
-            TextField("", text: text, prompt: Text(prompt).foregroundStyle(theme.colors.placeholder.color)).onboardingField(theme).accessibilityIdentifier(id)
+            TextField("", text: text).onboardingField(theme, placeholder: prompt, text: text.wrappedValue).accessibilityIdentifier(id)
         }
     }
 
     private func secureField(_ title: String, _ prompt: String, _ text: Binding<String>, id: String) -> some View {
         VStack(alignment: .leading, spacing: theme.spacing.s) {
             Caption(title)
-            SecureField("", text: text, prompt: Text(prompt).foregroundStyle(theme.colors.placeholder.color)).onboardingField(theme).accessibilityIdentifier(id)
+            SecureField("", text: text).onboardingField(theme, placeholder: prompt, text: text.wrappedValue).accessibilityIdentifier(id)
         }
     }
 
@@ -195,7 +195,7 @@ struct PhraseGateView: View {
                     Caption("Quick check, type these words from your copy")
                     HStack(spacing: theme.spacing.m) {
                         ForEach(0..<3, id: \.self) { i in
-                            TextField("", text: $answers[i], prompt: Text("Word \(picks[i])").foregroundStyle(theme.colors.placeholder.color)).onboardingField(theme)
+                            TextField("", text: $answers[i]).onboardingField(theme, placeholder: "Word \(picks[i])", text: answers[i])
                                 .autocorrectionDisabled().accessibilityIdentifier("phrase-check-\(i + 1)")
                         }
                     }

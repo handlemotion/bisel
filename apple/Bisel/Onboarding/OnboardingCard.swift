@@ -153,6 +153,8 @@ struct PillGlyph: View {
 /// Text field chrome: field fill and a hairline that lightens while the field has focus.
 private struct OnboardingField: ViewModifier {
     let theme: Theme
+    var placeholder: String?
+    var text: String
     @FocusState private var focused: Bool
 
     func body(content: Content) -> some View {
@@ -164,6 +166,14 @@ private struct OnboardingField: ViewModifier {
             .padding(.horizontal, theme.spacing.m)
             .frame(height: 38)
             .background(shape.fill(theme.colors.field.color))
+            // Drawn here, not as the field's prompt: the system picks the prompt colour from the window appearance.
+            .overlay(alignment: .leading) {
+                if let placeholder, text.isEmpty {
+                    Text(placeholder).font(theme.font(theme.fonts.detail))
+                        .foregroundStyle(theme.colors.placeholder.color)
+                        .padding(.horizontal, theme.spacing.m).allowsHitTesting(false)
+                }
+            }
             .overlay(shape.strokeBorder(focused ? theme.colors.text.color.opacity(0.35) : theme.colors.border.color,
                                         lineWidth: theme.card.hairline))
             .animation(.easeOut(duration: 0.12), value: focused)
@@ -171,5 +181,7 @@ private struct OnboardingField: ViewModifier {
 }
 
 extension View {
-    func onboardingField(_ theme: Theme) -> some View { modifier(OnboardingField(theme: theme)) }
+    func onboardingField(_ theme: Theme, placeholder: String? = nil, text: String = "") -> some View {
+        modifier(OnboardingField(theme: theme, placeholder: placeholder, text: text))
+    }
 }
