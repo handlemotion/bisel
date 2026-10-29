@@ -12,11 +12,6 @@ struct VaultSearchResult: Identifiable, Hashable, Sendable {
 
 enum SecretKind: String, Sendable {
     case username, password, totp
-
-    /// SPEC.md §4 "Unlock model" step 3: copying a password and copying/filling TOTP need a fresh
-    /// biometric check even inside the fill window. Plain fill and username are inside the window.
-    func requiresFreshBiometricWhenCopied() -> Bool { self == .password || self == .totp }
-    func requiresFreshBiometricWhenFilled() -> Bool { self == .totp }
 }
 
 /// What the command panel talks to for search. The real implementation (M3, after BiselCore) will build a
