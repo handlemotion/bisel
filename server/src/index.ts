@@ -12,6 +12,7 @@ import {
   shortHash,
   type AppEnv,
 } from "./auth";
+import { web } from "./web";
 import { b64urlByteLength, b64urlDecode, b64urlEncode } from "./encoding";
 import {
   BODY_LIMITS,
@@ -755,6 +756,11 @@ app.post("/v1/recovery/rotate", deviceAuth, adminAuth, async (c) => {
   }
   return c.json({ ok: true });
 });
+
+// ---------------------------------------------------------------------------------------------
+// The dashboard's API: accounts, passkeys, the signed-in person's box. Static pages are served by the assets binding
+// before the Worker runs (wrangler.jsonc run_worker_first lists the only paths that reach this file).
+app.route("/api", web);
 
 // ---------------------------------------------------------------------------------------------
 // Everything else (unknown path, wrong method, HEAD/OPTIONS on a POST route…) goes through the very

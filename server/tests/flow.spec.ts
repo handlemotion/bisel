@@ -816,7 +816,8 @@ test("unknown routes, wrong methods and every kind of auth failure look identica
   const stranger = await newDevice("stranger");
   const responses: Record<string, APIResponse> = {
     unknownRoute: await api.api.fetch("/v1/nope", { headers: { "CF-Connecting-IP": "10.4.0.3" } }),
-    root: await api.api.fetch("/", { headers: { "CF-Connecting-IP": "10.4.0.3" } }),
+    // "/" is the dashboard's static page now; the dashboard API's unknown paths still look like any other unknown route.
+    unknownApiRoute: await api.api.fetch("/api/nope", { headers: { "CF-Connecting-IP": "10.4.0.3" } }),
     wrongMethodOnRealRoute: await api.api.fetch("/v1/sync", { method: "POST", headers: { "CF-Connecting-IP": "10.4.0.3" } }),
     options: await api.api.fetch("/v1/items/" + randomId(), { method: "OPTIONS", headers: { "CF-Connecting-IP": "10.4.0.3" } }),
     badSignatureRealRoute: await api.call({ ...stranger, id: a.id }, "GET", "/v1/sync"),

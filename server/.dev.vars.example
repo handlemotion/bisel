@@ -1,2 +1,4 @@
 # Local-only. Copied to .dev.vars by `pnpm dev` if missing. Never commit .dev.vars.
 BOOTSTRAP_TOKEN=dev-bootstrap-token
+# Signs the dashboard session cookie. Local dev only; production gets its own random value (`wrangler secret put`).
+BETTER_AUTH_SECRET=dev-only-better-auth-secret-0123456789abcdef0123456789abcdef

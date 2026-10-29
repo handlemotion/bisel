@@ -22,7 +22,19 @@
   // Cloudflare's Workers rate-limiting binding; `namespace_id` only has to be unique within the account.
   // A device syncs once a minute and writes a handful of items; 300/min leaves room for a bulk import.
   "ratelimits": [{ "name": "RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 300, "period": 60 } }],
+  // The dashboard: static files from public/ (built by `pnpm build:web`) served by the same Worker on the same hostname.
+  // Only these paths run the Worker first; everything else is a static file, and unknown paths fall back to index.html
+  // so /connect works as a deep link. /v1/* keeps its uniform bare 404 for anything that is not a real, signed route.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/v1/*", "/api/*", "/healthz"]
+  },
+  "build": { "command": "pnpm build:web" },
   "vars": {
+    // Where the dashboard lives; passkeys are bound to its hostname and the session cookie to its scheme.
+    "PUBLIC_ORIGIN": "http://localhost:8787",
     // Failed-auth budget per client IP (CF-Connecting-IP): after AUTH_FAIL_LIMIT failures inside
     // AUTH_FAIL_WINDOW_SECONDS the IP's *failing* requests stop costing D1 writes and are answered
     // AUTH_BACKOFF_MS late. Valid signatures are never refused because of this counter.
@@ -41,7 +53,7 @@
   // Deploy only by following DEPLOY.md: `pnpm exec wrangler deploy --env prod`.
   // Every REPLACE_… value below must be filled in; wrangler refuses to deploy while the D1 id is a
   // placeholder. No secret lives in this file: BOOTSTRAP_TOKEN is a Worker secret
-  // (`wrangler secret put BOOTSTRAP_TOKEN --env prod`).
+  // (`wrangler secret put BOOTSTRAP_TOKEN --env prod`); BETTER_AUTH_SECRET (the dashboard session signing key) is the same kind.
   "env": {
     "prod": {
       "name": "bisel-server",
@@ -71,7 +83,15 @@
         }
       ],
       "ratelimits": [{ "name": "RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 300, "period": 60 } }],
+      "assets": {
+        "directory": "./public",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application",
+        "run_worker_first": ["/v1/*", "/api/*", "/healthz"]
+      },
+      "build": { "command": "pnpm build:web" },
       "vars": {
+        "PUBLIC_ORIGIN": "https://box.bisel.app",
         "AUTH_FAIL_LIMIT": "20",
         "AUTH_FAIL_WINDOW_SECONDS": "600",
         "AUTH_BACKOFF_MS": "1000",

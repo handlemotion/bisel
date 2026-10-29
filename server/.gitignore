@@ -16,3 +16,4 @@ playwright-report
 *.p12
 *.mobileprovision
 software-keys.json
+public/app.js

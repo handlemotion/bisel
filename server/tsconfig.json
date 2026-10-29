@@ -11,5 +11,5 @@
     "noEmit": true,
     "isolatedModules": true
   },
-  "include": ["src", "tests", "playwright.config.ts", "worker-configuration.d.ts"]
+  "include": ["src", "tests", "legacy-tests", "playwright.config.ts", "playwright.legacy.config.ts", "worker-configuration.d.ts"]
 }
