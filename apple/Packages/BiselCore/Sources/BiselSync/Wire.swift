@@ -147,3 +147,9 @@ struct RotateRequest: Codable {
     }
 }
 struct RotateResponse: Codable { var epoch: Int; var headSeq: Int }
+
+struct BootstrapResponse: Codable { var deviceId: String; var boxId: String?; var headSeq: Int?; var epoch: Int? }
+struct ConnectStartRequest: Codable { var deviceName: String }
+struct ConnectPollRequest: Codable { var deviceCode: String }
+struct ConnectCodeResponse: Codable { var deviceCode: String; var userCode: String; var verificationUri: String; var expiresIn: Int; var interval: Int }
+struct ConnectPollResponse: Codable { var status: String; var accountHasBox: Bool?; var boxId: String? }

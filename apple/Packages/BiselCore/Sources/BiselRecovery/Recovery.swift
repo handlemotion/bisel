@@ -27,9 +27,10 @@ public enum RecoveryService {
 
     /// Rebuild-from-phrase, steps 1-2: authenticate to the server with RK-sig, fetch the recovery envelope
     /// and open it. Throws `SyncError.notAuthorized` for a wrong phrase (server cannot tell you more).
-    public static func fetchVaultKey(server: URL, phrase: RecoveryPhrase) async throws -> (vaultKey: Data, keys: RecoveryKeys, epoch: Int) {
+    /// `boxID` names the box on a multi-tenant server (`X-Bisel-Box`); nil asks for the server's pre-accounts box.
+    public static func fetchVaultKey(server: URL, phrase: RecoveryPhrase, boxID: String? = nil) async throws -> (vaultKey: Data, keys: RecoveryKeys, epoch: Int) {
         let keys = try RecoveryKeys(phrase: phrase)
-        let client = SyncClient(baseURL: server, signer: RecoverySigner(keys: keys))
+        let client = SyncClient(baseURL: server, signer: RecoverySigner(keys: keys, boxID: boxID))
         let (envelope, epoch) = try await client.recoveryEnvelope()
         return (try keys.open(envelope: envelope, epoch: epoch), keys, epoch)
     }

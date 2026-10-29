@@ -14,6 +14,26 @@ public enum SyncError: Error, Sendable, Equatable {
     case malformedResponse
 }
 
+/// Device-code connect failures that are not the bare 404.
+public enum ConnectError: Error, Sendable, Equatable, LocalizedError {
+    /// The approving account already owns a box (409 `box_exists`): a second Mac joins it by enrollment or recovery.
+    case accountHasBox
+    /// The box already belongs to an account (409 `already_linked`).
+    case alreadyLinked
+    /// The person denied the request, or the code ran out.
+    case denied
+    case expired
+
+    public var errorDescription: String? {
+        switch self {
+        case .accountHasBox: return "This account already has a box. Add this Mac from a device that is already connected, or restore with your recovery phrase."
+        case .alreadyLinked: return "This box is already linked to an account."
+        case .denied: return "The request was denied."
+        case .expired: return "The code expired. Start again."
+        }
+    }
+}
+
 public enum PutOutcome: Sendable, Equatable {
     case accepted(StoredRecord)
     case conflict(current: StoredRecord?)
@@ -117,14 +137,118 @@ public struct SyncClient: Sendable {
 
     // MARK: endpoints
 
-    public static func bootstrap(baseURL: URL, token: String, device: WireDevice, recoveryPublicKey: Data,
-                                 recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, adminPublicKey: Data) async throws {
+    /// What proves the right to create a box: the operator's token (dev servers, scripts) or a device code the person approved
+    /// on the dashboard (`Vault.pollConnect` returned `.approved`). A device code is single-use.
+    public enum BootstrapCredential: Sendable, Equatable {
+        case token(String)
+        case connect(deviceCode: String)
+    }
+
+    public struct BootstrapResult: Sendable, Equatable {
+        public let deviceID: String
+        /// nil only from a server that predates accounts.
+        public let boxID: String?
+        public let headSeq: Int
+        public let epoch: Int
+    }
+
+    /// `POST /v1/bootstrap`. Unsigned: the credential is the authorization.
+    @discardableResult
+    public static func bootstrap(baseURL: URL, credential: BootstrapCredential, device: WireDevice, recoveryPublicKey: Data,
+                                 recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, adminPublicKey: Data) async throws -> BootstrapResult {
         let client = SyncClient(baseURL: baseURL, signer: nil)
         let body = try JSONCoding.encoder.encode(BootstrapRequest(device: device, recoveryPubkey: recoveryPublicKey.base64URLEncoded(),
                                                                  recoveryEncPubkey: recoveryEncryptionPublicKey.base64URLEncoded(),
                                                                  recoveryEnvelope: recoveryEnvelope.base64URLEncoded(),
                                                                  adminPubkey: adminPublicKey.base64URLEncoded()))
-        _ = try await client.send("POST", "/v1/bootstrap", body: body, headers: ["X-Bisel-Bootstrap": token])
+        let header: [String: String]
+        switch credential {
+        case .token(let token): header = ["X-Bisel-Bootstrap": token]
+        case .connect(let deviceCode): header = ["X-Bisel-Connect": deviceCode]
+        }
+        do {
+            let (data, _) = try await client.send("POST", "/v1/bootstrap", body: body, headers: header)
+            let r = try client.decode(BootstrapResponse.self, data)
+            return BootstrapResult(deviceID: r.deviceId, boxID: r.boxId, headSeq: r.headSeq ?? 0, epoch: r.epoch ?? 1)
+        } catch SyncError.conflict {
+            // `409 {"error":"box_exists"}`: the account that approved this code already owns a box.
+            if case .connect = credential { throw ConnectError.accountHasBox }
+            throw SyncError.conflict(current: nil)
+        }
+    }
+
+    @discardableResult
+    public static func bootstrap(baseURL: URL, token: String, device: WireDevice, recoveryPublicKey: Data,
+                                 recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, adminPublicKey: Data) async throws -> BootstrapResult {
+        try await bootstrap(baseURL: baseURL, credential: .token(token), device: device, recoveryPublicKey: recoveryPublicKey,
+                            recoveryEncryptionPublicKey: recoveryEncryptionPublicKey, recoveryEnvelope: recoveryEnvelope,
+                            adminPublicKey: adminPublicKey)
+    }
+
+    // MARK: device-code connect (no token typed)
+
+    /// A pending connect request. Show `userCode`, open `verificationURL` in the browser, then poll with `deviceCode`
+    /// (a secret: never show it, never put it in a URL).
+    public struct ConnectCode: Sendable, Equatable {
+        public let deviceCode: String
+        public let userCode: String
+        public let verificationURL: URL
+        /// Seconds until the code stops working.
+        public let expiresIn: Int
+        /// Seconds between polls.
+        public let interval: Int
+    }
+
+    public enum ConnectStatus: Sendable, Equatable {
+        case pending
+        /// The person approved. `accountHasBox == true`: the account already owns a box, so this Mac cannot create one.
+        case approved(accountHasBox: Bool)
+        /// Redeemed: the box was created (create) or linked to the account (claim). `boxID` only when the server says.
+        case consumed(boxID: String?)
+        case denied
+        case expired
+    }
+
+    /// `POST /v1/connect {device_name}`. Unsigned: the Mac has no identity yet.
+    public static func connectStart(baseURL: URL, deviceName: String) async throws -> ConnectCode {
+        let client = SyncClient(baseURL: baseURL, signer: nil)
+        let (data, _) = try await client.send("POST", "/v1/connect", body: try JSONCoding.encoder.encode(ConnectStartRequest(deviceName: deviceName)))
+        return try client.connectCode(data)
+    }
+
+    /// `POST /v1/connect/poll {device_code}`. An unknown code answers `.expired` (the server cannot tell a guess from a timeout).
+    public static func connectPoll(baseURL: URL, deviceCode: String) async throws -> ConnectStatus {
+        let client = SyncClient(baseURL: baseURL, signer: nil)
+        let (data, _) = try await client.send("POST", "/v1/connect/poll", body: try JSONCoding.encoder.encode(ConnectPollRequest(deviceCode: deviceCode)))
+        let r = try client.decode(ConnectPollResponse.self, data)
+        switch r.status {
+        case "pending": return .pending
+        case "approved": return .approved(accountHasBox: r.accountHasBox ?? false)
+        case "consumed": return .consumed(boxID: r.boxId)
+        case "denied": return .denied
+        case "expired": return .expired
+        default: throw SyncError.malformedResponse
+        }
+    }
+
+    /// `POST /v1/box/claim`: link this device's existing, unowned box to an account. Signed by the device and the vault-admin
+    /// key. Poll the result with `connectPoll` (`.consumed` = linked, `.denied` = the account already owns a box).
+    /// `409 already_linked` throws `ConnectError.alreadyLinked`.
+    public func boxClaim(admin: AdminSigner) async throws -> ConnectCode {
+        do {
+            let (data, _) = try await send("POST", "/v1/box/claim", admin: admin)
+            return try connectCode(data)
+        } catch SyncError.conflict {
+            throw ConnectError.alreadyLinked
+        }
+    }
+
+    private func connectCode(_ data: Data) throws -> ConnectCode {
+        let r = try decode(ConnectCodeResponse.self, data)
+        guard let url = URL(string: r.verificationUri), let scheme = url.scheme?.lowercased(), scheme == "https" || scheme == "http" else {
+            throw SyncError.malformedResponse
+        }
+        return ConnectCode(deviceCode: r.deviceCode, userCode: r.userCode, verificationURL: url, expiresIn: r.expiresIn, interval: r.interval)
     }
 
     public func pull(since: Int, limit: Int = 200, eventsSince: Int? = nil) async throws -> SyncPage {
@@ -295,6 +419,7 @@ public struct SyncClient: Sendable {
         }
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
         if let signer {
+            for (k, v) in signer.extraHeaders { request.setValue(v, forHTTPHeaderField: k) }
             let ts = String(Int(Date().timeIntervalSince1970))
             let nonce = BiselRandom.nonce()
             let canonical = Canonical.string(method: method, path: fullPath, query: canonicalQuery, body: body, ts: ts, nonce: nonce)

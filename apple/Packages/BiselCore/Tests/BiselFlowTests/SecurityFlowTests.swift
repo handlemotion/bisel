@@ -110,9 +110,9 @@ struct SecurityFlowTests {
             try await a.vault.sync()
 
             // Somebody who saw the 24 words registers a device of their own, without touching any enrolled device.
-            let (vk, keys, epoch) = try await RecoveryService.fetchVaultKey(server: server.url, phrase: phrase)
+            let (vk, keys, epoch) = try await RecoveryService.fetchVaultKey(server: server.url, phrase: phrase, boxID: try server.onlyBoxID())
             let (rogue, rogueKeys) = try wireDevice(name: "unfamiliar laptop", in: tempDir("rogue"), vault: vk, epoch: nil)
-            try await SyncClient(baseURL: server.url, signer: RecoverySigner(keys: keys)).recoveryRegister(device: rogue, epoch: epoch)
+            try await SyncClient(baseURL: server.url, signer: RecoverySigner(keys: keys, boxID: try server.onlyBoxID())).recoveryRegister(device: rogue, epoch: epoch)
 
             // The next time the owner revokes or rotates, the new key is NOT sealed to it.
             do { try await a.vault.rotateVaultKey(); Issue.record("rotation should have stopped") }
@@ -132,9 +132,9 @@ struct SecurityFlowTests {
             _ = bank
 
             // A second newcomer is one the owner really recognises: confirming its fingerprint adds it to the roster.
-            let current = try await RecoveryService.fetchVaultKey(server: server.url, phrase: phrase)   // the phrase still opens the NEW key
+            let current = try await RecoveryService.fetchVaultKey(server: server.url, phrase: phrase, boxID: try server.onlyBoxID())   // the phrase still opens the NEW key
             let (friend, friendKeys) = try wireDevice(name: "friend", in: tempDir("friend"), vault: current.vaultKey, epoch: nil)
-            try await SyncClient(baseURL: server.url, signer: RecoverySigner(keys: current.keys)).recoveryRegister(device: friend, epoch: current.epoch)
+            try await SyncClient(baseURL: server.url, signer: RecoverySigner(keys: current.keys, boxID: try server.onlyBoxID())).recoveryRegister(device: friend, epoch: current.epoch)
             do { try await a.vault.rotateVaultKey(); Issue.record("rotation should have stopped") }
             catch IntegrityError.unknownDevices(let unknown) { #expect(unknown.map(\.id) == [friend.id]) }
             await #expect(throws: IntegrityError.verificationCodeMismatch) {
@@ -237,7 +237,7 @@ struct SecurityFlowTests {
 
             // A hostile server swaps the recovery key: reported, never adopted, and no backup is written.
             let other = try RecoveryKeys(phrase: try RecoveryPhrase.generate())
-            try server.sql("UPDATE meta SET recovery_pubkey = '\(other.publicKey.base64URLEncoded())'")
+            try server.sql("UPDATE boxes SET recovery_pubkey = '\(other.publicKey.base64URLEncoded())'")
             _ = try await b.vault.sync()
             #expect(await b.vault.recoveryMaterialChanged)
             #expect(try await b.vault.identity()?.recoveryPublicKey == (try RecoveryKeys(phrase: second)).publicKey)
@@ -287,10 +287,10 @@ struct SecurityFlowTests {
 
             // A server that reports less than it already told us, or positions beyond its own head, is refused.
             _ = try await b.vault.sync()
-            try server.sql("UPDATE meta SET head_seq = head_seq - 1")
+            try server.sql("UPDATE boxes SET head_seq = head_seq - 1")
             do { _ = try await b.vault.sync(); Issue.record("rollback should be refused") }
             catch IntegrityError.serverRolledBack(let known, let reported) { #expect(reported == known - 1) }
-            try server.sql("UPDATE meta SET head_seq = head_seq + 1")
+            try server.sql("UPDATE boxes SET head_seq = head_seq + 1")
             _ = try await b.vault.sync()
             try server.sql("UPDATE items SET seq = seq + 1000 WHERE id = '\(bank.id)'")
             await #expect(throws: IntegrityError.invalidCursor) { _ = try await b.vault.sync() }
@@ -309,7 +309,7 @@ struct SecurityFlowTests {
             #expect(first.events.isEmpty, "a device's first sync learns the position, it is not news")
 
             let thief = try Device("phrase-holder")
-            try await thief.vault.recover(server: server.url, phrase: phrase, deviceName: "phrase-holder")
+            try await thief.vault.recover(server: server.url, phrase: phrase, deviceName: "phrase-holder", boxID: try server.onlyBoxID())
             let until = try #require(await thief.vault.activationDate())
             do { _ = try await thief.vault.sync(); Issue.record("must wait") }
             catch IntegrityError.pendingActivation(let at) { #expect(abs(at.timeIntervalSince(until)) < 1) }
@@ -329,7 +329,7 @@ struct SecurityFlowTests {
             // The honest path works too: recover on a fresh install, wait, sync.
             let again = try Device("again")
             let secondPhrase = phrase
-            try await again.vault.recover(server: server.url, phrase: secondPhrase, deviceName: "again")
+            try await again.vault.recover(server: server.url, phrase: secondPhrase, deviceName: "again", boxID: try server.onlyBoxID())
             try await Task.sleep(for: .seconds(3.3))
             _ = try await again.vault.sync()
             #expect(try await again.vault.items().items.count == 1)

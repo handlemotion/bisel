@@ -219,7 +219,7 @@ struct VaultFlowTests {
             #expect(pushed.pushed >= 1)
 
             let fresh = try Device("fresh")
-            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh")
+            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh", boxID: try server.onlyBoxID())
             try await fresh.vault.sync()
             #expect(try await fresh.vault.revealPassword(id: item.id) == "p-local")
             #expect(try await a.vault.devices().count == 2)
@@ -252,7 +252,7 @@ struct VaultFlowTests {
             try await b.vault.connectServer(server.url, bootstrapToken: TestServer.bootstrapToken)
             try await b.vault.sync()
             let c = try Device("c")
-            try await c.vault.recover(server: server.url, phrase: phrase, deviceName: "c")
+            try await c.vault.recover(server: server.url, phrase: phrase, deviceName: "c", boxID: try server.onlyBoxID())
             try await c.vault.sync()
             #expect(try await c.vault.revealPassword(id: kept.id) == "p-kept")
         }
@@ -273,7 +273,7 @@ struct VaultFlowTests {
             // Restore point: Y does not exist yet and X is back at its first revision.
             try server.sql("DELETE FROM items WHERE id = '\(y.id)'")
             try server.sql("UPDATE items SET rev = 1 WHERE id = '\(x.id)'")
-            try server.sql("UPDATE meta SET head_seq = head_seq - 1")
+            try server.sql("UPDATE boxes SET head_seq = head_seq - 1")
             do { _ = try await a.vault.sync(); Issue.record("a rolled-back server must be refused") }
             catch IntegrityError.serverRolledBack {}
 
@@ -283,7 +283,7 @@ struct VaultFlowTests {
             #expect(report.conflicts.isEmpty)
             #expect(try await a.vault.pendingChanges() == 0)
             let fresh = try Device("fresh")
-            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh")
+            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh", boxID: try server.onlyBoxID())
             try await fresh.vault.sync()
             #expect(try await fresh.vault.revealPassword(id: x.id) == "x2")
             #expect(try await fresh.vault.revealPassword(id: y.id) == "y1")
@@ -307,14 +307,14 @@ struct VaultFlowTests {
                 #expect(report.pushed >= 1)
                 #expect(try await a.vault.pendingChanges() == 0)
                 let fresh = try Device("fresh")
-                try await fresh.vault.recover(server: rebuilt.url, phrase: phrase, deviceName: "fresh")
+                try await fresh.vault.recover(server: rebuilt.url, phrase: phrase, deviceName: "fresh", boxID: try rebuilt.onlyBoxID())
                 try await fresh.vault.sync()
                 #expect(try await fresh.vault.items().items.map(\.id) == [one.id], "the live item came back, the deleted one stays deleted")
                 #expect(try await fresh.vault.revealPassword(id: one.id) == "p1")
 
                 // An edit made against the old revision when the server has lost the record altogether.
                 try rebuilt.sql("DELETE FROM items WHERE id = '\(one.id)'")
-                try rebuilt.sql("UPDATE meta SET head_seq = (SELECT COALESCE(MAX(seq), 0) FROM items)")
+                try rebuilt.sql("UPDATE boxes SET head_seq = (SELECT COALESCE(MAX(seq), 0) FROM items)")
                 var edited = try await a.vault.item(id: one.id)
                 edited.password = "p1-edited"
                 _ = try await a.vault.save(edited)
@@ -347,7 +347,7 @@ struct VaultFlowTests {
             #expect(try await a.vault.identity()?.serverURL == server.url)
             try await a.vault.sync()
             let fresh = try Device("fresh")
-            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh")
+            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh", boxID: try server.onlyBoxID())
             try await fresh.vault.sync()
             #expect(try await fresh.vault.revealPassword(id: item.id) == "p-local")
 
@@ -373,7 +373,7 @@ struct VaultFlowTests {
             try await a.vault.sync()
 
             let fresh = try Device("fresh")
-            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh")
+            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh", boxID: try server.onlyBoxID())
             try await fresh.vault.sync()
             let items = try await fresh.vault.items().items
             #expect(items.map(\.title) == ["Passport scan code"])
@@ -383,7 +383,7 @@ struct VaultFlowTests {
             // A different but valid phrase gets the uniform 404.
             let stranger = try Device("stranger")
             await #expect(throws: SyncError.notAuthorized) {
-                try await stranger.vault.recover(server: server.url, phrase: try RecoveryPhrase.generate(), deviceName: "x")
+                try await stranger.vault.recover(server: server.url, phrase: try RecoveryPhrase.generate(), deviceName: "x", boxID: try server.onlyBoxID())
             }
             // Words that fail the BIP-39 checksum are rejected before any network call.
             #expect(throws: BiselCryptoError.invalidRecoveryPhrase) { try RecoveryPhrase(phrase.words.reversed().joined(separator: " ")) }
@@ -393,8 +393,8 @@ struct VaultFlowTests {
             // Rotation: the new phrase works, the old one stops at once.
             let newPhrase = try await fresh.vault.rotateRecovery()
             let again = try Device("again")
-            await #expect(throws: SyncError.notAuthorized) { try await again.vault.recover(server: server.url, phrase: phrase, deviceName: "old") }
-            try await again.vault.recover(server: server.url, phrase: newPhrase, deviceName: "new")
+            await #expect(throws: SyncError.notAuthorized) { try await again.vault.recover(server: server.url, phrase: phrase, deviceName: "old", boxID: try server.onlyBoxID()) }
+            try await again.vault.recover(server: server.url, phrase: newPhrase, deviceName: "new", boxID: try server.onlyBoxID())
             try await again.vault.sync()
             #expect(try await again.vault.items().items.count == 1)
         }
@@ -437,7 +437,7 @@ struct VaultFlowTests {
 
             // The server now holds the vault again, and the original phrase still recovers a brand-new install.
             let reinstall = try Device("reinstall")
-            try await reinstall.vault.recover(server: fresh.url, phrase: phrase, deviceName: "reinstall")
+            try await reinstall.vault.recover(server: fresh.url, phrase: phrase, deviceName: "reinstall", boxID: try fresh.onlyBoxID())
             try await reinstall.vault.sync()
             #expect(try await reinstall.vault.items().items.count == 2)
         }
@@ -556,7 +556,7 @@ struct VaultFlowTests {
 
             // The same 24 words still recover everything, including what was written after the rotation.
             let fresh2 = try Device("reinstall")
-            try await fresh2.vault.recover(server: server.url, phrase: phrase, deviceName: "reinstall")
+            try await fresh2.vault.recover(server: server.url, phrase: phrase, deviceName: "reinstall", boxID: try server.onlyBoxID())
             try await fresh2.vault.sync()
             let recovered = try await fresh2.vault.items()
             #expect(recovered.undecryptable.isEmpty)

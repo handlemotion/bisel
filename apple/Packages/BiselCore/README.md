@@ -7,6 +7,29 @@ extensions and tools.
 
 ## CHANGES
 
+**Accounts, box ids and device-code connect (server migrations 0004-0006).** For the Mac-app session. Everything old keeps compiling
+(token overloads stay); this is what is new.
+
+- **Box id.** `LocalIdentity.boxID: String?` (nil for identities written before accounts; they decode and sync unchanged: device requests never send a box).
+  `/v1/bootstrap` returns it and `bootstrap`, `connectServer`, `reconnectServer`, `importBackup` store it.
+  **Recovery must name its box**: `Vault.recover(server:phrase:deviceName:boxID:)`, `RecoveryService.fetchVaultKey(server:phrase:boxID:)`,
+  `RecoverySigner(keys:boxID:)` send `X-Bisel-Box`. `boxID: nil` asks for the server's pre-accounts box, which only the production box has:
+  on a restore onto a fresh Mac, ask for the box id (dashboard shows it) or take it from `identity().boxID` before the old Mac is lost.
+- **Credential.** `SyncClient.BootstrapCredential`: `.token(String)` or `.connect(deviceCode: String)`. New overloads
+  `Vault.bootstrap(server:credential:deviceName:)`, `connectServer(_:credential:)`, `reconnectServer(_:credential:)`,
+  `importBackup(from:phrase:server:credential:deviceName:)`; `SyncClient.bootstrap(baseURL:credential:…)` returns `BootstrapResult` (`deviceID`, `boxID`, `headSeq`, `epoch`).
+  With `.connect`, `ConnectError.accountHasBox` means the approving account already owns a box (nothing created, the code is spent).
+- **Connect (no token typed).** `Vault.startConnect(server:deviceName:) -> SyncClient.ConnectCode` (`deviceCode` secret, `userCode`, `verificationURL`,
+  `expiresIn`, `interval`), then `Vault.pollConnect(server:deviceCode:) -> SyncClient.ConnectStatus`
+  (`.pending`, `.approved(accountHasBox:)`, `.consumed(boxID:)`, `.denied`, `.expired`). Both static, no identity needed.
+  Show `userCode`, open `verificationURL`, poll every `interval` s; on `.approved(accountHasBox: false)` call `connectServer(_:credential: .connect(deviceCode:))`.
+- **Claim an existing box.** `Vault.claimBox() -> ConnectCode` (unlocked vault + biometric check; device and admin signed; `ConnectError.alreadyLinked`),
+  then `Vault.pollClaim(_:)` until `.consumed` (linked) or `.denied` (the account already owns a box).
+  The server does not report the box id on claim; the client records it if `consumed(boxID:)` ever carries one.
+- **Tests.** `ConnectFlowTests` (create, claim, refusals, recovery with box id, identity without box id). `TestServer` gained `approveConnect/denyConnect/expireConnect`
+  (the dashboard's database updates, no browser), `value(_:)` and `onlyBoxID()`. The old flows broke on the server move from `meta` to `boxes` (tampering SQL) and on
+  recovery without a box; both fixed.
+
 **Security-review fixes (SECURITY-REVIEW.md H1-H3, M1-M5, M8, M17, Lows).** For the Mac-app session. The `Vault` facade methods you call
 keep their signatures; this is what is new or behaves differently.
 

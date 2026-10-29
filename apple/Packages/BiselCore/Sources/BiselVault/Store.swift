@@ -84,14 +84,18 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
     public var enrollmentUnconfirmed: Bool = false
     /// Recovery-registered device: unix time before which the server refuses its requests.
     public var activatesAt: Int?
+    /// The box on the server this device belongs to (`/v1/bootstrap` returns it). nil for identities from before accounts
+    /// existed: the server resolves a recovery request without a box to its pre-accounts box.
+    public var boxID: String?
 
     public init(deviceID: String, deviceName: String, serverURL: URL?, keyStore: String, envelope: Data? = nil,
                 recoveryPublicKey: Data? = nil, recoveryEnvelope: Data? = nil,
-                recoveryEncryptionPublicKey: Data? = nil, epoch: Int = 1, previousEnvelope: Data? = nil) {
+                recoveryEncryptionPublicKey: Data? = nil, epoch: Int = 1, previousEnvelope: Data? = nil, boxID: String? = nil) {
         self.deviceID = deviceID; self.deviceName = deviceName; self.serverURL = serverURL; self.keyStore = keyStore
         self.envelope = envelope; self.recoveryPublicKey = recoveryPublicKey; self.recoveryEnvelope = recoveryEnvelope
         self.recoveryEncryptionPublicKey = recoveryEncryptionPublicKey; self.epoch = epoch
         self.previousEnvelope = previousEnvelope
+        self.boxID = boxID
     }
 
     // Identities written before rotation existed lack the new keys: decode them with defaults.
@@ -114,6 +118,7 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
         recoveryUnconfirmed = try c.decodeIfPresent(Bool.self, forKey: .recoveryUnconfirmed) ?? false
         enrollmentUnconfirmed = try c.decodeIfPresent(Bool.self, forKey: .enrollmentUnconfirmed) ?? false
         activatesAt = try c.decodeIfPresent(Int.self, forKey: .activatesAt)
+        boxID = try c.decodeIfPresent(String.self, forKey: .boxID)
     }
 }
 

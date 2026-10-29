@@ -231,11 +231,16 @@ public actor Vault {
     /// First device: generates VK, device keys and the recovery phrase, registers with the server.
     /// The returned phrase is the only copy; show it once.
     public func bootstrap(server: URL, bootstrapToken: String, deviceName: String) async throws -> RecoveryPhrase {
+        try await bootstrap(server: server, credential: .token(bootstrapToken), deviceName: deviceName)
+    }
+
+    /// Same, with a device code the person approved (`startConnect` / `pollConnect`) instead of a typed token.
+    public func bootstrap(server: URL, credential: SyncClient.BootstrapCredential, deviceName: String) async throws -> RecoveryPhrase {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
         var vk = BiselRandom.bytes(32)
         defer { vk.zeroize() }
         let bundle = try RecoveryService.makeBundle(vaultKey: vk, epoch: 1)
-        try await register(server: server, bootstrapToken: bootstrapToken, deviceName: deviceName, vaultKey: vk, recovery: bundle)
+        try await register(server: server, credential: credential, deviceName: deviceName, vaultKey: vk, recovery: bundle)
         // The phrase exists only in the caller's hands now: until it is proven written down, the flag stays.
         var identity = try requireIdentity()
         identity.recoveryUnconfirmed = true
@@ -275,6 +280,12 @@ public actor Vault {
     /// Registers this device and the recovery keys of an existing local-only vault with a fresh server. The next
     /// `sync()` uploads everything that was created while the vault was local.
     public func connectServer(_ server: URL, bootstrapToken: String) async throws {
+        try await connectServer(server, credential: .token(bootstrapToken))
+    }
+
+    /// Same, with a token or an approved device code. With `.connect`, the account that approved it owns the new box;
+    /// `ConnectError.accountHasBox` means it already had one (nothing was created and the code is spent).
+    public func connectServer(_ server: URL, credential: SyncClient.BootstrapCredential) async throws {
         let key = try requireKey()
         var identity = try requireIdentity()
         guard identity.serverURL == nil else { throw VaultError.alreadyConfigured }
@@ -285,9 +296,10 @@ public actor Vault {
         let device = WireDevice(id: identity.deviceID, name: identity.deviceName, kind: config.deviceKind, sigPubkey: me.sigPubkey,
                                 encPubkey: me.encPubkey, envelope: envelope)
         do {
-            try await SyncClient.bootstrap(baseURL: server, token: bootstrapToken, device: device, recoveryPublicKey: recoveryPub,
-                                           recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
-                                           adminPublicKey: try adminSigner(key).publicKey)
+            let created = try await SyncClient.bootstrap(baseURL: server, credential: credential, device: device, recoveryPublicKey: recoveryPub,
+                                                         recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
+                                                         adminPublicKey: try adminSigner(key).publicKey)
+            identity.boxID = created.boxID
         } catch SyncError.notAuthorized {
             // The server refuses a second bootstrap with the same bare 404. If an earlier attempt of ours got through (its
             // answer was lost, or the app died before saving), this device is already registered there: carry on.
@@ -309,6 +321,10 @@ public actor Vault {
     /// everything (a rebuilt or replaced box, bootstrap token required). The next unlocked `sync()` uploads every item this
     /// device holds. Other devices were registered with the old server: enrol them again.
     public func reconnectServer(_ server: URL, bootstrapToken: String) async throws {
+        try await reconnectServer(server, credential: .token(bootstrapToken))
+    }
+
+    public func reconnectServer(_ server: URL, credential: SyncClient.BootstrapCredential) async throws {
         let key = try requireKey()
         var identity = try requireIdentity()
         guard identity.serverURL != nil else { throw VaultError.noServer }   // a local-only vault uses `connectServer`
@@ -324,16 +340,18 @@ public actor Vault {
                                 encPubkey: me.encPubkey, envelope: envelope)
         // Harmless if the call below fails: the flag only makes the next sync pull from the start and re-upload what is missing.
         try store.setReseedPending(true)
+        var boxID: String?
         do {
-            try await SyncClient.bootstrap(baseURL: server, token: bootstrapToken, device: device, recoveryPublicKey: recoveryPub,
-                                           recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
-                                           adminPublicKey: try adminSigner(key).publicKey)
+            boxID = try await SyncClient.bootstrap(baseURL: server, credential: credential, device: device, recoveryPublicKey: recoveryPub,
+                                                   recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
+                                                   adminPublicKey: try adminSigner(key).publicKey).boxID
         } catch SyncError.notAuthorized {
             // The server refuses a second bootstrap with the same bare 404. If an earlier attempt of ours got through (its
             // answer was lost, or the app died before saving), this device is already registered there: carry on.
             guard await isRegistered(on: server, identity: identity, recoveryPublicKey: recoveryPub) else { throw SyncError.notAuthorized }
         }
         identity.serverURL = server
+        identity.boxID = boxID   // a different server, a different box (nil when we only adopted an earlier attempt)
         identity.epoch = 1
         identity.recoveryEnvelope = recoveryEnv
         identity.previousEnvelope = nil
@@ -343,18 +361,19 @@ public actor Vault {
         try store.setEventCursor(0)
     }
 
-    private func register(server: URL, bootstrapToken: String, deviceName: String, vaultKey vk: Data, recovery: RecoveryBundle) async throws {
+    private func register(server: URL, credential: SyncClient.BootstrapCredential, deviceName: String, vaultKey vk: Data,
+                          recovery: RecoveryBundle) async throws {
         let pub = try config.keyStore.createKeys()
         let deviceID = BiselRandom.identifier()
         let envelope = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: pub.enc)
         let device = WireDevice(id: deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: pub.sig, encPubkey: pub.enc, envelope: envelope)
-        try await SyncClient.bootstrap(baseURL: server, token: bootstrapToken, device: device,
-                                       recoveryPublicKey: recovery.publicKey, recoveryEncryptionPublicKey: recovery.encryptionPublicKey,
-                                       recoveryEnvelope: recovery.envelope, adminPublicKey: try AdminSigner(vaultKey: vk).publicKey)
+        let created = try await SyncClient.bootstrap(baseURL: server, credential: credential, device: device,
+                                                     recoveryPublicKey: recovery.publicKey, recoveryEncryptionPublicKey: recovery.encryptionPublicKey,
+                                                     recoveryEnvelope: recovery.envelope, adminPublicKey: try AdminSigner(vaultKey: vk).publicKey)
         try store.setIdentity(LocalIdentity(deviceID: deviceID, deviceName: deviceName, serverURL: server,
                                             keyStore: config.keyStore.implementation, envelope: envelope,
                                             recoveryPublicKey: recovery.publicKey, recoveryEnvelope: recovery.envelope,
-                                            recoveryEncryptionPublicKey: recovery.encryptionPublicKey, epoch: 1))
+                                            recoveryEncryptionPublicKey: recovery.encryptionPublicKey, epoch: 1, boxID: created.boxID))
         var identity = try requireIdentity()
         identity.roster = [RosterEntry(deviceID: deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: pub.sig,
                                        encPubkey: pub.enc, via: "bootstrap")]
@@ -362,6 +381,43 @@ public actor Vault {
         try store.setIdentity(identity)
         setKey(vk)
         try writeManifest()
+    }
+
+    // MARK: device-code connect
+
+    /// Step 1 of connecting to a box without typing a token: asks the server for a code. Show `userCode`, open `verificationURL`
+    /// in the browser, then call `pollConnect` every `interval` seconds. Needs no identity (use it before `bootstrap`).
+    public static func startConnect(server: URL, deviceName: String) async throws -> SyncClient.ConnectCode {
+        try await SyncClient.connectStart(baseURL: server, deviceName: deviceName)
+    }
+
+    /// Step 2: `.pending` keep polling; `.approved(accountHasBox: false)` pass `.connect(deviceCode:)` to `bootstrap` /
+    /// `connectServer`; `.approved(accountHasBox: true)` the account already owns a box (do not bootstrap);
+    /// `.denied` / `.expired` stop; `.consumed` done.
+    public static func pollConnect(server: URL, deviceCode: String) async throws -> SyncClient.ConnectStatus {
+        try await SyncClient.connectPoll(baseURL: server, deviceCode: deviceCode)
+    }
+
+    /// Links this vault's existing box (one that predates accounts, or was made with a token) to the person's account:
+    /// asks the server for a claim code. Needs an unlocked vault (admin signature) and a fresh biometric check. Show the code,
+    /// open the URL, then poll with `pollClaim`. `ConnectError.alreadyLinked` if the box already has an account.
+    public func claimBox() async throws -> SyncClient.ConnectCode {
+        let key = try requireKey()
+        try await config.gate.authenticate(reason: "Link this box to your account")
+        return try await client().boxClaim(admin: try adminSigner(key))
+    }
+
+    /// Polls a claim started with `claimBox` against this vault's server. `.consumed` = linked; `.denied` = the account
+    /// already owns another box. Records the box id if the server reports it.
+    public func pollClaim(_ code: SyncClient.ConnectCode) async throws -> SyncClient.ConnectStatus {
+        var id = try requireIdentity()
+        guard let server = id.serverURL else { throw VaultError.noServer }
+        let status = try await SyncClient.connectPoll(baseURL: server, deviceCode: code.deviceCode)
+        if case .consumed(let boxID?) = status, id.boxID != boxID {
+            id.boxID = boxID
+            try store.setIdentity(id)
+        }
+        return status
     }
 
     /// New device, step 1: create keys and describe yourself. Give the result to an already-enrolled device.
@@ -416,18 +472,20 @@ public actor Vault {
 
     /// Fresh install: rebuild from the recovery phrase (new device keys, VK from the recovery envelope).
     /// Call `sync()` afterwards, and consider `rotateRecovery()`.
-    public func recover(server: URL, phrase: RecoveryPhrase, deviceName: String) async throws {
+    /// `boxID` names the box on a multi-tenant server (shown on the dashboard, returned by bootstrap, kept in `LocalIdentity.boxID`);
+    /// nil asks for the server's pre-accounts box.
+    public func recover(server: URL, phrase: RecoveryPhrase, deviceName: String, boxID: String? = nil) async throws {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
-        var (vk, keys, epoch) = try await RecoveryService.fetchVaultKey(server: server, phrase: phrase)
+        var (vk, keys, epoch) = try await RecoveryService.fetchVaultKey(server: server, phrase: phrase, boxID: boxID)
         defer { vk.zeroize() }
         let pub = try config.keyStore.createKeys()
         let deviceID = BiselRandom.identifier()
         let envelope = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: pub.enc)
         let device = WireDevice(id: deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: pub.sig, encPubkey: pub.enc, envelope: envelope)
-        let activatesAt = try await SyncClient(baseURL: server, signer: RecoverySigner(keys: keys)).recoveryRegister(device: device, epoch: epoch)
+        let activatesAt = try await SyncClient(baseURL: server, signer: RecoverySigner(keys: keys, boxID: boxID)).recoveryRegister(device: device, epoch: epoch)
         var identity = LocalIdentity(deviceID: deviceID, deviceName: deviceName, serverURL: server,
                                      keyStore: config.keyStore.implementation, envelope: envelope,
-                                     recoveryPublicKey: keys.publicKey, recoveryEncryptionPublicKey: keys.encryptionPublicKey, epoch: epoch)
+                                     recoveryPublicKey: keys.publicKey, recoveryEncryptionPublicKey: keys.encryptionPublicKey, epoch: epoch, boxID: boxID)
         // The phrase holder is the owner: this device is trusted, and the recovery keys are pinned from the phrase itself.
         identity.roster = [RosterEntry(deviceID: deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: pub.sig,
                                        encPubkey: pub.enc, via: "recovery")]
@@ -951,6 +1009,11 @@ public actor Vault {
     /// this device with the same recovery key, and re-uploads every item (re-sealed for its new revision).
     public func importBackup(from url: URL, phrase: RecoveryPhrase, server: URL, bootstrapToken: String,
                              deviceName: String) async throws {
+        try await importBackup(from: url, phrase: phrase, server: server, credential: .token(bootstrapToken), deviceName: deviceName)
+    }
+
+    public func importBackup(from url: URL, phrase: RecoveryPhrase, server: URL, credential: SyncClient.BootstrapCredential,
+                             deviceName: String) async throws {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
         let file = try BackupFile.decode(try Data(contentsOf: url))
         var (vkData, _) = try file.vaultKey(phrase: phrase)
@@ -960,7 +1023,7 @@ public actor Vault {
         let keys = try RecoveryKeys(phrase: phrase)
         let bundle = RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
                                     envelope: try keys.seal(vaultKey: vkData, epoch: 1))
-        try await register(server: server, bootstrapToken: bootstrapToken, deviceName: deviceName, vaultKey: vkData, recovery: bundle)
+        try await register(server: server, credential: credential, deviceName: deviceName, vaultKey: vkData, recovery: bundle)
         let skipped = try restore(file, vaultKey: vk)
         // Upload what was restored before reporting problems: the vault exists from here on, so a thrown error must not leave
         // the good items stuck behind it (a second import is refused as `alreadyConfigured`).

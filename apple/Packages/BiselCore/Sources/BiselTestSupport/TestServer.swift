@@ -78,11 +78,30 @@ public final class TestServer: @unchecked Sendable {
 
     /// Runs SQL against this instance's local database, the way a hostile server operator (or a breach) could change it.
     /// Test-only: lets flows tamper with what the server holds and check that clients notice.
-    public func sql(_ statement: String) throws {
+    public func sql(_ statement: String) throws { _ = try run(statement, json: false) }
+
+    /// The first column of the first row of a `SELECT` (nil when there is no row), as text.
+    public func value(_ statement: String) throws -> String? {
+        let out = try run(statement, json: true)
+        // wrangler prints a banner first; the JSON starts on a line of its own.
+        guard let start = out.range(of: "\n[\n")?.lowerBound ?? (out.hasPrefix("[\n") ? out.startIndex : nil),
+              let parsed = try JSONSerialization.jsonObject(with: Data(out[start...].utf8)) as? [[String: Any]],
+              let row = (parsed.first?["results"] as? [[String: Any]])?.first, let first = row.values.first, !(first is NSNull) else { return nil }
+        return "\(first)"
+    }
+
+    /// The id of the only box on this server (a fresh test server has exactly one after the first bootstrap): what a person
+    /// would read off the dashboard to restore onto a new Mac.
+    public func onlyBoxID() throws -> String {
+        guard let id = try value("SELECT id FROM boxes") else { throw Failure.didNotStart("no box on this server yet") }
+        return id
+    }
+
+    private func run(_ statement: String, json: Bool) throws -> String {
         let escaped = statement.replacingOccurrences(of: "'", with: "'\\''")
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-lc", "cd '\(serverDirectory)' && pnpm exec wrangler d1 execute bisel --local --persist-to '\(stateDirectory.path)' --command '\(escaped)'"]
+        p.arguments = ["-lc", "cd '\(serverDirectory)' && pnpm exec wrangler d1 execute bisel --local --persist-to '\(stateDirectory.path)'\(json ? " --json" : "") --command '\(escaped)'"]
         let out = Pipe()
         p.standardOutput = out
         p.standardError = out
@@ -90,6 +109,33 @@ public final class TestServer: @unchecked Sendable {
         let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         p.waitUntilExit()
         guard p.terminationStatus == 0 else { throw Failure.didNotStart("sql failed: \(text)") }
+        return text
+    }
+
+    // MARK: the dashboard's half of device-code connect
+
+    /// What the person does on `/connect?code=…` after signing in as `account` (any string stands in for the user id): the same
+    /// updates `src/web.ts` makes on approve. A `create` request becomes `approved`; a `claim` links its box to the account
+    /// (`consumed`), or is `denied` when the account already owns a box. Test-only: there is no browser here.
+    public func approveConnect(userCode: String, account: String) throws {
+        try sql("""
+        UPDATE connect_requests SET status = 'approved', account_id = '\(account)' WHERE user_code = '\(userCode)' AND kind = 'create' AND status = 'pending';
+        UPDATE connect_requests SET status = 'denied', account_id = '\(account)' WHERE user_code = '\(userCode)' AND kind = 'claim' AND status = 'pending' \
+          AND EXISTS (SELECT 1 FROM boxes WHERE owner_id = '\(account)');
+        UPDATE boxes SET owner_id = '\(account)' WHERE owner_id IS NULL \
+          AND id = (SELECT box_id FROM connect_requests WHERE user_code = '\(userCode)' AND kind = 'claim' AND status = 'pending');
+        UPDATE connect_requests SET status = 'consumed', account_id = '\(account)' WHERE user_code = '\(userCode)' AND kind = 'claim' AND status = 'pending' \
+          AND EXISTS (SELECT 1 FROM boxes WHERE id = connect_requests.box_id AND owner_id = '\(account)');
+        """)
+    }
+
+    public func denyConnect(userCode: String, account: String) throws {
+        try sql("UPDATE connect_requests SET status = 'denied', account_id = '\(account)' WHERE user_code = '\(userCode)' AND status = 'pending'")
+    }
+
+    /// Lets the request's ten minutes run out.
+    public func expireConnect(userCode: String) throws {
+        try sql("UPDATE connect_requests SET expires_at = 1 WHERE user_code = '\(userCode)'")
     }
 
     public func stop() {
