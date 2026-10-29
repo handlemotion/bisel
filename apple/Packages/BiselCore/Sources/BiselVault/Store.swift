@@ -54,7 +54,8 @@ public struct StoredRecord: Sendable, Equatable {
 public struct LocalIdentity: Codable, Sendable, Equatable {
     public var deviceID: String
     public var deviceName: String
-    public var serverURL: URL
+    /// nil for a vault that lives on this Mac only; a server can be connected later.
+    public var serverURL: URL?
     public var keyStore: String
     /// nil while an enrollment is waiting for approval.
     public var envelope: Data?
@@ -84,7 +85,7 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
     /// Recovery-registered device: unix time before which the server refuses its requests.
     public var activatesAt: Int?
 
-    public init(deviceID: String, deviceName: String, serverURL: URL, keyStore: String, envelope: Data? = nil,
+    public init(deviceID: String, deviceName: String, serverURL: URL?, keyStore: String, envelope: Data? = nil,
                 recoveryPublicKey: Data? = nil, recoveryEnvelope: Data? = nil,
                 recoveryEncryptionPublicKey: Data? = nil, epoch: Int = 1, previousEnvelope: Data? = nil) {
         self.deviceID = deviceID; self.deviceName = deviceName; self.serverURL = serverURL; self.keyStore = keyStore
@@ -98,7 +99,7 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         deviceID = try c.decode(String.self, forKey: .deviceID)
         deviceName = try c.decode(String.self, forKey: .deviceName)
-        serverURL = try c.decode(URL.self, forKey: .serverURL)
+        serverURL = try c.decodeIfPresent(URL.self, forKey: .serverURL)
         keyStore = try c.decode(String.self, forKey: .keyStore)
         envelope = try c.decodeIfPresent(Data.self, forKey: .envelope)
         recoveryPublicKey = try c.decodeIfPresent(Data.self, forKey: .recoveryPublicKey)
@@ -184,7 +185,7 @@ public final class LocalStore: Sendable {
                 throw StoreError.serverAddressMissing
             }
             id.serverURL = url
-        } else {
+        } else if id.serverURL != nil {
             try setIdentity(id)   // written before secrets existed: move the address out of the database now
         }
         return id
@@ -193,8 +194,12 @@ public final class LocalStore: Sendable {
     public func setIdentity(_ identity: LocalIdentity) throws {
         var stored = identity
         if let secrets {
-            try secrets.set(Self.serverURLKey, Data(identity.serverURL.absoluteString.utf8))
-            stored.serverURL = Self.serverURLPlaceholder
+            if let url = identity.serverURL {
+                try secrets.set(Self.serverURLKey, Data(url.absoluteString.utf8))
+                stored.serverURL = Self.serverURLPlaceholder
+            } else {
+                try secrets.delete(Self.serverURLKey)
+            }
         }
         try setMeta("identity", try JSONEncoder().encode(stored))
     }

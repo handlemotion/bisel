@@ -16,6 +16,7 @@ struct DevicesView: View {
                 Spacer()
                 Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } }.disabled(loading).accessibilityIdentifier("devices-refresh")
             }
+            if service.isLocalOnly { Caption("This vault is on this Mac only. Connect a server in Settings → Vault to add your iPhone or another Mac.") }
             ErrorLine(text: error)
             List(devices) { d in
                 HStack(spacing: theme.spacing.m) {
@@ -64,6 +65,7 @@ struct DevicesView: View {
     }
 
     private func load() async {
+        guard !service.isLocalOnly else { devices = []; error = nil; return }
         loading = true; defer { loading = false }
         do { devices = try await service.devices(); error = nil }
         catch { self.error = describe(error) }

@@ -100,12 +100,28 @@ struct SettingsView: View {
     @State private var idleLock = VaultService.idleLockMinutes
     @State private var phraseSheet: RecoveryPhrase?
     @State private var vaultMessage: String?
+    @State private var connectServer = ""
+    @State private var connectToken = ""
+    @State private var connectError: String?
     private let service = AppModel.shared.service
 
     var body: some View {
         Form {
             Section("Vault") {
-                LabeledContent("Server") { Text(service.serverURL?.absoluteString ?? "—").textSelection(.enabled) }
+                if service.isLocalOnly {
+                    LabeledContent("Sync") { Text("Not connected: this vault is on this Mac only") }
+                    DisclosureGroup("Connect a server…") {
+                        TextField("Server URL", text: $connectServer, prompt: Text("https://your-server.example")).accessibilityIdentifier("connect-server")
+                        SecureField("Bootstrap token", text: $connectToken, prompt: Text("Set with wrangler secret BOOTSTRAP_TOKEN")).accessibilityIdentifier("connect-token")
+                        ErrorLine(text: connectError)
+                        Button("Connect and upload") { connect() }
+                            .disabled(service.isBusy || connectServer.isEmpty || connectToken.isEmpty).accessibilityIdentifier("connect-go")
+                        Text("Registers this Mac with a server you run and uploads your items, encrypted. You can add your iPhone afterwards.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                } else {
+                    LabeledContent("Server") { Text(service.serverURL?.absoluteString ?? "—").textSelection(.enabled) }
+                }
                 LabeledContent("This device") { Text(service.deviceName) }
                 LabeledContent("Keys") { Text(BiselEnvironment.usesSoftwareKeys ? "Software (debug build, not secure)" : "Secure Enclave") }
                 Picker("Keep unlocked for", selection: $fillWindow) {
@@ -199,6 +215,17 @@ struct SettingsView: View {
     }
 
     private struct PhraseBox: Identifiable { let phrase: RecoveryPhrase; var id: String { phrase.text } }
+
+    private func connect() {
+        connectError = nil
+        let (url, bad) = ServerURLCheck.parse(connectServer)
+        guard let url else { connectError = bad; return }
+        let token = connectToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            do { try await service.connectServer(server: url, token: token); connectToken = ""; connectServer = "" }
+            catch { connectError = describe(error) }
+        }
+    }
 
     private func exportBackup() {
         #if DEBUG

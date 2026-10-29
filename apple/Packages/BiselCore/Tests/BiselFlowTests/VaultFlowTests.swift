@@ -185,6 +185,33 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("a local-only vault works offline, then connecting a server uploads everything and the phrase recovers it elsewhere")
+    func localFirstThenConnect() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            let phrase = try await a.vault.bootstrapLocal(deviceName: "a")
+            #expect(try await a.vault.identity()?.serverURL == nil)
+            let item = try await a.vault.save(Item(title: "Imported", username: "me", password: "p-local"))
+            let report = try await a.vault.sync()
+            #expect(report.pushed == 0 && report.pulled == 0, "no server: sync is a no-op")
+            await #expect(throws: VaultError.noServer) { _ = try await a.vault.devices() }
+            let relaunched = try a.relaunched()
+            try await relaunched.unlock()
+            #expect(try await relaunched.revealPassword(id: item.id) == "p-local", "it survives a relaunch with no server")
+
+            try await a.vault.connectServer(server.url, bootstrapToken: TestServer.bootstrapToken)
+            #expect(try await a.vault.identity()?.serverURL == server.url)
+            let pushed = try await a.vault.sync()
+            #expect(pushed.pushed >= 1)
+
+            let fresh = try Device("fresh")
+            try await fresh.vault.recover(server: server.url, phrase: phrase, deviceName: "fresh")
+            try await fresh.vault.sync()
+            #expect(try await fresh.vault.revealPassword(id: item.id) == "p-local")
+            #expect(try await a.vault.devices().count == 2)
+        }
+    }
+
     @Test("recover from the 24 words on a fresh store; wrong or rotated-away phrases do not work")
     func recoveryFromPhrase() async throws {
         try await TestServer.with { server in

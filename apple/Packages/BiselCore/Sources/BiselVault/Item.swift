@@ -155,4 +155,6 @@ public enum VaultError: Error, Sendable, Equatable {
     case noTOTP
     case needsUnlockToResolveConflict(String)
     case badBackup(String)
+    /// This vault lives on this Mac only: connect a server before anything that needs one.
+    case noServer
 }

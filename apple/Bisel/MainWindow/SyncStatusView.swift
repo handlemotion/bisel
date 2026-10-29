@@ -13,7 +13,7 @@ struct SyncStatusView: View {
                 Text(text).font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.secondaryText.color).lineLimit(2)
             }
             .accessibilityIdentifier("sync-status")
-            if !compact && service.isUnlocked {
+            if !compact && service.isUnlocked && !service.isLocalOnly {
                 Spacer(minLength: 0)
                 Button { Task { await service.sync(reason: "manual") } } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.borderless).help("Sync now").accessibilityIdentifier("sync-now")
@@ -23,6 +23,7 @@ struct SyncStatusView: View {
     }
 
     @ViewBuilder private var icon: some View {
+        if service.isLocalOnly { Image(systemName: "internaldrive").foregroundStyle(theme.colors.tertiaryText.color) } else {
         switch service.syncState {
         case .syncing: ProgressView().controlSize(.mini)
         case .synced: Image(systemName: "checkmark.icloud").foregroundStyle(theme.colors.success.color)
@@ -30,9 +31,11 @@ struct SyncStatusView: View {
         case .failed: Image(systemName: "exclamationmark.icloud").foregroundStyle(theme.colors.danger.color)
         case .idle: Image(systemName: "icloud").foregroundStyle(theme.colors.tertiaryText.color)
         }
+        }
     }
 
     private var text: String {
+        if service.isLocalOnly { return "On this Mac only" }
         let pending = service.pendingChanges > 0 ? " · \(service.pendingChanges) pending" : ""
         switch service.syncState {
         case .idle: return "Not synced yet" + pending

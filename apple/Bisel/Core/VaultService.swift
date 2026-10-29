@@ -171,6 +171,29 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         setPhase(.unlocked)
     }
 
+    /// New vault that lives on this Mac only. A server can be connected later (Settings → Vault).
+    func bootstrapLocal(deviceName: String) async throws {
+        guard let vault else { throw BiselVault.VaultError.notConfigured }
+        isBusy = true; defer { isBusy = false }
+        let phrase = try await vault.bootstrapLocal(deviceName: deviceName)
+        setRecoveryUnconfirmed(true)
+        pendingPhrase = phrase
+        await refreshPhase()
+        setPhase(.unlocked)
+    }
+
+    /// Registers this Mac's vault with a fresh server, then uploads everything made while it was local.
+    func connectServer(server: URL, token: String) async throws {
+        guard let vault else { throw BiselVault.VaultError.notConfigured }
+        isBusy = true; defer { isBusy = false }
+        try await vault.connectServer(server, bootstrapToken: token)
+        await refreshPhase()
+        await sync(reason: "connect")
+    }
+
+    /// No server yet: nothing to sync, nothing to show as "synced".
+    var isLocalOnly: Bool { phase != .needsSetup && serverURL == nil }
+
     func confirmPhraseStored() {
         pendingPhrase = nil
         setRecoveryUnconfirmed(false)
@@ -330,7 +353,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     }
 
     private func performSync(reason: String) async {
-        guard let vault, phase != .needsSetup else { return }
+        guard let vault, phase != .needsSetup, serverURL != nil else { return }
         syncing = true
         syncState = .syncing
         defer { syncing = false }

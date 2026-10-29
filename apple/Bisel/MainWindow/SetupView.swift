@@ -29,8 +29,10 @@ struct SetupView: View {
                     Text(blurb).font(theme.font(theme.fonts.subtitle)).foregroundStyle(theme.colors.secondaryText.color)
                 }
                 VStack(alignment: .leading, spacing: theme.spacing.m) {
-                    field("Server URL", "https://your-server.example", $server, id: "setup-server")
-                    if mode != .recover { secureField("Bootstrap token", "Set with wrangler secret BOOTSTRAP_TOKEN", $token, id: "setup-token") }
+                    if mode != .create {
+                        field("Server URL", "https://your-server.example", $server, id: "setup-server")
+                        if mode != .recover { secureField("Bootstrap token", "Set with wrangler secret BOOTSTRAP_TOKEN", $token, id: "setup-token") }
+                    }
                     field("This device's name", "MacBook", $deviceName, id: "setup-device")
                     if mode == .restore {
                         #if DEBUG
@@ -84,7 +86,7 @@ struct SetupView: View {
 
     private var blurb: String {
         switch mode {
-        case .create: "Creates your keys on this Mac and a 24-word recovery phrase. The server only ever sees ciphertext."
+        case .create: "Creates your keys on this Mac and a 24-word recovery phrase. Everything stays on this Mac until you connect a server."
         case .recover: "Enter your recovery phrase to rebuild the vault on this Mac from the server."
         case .restore: "Re-create the vault on a fresh server from a .bisel-backup file and its recovery phrase."
         }
@@ -94,7 +96,7 @@ struct SetupView: View {
         BiselEnvironment.usesSoftwareKeys ? "Debug build: device keys are kept in a plain file, not the Secure Enclave." : "Device keys are created in the Secure Enclave and need Touch ID."
     }
     private var ready: Bool {
-        !server.isEmpty && !deviceName.isEmpty && (mode == .recover || !token.isEmpty)
+        !deviceName.isEmpty && (mode == .create || (!server.isEmpty && (mode == .recover || !token.isEmpty)))
             && (mode == .create || !phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             && (mode != .restore || backupURL != nil)
     }
@@ -115,16 +117,22 @@ struct SetupView: View {
 
     private func go() {
         error = nil
+        let name = deviceName.trimmingCharacters(in: .whitespaces)
+        if mode == .create {
+            Task {
+                do { try await service.bootstrapLocal(deviceName: name) } catch { self.error = describe(error) }
+            }
+            return
+        }
         let (url, bad) = ServerURLCheck.parse(server)
         guard let url else { error = bad; return }
-        let name = deviceName.trimmingCharacters(in: .whitespaces)
         let tok = token.trimmingCharacters(in: .whitespacesAndNewlines)
         let words = phrase
         let file = backupURL
         Task {
             do {
                 switch mode {
-                case .create: try await service.bootstrap(server: url, token: tok, deviceName: name)
+                case .create: break
                 case .recover: try await service.recover(server: url, phrase: words, deviceName: name)
                 case .restore:
                     guard let file else { return }

@@ -157,7 +157,8 @@ public actor Vault {
 
     private func client() throws -> SyncClient {
         let id = try requireIdentity()
-        return SyncClient(baseURL: id.serverURL, signer: DeviceSigner(deviceID: id.deviceID, keyStore: config.keyStore))
+        guard let server = id.serverURL else { throw VaultError.noServer }
+        return SyncClient(baseURL: server, signer: DeviceSigner(deviceID: id.deviceID, keyStore: config.keyStore))
     }
 
     /// The vault-admin signer for the unlocked vault (needs VK, so a stolen device-signing key cannot make it).
@@ -240,6 +241,49 @@ public actor Vault {
         identity.recoveryUnconfirmed = true
         try store.setIdentity(identity)
         return bundle.phrase
+    }
+
+    /// First device, no server: the same keys, vault key and recovery phrase as `bootstrap`, kept on this Mac only.
+    /// A server can be connected later with `connectServer`; until then nothing leaves the device.
+    public func bootstrapLocal(deviceName: String) throws -> RecoveryPhrase {
+        guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
+        var vk = BiselRandom.bytes(32)
+        defer { vk.zeroize() }
+        let bundle = try RecoveryService.makeBundle(vaultKey: vk, epoch: 1)
+        let pub = try config.keyStore.createKeys()
+        let deviceID = BiselRandom.identifier()
+        let envelope = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: pub.enc)
+        var identity = LocalIdentity(deviceID: deviceID, deviceName: deviceName, serverURL: nil,
+                                     keyStore: config.keyStore.implementation, envelope: envelope,
+                                     recoveryPublicKey: bundle.publicKey, recoveryEnvelope: bundle.envelope,
+                                     recoveryEncryptionPublicKey: bundle.encryptionPublicKey, epoch: 1)
+        identity.roster = [RosterEntry(deviceID: deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: pub.sig,
+                                       encPubkey: pub.enc, via: "bootstrap")]
+        identity.recoveryPinned = true
+        identity.recoveryUnconfirmed = true
+        try store.setIdentity(identity)
+        setKey(vk)
+        try writeManifest()
+        return bundle.phrase
+    }
+
+    /// Registers this device and the recovery keys of an existing local-only vault with a fresh server. The next
+    /// `sync()` uploads everything that was created while the vault was local.
+    public func connectServer(_ server: URL, bootstrapToken: String) async throws {
+        let key = try requireKey()
+        var identity = try requireIdentity()
+        guard identity.serverURL == nil else { throw VaultError.alreadyConfigured }
+        guard let me = identity.roster.first(where: { $0.deviceID == identity.deviceID }), let envelope = identity.envelope,
+              let recoveryPub = identity.recoveryPublicKey, let recoveryEnv = identity.recoveryEnvelope,
+              let recoveryEncPub = identity.recoveryEncryptionPublicKey else { throw VaultError.notConfigured }
+        try await config.gate.authenticate(reason: "Connect \(identity.deviceName) to a server")
+        let device = WireDevice(id: identity.deviceID, name: identity.deviceName, kind: config.deviceKind, sigPubkey: me.sigPubkey,
+                                encPubkey: me.encPubkey, envelope: envelope)
+        try await SyncClient.bootstrap(baseURL: server, token: bootstrapToken, device: device, recoveryPublicKey: recoveryPub,
+                                       recoveryEncryptionPublicKey: recoveryEncPub, recoveryEnvelope: recoveryEnv,
+                                       adminPublicKey: try adminSigner(key).publicKey)
+        identity.serverURL = server
+        try store.setIdentity(identity)
     }
 
     private func register(server: URL, bootstrapToken: String, deviceName: String, vaultKey vk: Data, recovery: RecoveryBundle) async throws {
@@ -567,6 +611,7 @@ public actor Vault {
         if let at = try store.identity()?.activatesAt, Date(timeIntervalSince1970: TimeInterval(at)) > Date() {
             throw IntegrityError.pendingActivation(until: Date(timeIntervalSince1970: TimeInterval(at)))
         }
+        guard try store.identity()?.serverURL != nil else { return SyncReport() }   // local-only: nothing to sync with
         let held = liveKey()
         let report = try await SyncEngine(store: store, client: try client(), vaultKey: { held }).run()
         if report.rotationAdopted { lock() }   // the key in memory is the rotated-away one; unlock to get the new one

@@ -81,6 +81,7 @@ func describe(_ error: Error) -> String {
         case .notFound: return "Item not found"
         case .notConfigured: return "This Mac isn't set up yet"
         case .alreadyConfigured: return "This Mac already has a vault"
+        case .noServer: return "This vault is on this Mac only. Connect a server in Settings first"
         case .noTOTP: return "This item has no one-time code"
         case .badBackup(let m): return m
         case .unsupportedPayloadVersion(let v): return "Item format v\(v) is newer than this app"
