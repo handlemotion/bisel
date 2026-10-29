@@ -189,3 +189,9 @@ export const HistoryQuerySchema = z.strictObject({
 });
 
 export const EmptyQuerySchema = z.strictObject({});
+
+/** Device-code connect (DESIGN-accounts.md §6.3). */
+export const ConnectStartSchema = z.strictObject({ device_name: deviceName });
+/** 32 random bytes, base64url: the secret only the requesting Mac holds. */
+export const DeviceCodeSchema = z.string().check(z.regex(/^[A-Za-z0-9_-]{43}$/));
+export const ConnectPollSchema = z.strictObject({ device_code: DeviceCodeSchema });

@@ -1,6 +1,6 @@
 # Accounts, multi-tenant boxes, web dashboard, device-code connect
 
-Status: **approved 2026-10-29** (with the recommendations on §10). Slice 1 (§9.1, multi-tenant core) is built and tested locally; nothing deployed, production D1 untouched.
+Status: **approved 2026-10-29** (with the recommendations on §10). All three slices (§9) are built and tested locally (flow tests, a seeded legacy database, a real browser with virtual passkeys); the Mac-side client is not. Nothing deployed, production D1 untouched.
 
 ## 1. What changes, in one paragraph
 
@@ -166,3 +166,12 @@ Nothing is deployed and prod D1 is not touched at any point without a separate a
 3. **Turnstile on sign-up** in the first slice? Recommendation: yes if box.bisel.app will be public, can wait if it stays invite-by-link.
 4. **Deleting the prod `BOOTSTRAP_TOKEN`** after migration (so only account-created boxes can appear). Recommendation: yes.
 5. Per-box limits (5,000 items) and a byte cap as follow-up: acceptable?
+
+## 11. As built: where it differs from the proposal above
+
+- **Claim polling**: `POST /v1/box/claim` returns the same `device_code` pair as `POST /v1/connect`, and the Mac polls `POST /v1/connect/poll` (answer `consumed` = linked, `denied` = the account already had a box). There is no `GET /v1/box`.
+- **Cap**: `item_count` is kept by an insert trigger and the cap is `MAX_ITEMS_PER_BOX` (var, 5000), answered `409 box_full`. No per-box byte cap yet (follow-up, §10 decision 5).
+- **Sign-up abuse**: no Turnstile yet. The Worker-wide limiter, Better Auth's per-route limiter (D1-backed) and the per-address cap on pending connect requests are the only brakes.
+- **Passkey removal** is enforced in the UI only (the Remove button is disabled for the last passkey); the server-side guard is a follow-up.
+- **No events** are written when a box is linked to an account (the Mac client would show an unknown event type as a foreign event).
+- **Tests**: `tests/tenancy.spec.ts` (isolation, cap, kill switch), `tests/web.spec.ts` (passkeys in a real browser), `tests/webconnect.spec.ts` (connect and claim), `legacy-tests/` (migration 0004 on a seeded pre-accounts database).

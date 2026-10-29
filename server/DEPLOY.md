@@ -225,3 +225,18 @@ rm -rf /tmp/bisel-prod-check; pbcopy < /dev/null
 - **Updating**: new migration → `pnpm exec wrangler d1 migrations apply bisel --env prod --remote`, then `pnpm deploy:prod`. Roll back a bad Worker with `pnpm exec wrangler rollback --env prod` (D1 schema changes are not rolled back by it).
 - **Key rotation**: revoking a device in the app rotates the vault key in one transaction; nothing to do on the server.
 - **Teardown**: `pnpm exec wrangler delete --env prod`, `pnpm exec wrangler d1 delete bisel`, remove the WAF rule. The box is gone with the database; restore from a backup file.
+
+
+## Upgrading a live single-box server to accounts (migrations 0004 to 0006)  [OWNER decides, nothing here has been run]
+
+For a server that is already deployed and holds a real box (the situation on box.bisel.app). Design: [`DESIGN-accounts.md`](DESIGN-accounts.md) section 4.
+The new code and the new schema do not work with each other's opposite, so migrate and deploy back to back; the Mac sees a few seconds of failed
+syncs and retries.
+
+1. Back up first: `pnpm exec wrangler d1 export bisel --remote --env prod --output ~/bisel-before-accounts.sql` (Time Travel also covers 30 days).
+2. Rehearse on the copy: `pnpm test:legacy` (seeded database) and, with the export imported into a local D1, run the legacy flow against it.
+3. Set the new secret (random, never reused): `openssl rand -base64 48 | pnpm exec wrangler secret put BETTER_AUTH_SECRET --env prod`.
+4. Apply and deploy: `pnpm exec wrangler d1 migrations apply bisel --remote --env prod`, then immediately `pnpm deploy:prod` (builds the dashboard first).
+5. Verify: the existing Mac still syncs; `https://box.bisel.app/` shows the sign-in page; `GET /v1/nope` is still a bare 404.
+6. Make the box yours: create your account on the dashboard, then on the Mac choose Link to account (it opens `/connect?code=...`; Touch ID is required).
+7. Retire the operator token so only account-created boxes can appear: `pnpm exec wrangler secret delete BOOTSTRAP_TOKEN --env prod`.

@@ -1,5 +1,6 @@
 import { Hono, type Context } from "hono";
 import { createAuth } from "./accounts";
+import { CONNECT_COLS, normalizeUserCode, type ConnectRow } from "./connect";
 
 /**
  * The dashboard's API (DESIGN-accounts.md §6). Everything here is about the *account*: who is signed in, which box
@@ -68,8 +69,89 @@ web.delete("/box", async (c) => {
     db.prepare("DELETE FROM item_history WHERE box_id = ?1").bind(box.id),
     db.prepare("DELETE FROM events WHERE box_id = ?1").bind(box.id),
     db.prepare("DELETE FROM devices WHERE box_id = ?1").bind(box.id),
+    db.prepare("DELETE FROM connect_requests WHERE box_id = ?1").bind(box.id),
     db.prepare("DELETE FROM boxes WHERE id = ?1").bind(box.id),
   ]);
   console.log(JSON.stringify({ evt: "box_deleted", box: box.id.slice(0, 8), by: "account" }));
   return c.json({ deleted: true });
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Device-code connect, the browser half (DESIGN-accounts.md §6.3). The Mac asked for a code at POST /v1/connect; the
+// person arrives here from /connect?code=… while signed in, checks that the code and device name are the ones their Mac
+// shows, and approves. Everything is addressed by the short user code, which is useless without the Mac's secret.
+
+async function pendingByCode(c: Ctx, raw: unknown): Promise<ConnectRow | null> {
+  const code = typeof raw === "string" ? normalizeUserCode(raw) : null;
+  if (!code) return null;
+  return c.env.DB.prepare(`SELECT ${CONNECT_COLS} FROM connect_requests WHERE user_code = ?1 AND status = 'pending' AND expires_at > ?2`)
+    .bind(code, Math.floor(Date.now() / 1000))
+    .first<ConnectRow>();
+}
+
+const ownsBox = async (c: Ctx, userId: string) =>
+  (await c.env.DB.prepare("SELECT id FROM boxes WHERE owner_id = ?1").bind(userId).first()) !== null;
+
+web.get("/connect", async (c) => {
+  const s = await session(c);
+  if (!s) return c.json({ error: "unauthenticated" }, 401);
+  const row = await pendingByCode(c, c.req.query("code"));
+  if (!row) return c.json({ error: "not_found" }, 404);
+  return c.json({
+    kind: row.kind,
+    device_name: row.device_name,
+    country: row.country,
+    created_at: row.created_at,
+    expires_at: row.expires_at,
+    account_has_box: await ownsBox(c, s.user.id),
+  });
+});
+
+web.post("/connect/approve", async (c) => {
+  const s = await session(c);
+  if (!s) return c.json({ error: "unauthenticated" }, 401);
+  const body = (await c.req.json().catch(() => null)) as { code?: unknown } | null;
+  const row = await pendingByCode(c, body?.code);
+  if (!row) return c.json({ error: "not_found" }, 404);
+  const db = c.env.DB;
+  const hasBox = await ownsBox(c, s.user.id);
+
+  if (row.kind === "create") {
+    // With a box already, approving only lets the Mac learn that (poll: account_has_box); it cannot create a second one.
+    await db.prepare("UPDATE connect_requests SET status = 'approved', account_id = ?2 WHERE id = ?1 AND status = 'pending'").bind(row.id, s.user.id).run();
+    return c.json({ ok: true, kind: "create", account_has_box: hasBox });
+  }
+
+  // claim: link the existing, unowned box to this account.
+  if (hasBox) {
+    await db.prepare("UPDATE connect_requests SET status = 'denied', account_id = ?2 WHERE id = ?1 AND status = 'pending'").bind(row.id, s.user.id).run();
+    return c.json({ error: "box_exists" }, 409);
+  }
+  try {
+    const [link] = await db.batch([
+      db.prepare("UPDATE boxes SET owner_id = ?1 WHERE id = ?2 AND owner_id IS NULL").bind(s.user.id, row.box_id),
+      db
+        .prepare(
+          `UPDATE connect_requests SET status = 'consumed', account_id = ?1
+           WHERE id = ?2 AND status = 'pending' AND EXISTS (SELECT 1 FROM boxes WHERE id = ?3 AND owner_id = ?1)`,
+        )
+        .bind(s.user.id, row.id, row.box_id),
+    ]);
+    if (link!.meta.changes !== 1) return c.json({ error: "already_linked" }, 409);
+  } catch (err) {
+    if (/boxes\.owner_id/.test(String(err))) return c.json({ error: "box_exists" }, 409);
+    throw err;
+  }
+  console.log(JSON.stringify({ evt: "box_linked", box: (row.box_id ?? "").slice(0, 8) }));
+  return c.json({ ok: true, kind: "claim" });
+});
+
+web.post("/connect/deny", async (c) => {
+  const s = await session(c);
+  if (!s) return c.json({ error: "unauthenticated" }, 401);
+  const body = (await c.req.json().catch(() => null)) as { code?: unknown } | null;
+  const row = await pendingByCode(c, body?.code);
+  if (!row) return c.json({ error: "not_found" }, 404);
+  await c.env.DB.prepare("UPDATE connect_requests SET status = 'denied', account_id = ?2 WHERE id = ?1 AND status = 'pending'").bind(row.id, s.user.id).run();
+  return c.json({ ok: true });
 });

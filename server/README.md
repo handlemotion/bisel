@@ -1,6 +1,6 @@
 # bisel server
 
-Cloudflare Worker (TypeScript, Hono, Zod) + D1. Zero-knowledge sync API: the server stores only
+Cloudflare Worker (TypeScript, Hono, Zod, Better Auth) + D1 + static assets (the dashboard). Zero-knowledge sync API: the server stores only
 ciphertext blobs, public keys and opaque envelopes. Contract: [`../SPEC.md`](../SPEC.md) §6.
 This README is the wire-level detail for client implementers.
 
@@ -16,13 +16,18 @@ pnpm install            # first time
 pnpm dev                # creates .dev.vars if missing, applies local D1 migrations, serves http://localhost:8787
 pnpm migrate            # apply migrations to the local D1 only (pnpm dev already does this)
 pnpm reset              # stop `pnpm dev` first, then wipe local D1 state (.wrangler/state): the next `pnpm dev` is a fresh, un-bootstrapped server
-pnpm test               # Playwright flow tests; starts its own wrangler dev on :8788 with a throwaway D1 (AUTH_BACKOFF_MS=400)
+pnpm test               # Playwright flow tests; starts its own wrangler dev on :8788 with a throwaway D1 (AUTH_BACKOFF_MS=400).
+                        # Includes two-box isolation, the dashboard in a real browser (virtual passkeys) and the device-code connect flow.
+pnpm test:legacy        # builds a pre-accounts database (migrations 0001-0003 + seed), applies 0004+ on top and checks the old box still works
+pnpm build:web          # bundles web/app.ts into public/app.js (wrangler dev and deploy run it themselves)
 pnpm typecheck
 node scripts/smoke.ts   # manual walk through bootstrap/put/conflict/delete/approve/revoke/recovery against :8787
 ```
 
 Local dev bootstrap token (from `.dev.vars`, created from `.dev.vars.example`): `dev-bootstrap-token`.
-`POST /v1/bootstrap` works exactly once per database; after `pnpm reset` it works again.
+The server holds **many boxes** (one per account, plus unowned ones made with the operator token). `POST /v1/bootstrap` with the token
+creates another unowned box every time; with `X-Bisel-Connect` it creates the box of the account that approved a device code.
+The dashboard is at `http://localhost:8787/` (sign-up and sign-in are passkeys; `localhost` is a valid WebAuthn origin).
 
 Base URL while developing: `http://localhost:8787`.
 
@@ -291,10 +296,42 @@ Signed by a normal device. Body `{"recovery_pubkey": "<Ed25519 raw 32B>", "recov
 Replaces all three (this is a **new phrase**; vault-key rotation keeps the phrase); the old recovery key stops working at once.
 `200 {"ok":true}`; `409 stale_epoch` if the envelope was built from a rotated-away key.
 
+## Boxes, accounts, the dashboard
+
+Design and threat model: [`DESIGN-accounts.md`](DESIGN-accounts.md). In short:
+
+- A **box** is the unit the protocol always had (items, devices, recovery keys, epoch). Every box-scoped row carries `box_id`; a device's
+  box is its own row, so signed requests are unchanged and a handler never takes a box from the request. Item ids are unique per box.
+- Recovery requests (`X-Bisel-Device: recovery`) also send `X-Bisel-Box: <box id>` (bootstrap returns `box_id`). Without it they resolve to
+  `legacy_box_00000000`, the box that existed before accounts (kept only for clients that predate the header). On a device request the header is malformed.
+- An **account** (Better Auth, passkeys only, no email) owns at most one box. It never sees a key: it decides who may create storage and see the dashboard.
+  Sync does not depend on it. A box holds at most `MAX_ITEMS_PER_BOX` items (live and tombstones): beyond that a new item is `409 box_full`.
+- The dashboard is static files from `public/` served by the same Worker; `/api/*` is its API (`/api/auth/*` is Better Auth, `/api/box`,
+  `/api/connect*` are ours; state-changing routes need `Origin` = `PUBLIC_ORIGIN` and `X-Bisel-CSRF: 1`).
+
+### Device-code connect (no tokens typed)
+
+```
+POST /v1/connect            {device_name}            -> 201 {device_code, user_code, verification_uri, expires_in: 600, interval: 3}
+POST /v1/connect/poll       {device_code}            -> {status: pending|approved|consumed|denied|expired, account_has_box?}
+POST /v1/bootstrap          X-Bisel-Connect: <device_code>, same body as the token bootstrap -> 201 {device_id, box_id, head_seq, epoch}
+POST /v1/box/claim          device + admin signed, empty body -> 201 (same shape as /v1/connect); links an existing unowned box
+```
+
+The Mac opens `verification_uri` (`/connect?code=ABCD-EFGH`); the person signs in or creates an account and approves; the Mac polls until
+`approved`, then redeems the secret `device_code` at `/v1/bootstrap` (once; `409 box_exists` if the account already owns a box, which the poll also
+reports as `account_has_box: true`). `claim` is for a box that already exists (the pre-accounts one): the same approval links it to the account and the
+poll then answers `consumed`. `/v1/connect*` are unsigned; unknown or expired codes answer `expired`/the bare 404, pending requests are capped per address (bare 429).
+
 ## Layout
 
 ```
 src/index.ts       routes (Hono), bootstrap, item/device/rotate/recovery handlers
+src/accounts.ts    Better Auth configuration (passkeys, rate limits, passkey-first sign-up)
+src/web.ts         the dashboard's API: box, delete box, connect approve/deny
+src/connect.ts     device-code connect (unsigned half: start, poll) and its helpers
+web/app.ts         the dashboard (plain DOM), bundled to public/app.js; public/ holds index.html, style.css, _headers (CSP)
+legacy-tests/      migration test on a seeded pre-accounts database
 src/auth.ts        signed-request middleware, canonical query, failed-auth backoff
 src/schemas.ts     Zod schemas
 src/encoding.ts    base64url / hex

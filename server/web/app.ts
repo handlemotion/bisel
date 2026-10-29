@@ -184,8 +184,84 @@ async function dashboard(state: BoxState, rerender: () => void): Promise<HTMLEle
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// /connect?code=ABCD-EFGH : the person approves what their Mac asked for
+
+interface ConnectInfo {
+  kind: "create" | "claim";
+  device_name: string;
+  country: string | null;
+  created_at: number;
+  account_has_box: boolean;
+}
+
+function connectCard(info: ConnectInfo, code: string, done: (message: string) => void): HTMLElement {
+  const out = h("p", { class: "error", role: "alert" });
+  const claim = info.kind === "claim";
+  const blocked = info.account_has_box;
+  const approve = h("button", { class: "primary", type: "button" }, blocked && !claim ? "Tell my Mac" : claim ? "Link this box" : "Approve");
+  approve.addEventListener("click", () =>
+    guarded(approve, out, async () => {
+      const res = await api("POST", "/api/connect/approve", { code });
+      if (res.status === 409) throw new Error(res.json.error === "box_exists" ? "This account already has a box." : "That box is already linked to an account.");
+      if (res.status !== 200) throw new Error("This code is no longer valid. Start again from bisel on your Mac.");
+      done(
+        blocked && !claim
+          ? "Your Mac has been told. It will explain how to add itself to your existing box."
+          : claim
+            ? "Linked. Your box now belongs to this account."
+            : "Approved. Go back to bisel on your Mac; it continues by itself.",
+      );
+    }),
+  );
+  const deny = h("button", { type: "button" }, "Not me");
+  deny.addEventListener("click", () =>
+    guarded(deny, out, async () => {
+      await api("POST", "/api/connect/deny", { code });
+      done("Cancelled. Nothing was connected.");
+    }),
+  );
+  const where = info.country ? ` Requested from ${info.country}.` : "";
+  return h(
+    "div",
+    { class: "card stack" },
+    h("h1", {}, claim ? `Link “${info.device_name}” to your account` : `Connect “${info.device_name}”`),
+    h("p", {}, `Your Mac should be showing this code.${where} Only continue if they match.`),
+    h("div", { class: "code" }, code),
+    blocked && !claim ? h("p", {}, "This account already has a box, so this Mac cannot create another one.") : null,
+    blocked && claim ? h("p", {}, "This account already has a box, so another cannot be linked.") : null,
+    h("div", { class: "row" }, deny, blocked && claim ? null : approve),
+    out,
+  );
+}
+
+async function connectPage(): Promise<void> {
+  const raw = new URLSearchParams(location.search).get("code") ?? "";
+  const code = raw.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^(.{4})(.*)$/, "$1-$2");
+  const title = h("h1", {}, "Connect your Mac");
+  const me = await api("GET", "/api/box");
+  if (me.status === 401) {
+    root.replaceChildren(title, h("p", {}, "Sign in, or create an account, to approve the connection."), authForms(() => void connectPage()));
+    return;
+  }
+  const res = await api("GET", `/api/connect?code=${encodeURIComponent(code)}`);
+  if (res.status !== 200) {
+    root.replaceChildren(
+      h("div", { class: "card stack" }, h("h1", {}, "That code is not valid"), h("p", {}, "It may have expired or already been used. Start again from bisel on your Mac.")),
+    );
+    return;
+  }
+  const dashboardLink = h("a", { href: "/" }, "Open your dashboard");
+  root.replaceChildren(
+    connectCard(res.json as ConnectInfo, code, (message) =>
+      root.replaceChildren(h("div", { class: "card stack" }, h("h1", {}, "Done"), h("p", {}, message), dashboardLink)),
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 
 async function render() {
+  if (location.pathname === "/connect") return connectPage();
   const res = await api("GET", "/api/box");
   if (res.status === 401) {
     root.replaceChildren(h("h1", {}, "bisel"), authForms(render));

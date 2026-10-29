@@ -13,6 +13,7 @@ import {
   type AppEnv,
 } from "./auth";
 import { web } from "./web";
+import { connect, connectByDeviceCode, createConnectRequest } from "./connect";
 import { b64urlByteLength, b64urlDecode, b64urlEncode } from "./encoding";
 import {
   BODY_LIMITS,
@@ -34,6 +35,8 @@ import {
 } from "./schemas";
 
 const app = new Hono<AppEnv>();
+
+const DEVICE_CODE = /^[A-Za-z0-9_-]{43}$/;
 
 // Every response, including the bare 404s, carries exactly the same hardening headers, so they
 // cannot be used to tell an authentication failure from an unknown route.
@@ -253,19 +256,33 @@ app.post("/v1/bootstrap", async (c) => {
   const env = c.env;
   const now = Math.floor(Date.now() / 1000);
   let body: Uint8Array<ArrayBuffer> | null;
+  /** Set when the caller redeemed an approved connect request instead of presenting the operator token. */
+  let owner: { requestId: string; accountId: string } | null = null;
   try {
-    const supplied = req.headers.get("x-bisel-bootstrap") ?? "";
-    const expected = env.BOOTSTRAP_TOKEN ?? "";
-    const enc = new TextEncoder();
-    const [a, b] = await Promise.all([
-      crypto.subtle.digest("SHA-256", enc.encode(supplied)),
-      crypto.subtle.digest("SHA-256", enc.encode(expected)),
-    ]);
-    const tokenOk = expected.length > 0 && crypto.subtle.timingSafeEqual(a, b);
-    if (!tokenOk) {
-      await decoyVerify("device", new Uint8Array(64), new Uint8Array(32));
-      await recordFailure(env, req, now, "bad_bootstrap_token");
-      return deny();
+    const connectCode = req.headers.get("x-bisel-connect");
+    if (connectCode !== null) {
+      // An approved device-code request: the person signed in on the dashboard and approved this Mac.
+      const request = DEVICE_CODE.test(connectCode) ? await connectByDeviceCode(env, connectCode) : null;
+      if (!request || request.status !== "approved" || request.kind !== "create" || request.expires_at <= now || !request.account_id) {
+        await decoyVerify("device", new Uint8Array(64), new Uint8Array(32));
+        await recordFailure(env, req, now, "bad_connect_code");
+        return deny();
+      }
+      owner = { requestId: request.id, accountId: request.account_id };
+    } else {
+      const supplied = req.headers.get("x-bisel-bootstrap") ?? "";
+      const expected = env.BOOTSTRAP_TOKEN ?? "";
+      const enc = new TextEncoder();
+      const [a, b] = await Promise.all([
+        crypto.subtle.digest("SHA-256", enc.encode(supplied)),
+        crypto.subtle.digest("SHA-256", enc.encode(expected)),
+      ]);
+      const tokenOk = expected.length > 0 && crypto.subtle.timingSafeEqual(a, b);
+      if (!tokenOk) {
+        await decoyVerify("device", new Uint8Array(64), new Uint8Array(32));
+        await recordFailure(env, req, now, "bad_bootstrap_token");
+        return deny();
+      }
     }
     body = await readBodyCapped(req, BODY_LIMITS.bootstrap);
     if (!body) return deny();
@@ -274,7 +291,7 @@ app.post("/v1/bootstrap", async (c) => {
     return deny();
   }
 
-  // The caller proved knowledge of the bootstrap secret, so informative errors are fine from here.
+  // The caller proved knowledge of the bootstrap secret (or holds an approved connect request), so informative errors are fine from here.
   c.set("body", body);
   const parsed = parseJson(c, BootstrapSchema, BODY_LIMITS.bootstrap);
   if (!parsed.ok) return parsed.res;
@@ -288,23 +305,34 @@ app.post("/v1/bootstrap", async (c) => {
   }
 
   const boxId = newBoxId();
+  const db = env.DB;
   try {
-    await env.DB.batch([
-      env.DB.prepare(
-        `INSERT INTO boxes (id, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, head_seq, epoch, created_at)
-         VALUES (?1, 'ed25519', ?2, ?3, ?4, ?5, 0, 1, ?6)`,
-      ).bind(boxId, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, now),
-      insertDevice(env.DB, boxId, device, now, 1),
-      insertEvent(env.DB, boxId, now, device.id, "bootstrap", device.id),
+    await db.batch([
+      // A connect request redeems exactly once: the box, its first device and the request's end are one transaction.
+      ...(owner ? [assertThat(db, "EXISTS (SELECT 1 FROM connect_requests WHERE id = ?1 AND status = 'approved' AND expires_at > ?2)", owner.requestId, now)] : []),
+      db
+        .prepare(
+          `INSERT INTO boxes (id, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, head_seq, epoch, created_at, owner_id)
+           VALUES (?1, 'ed25519', ?2, ?3, ?4, ?5, 0, 1, ?6, ?7)`,
+        )
+        .bind(boxId, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, now, owner?.accountId ?? null),
+      insertDevice(db, boxId, device, now, 1),
+      insertEvent(db, boxId, now, device.id, "bootstrap", device.id),
+      ...(owner ? [db.prepare("UPDATE connect_requests SET status = 'consumed' WHERE id = ?1").bind(owner.requestId), clearAssertions(db)] : []),
     ]);
   } catch (err) {
-    // The device id is already registered (in this or another box): same refusal as any other bootstrap failure.
+    // The account already owns a box (it is told, it is the one who holds the approval).
+    if (owner && /boxes\.owner_id/.test(String(err))) return c.json({ error: "box_exists" }, 409);
+    // The device id is already registered (in this or another box), or the approval was just used: same refusal as any other bootstrap failure.
     console.log(JSON.stringify({ evt: "auth_fail", reason: "bootstrap_conflict", message: String(err) }));
     return deny();
   }
-  console.log(JSON.stringify({ evt: "bootstrap", box: boxId.slice(0, 8), device: device.id }));
+  console.log(JSON.stringify({ evt: "bootstrap", box: boxId.slice(0, 8), device: device.id, via: owner ? "account" : "token" }));
   return c.json({ device_id: device.id, box_id: boxId, head_seq: 0, epoch: 1 }, 201);
 });
+
+// Device-code connect: the unsigned half (ask for a code, poll for the approval). See connect.ts.
+app.route("/v1", connect);
 
 // ---------------------------------------------------------------------------------------------
 // GET /v1/sync
@@ -555,6 +583,26 @@ app.delete("/v1/devices/:id", deviceAuth, adminAuth, async (c) => {
     insertEvent(db, boxId, now, p.kind === "device" ? p.id : null, "revoke", id),
   ]);
   return c.json({ id, revoked_at: now, rotated: false });
+});
+
+/**
+ * Link this (so far unowned) box to an account. Signed by the device and by the vault-admin key, so Touch ID is
+ * involved. Returns a code pair like POST /v1/connect; the person approves it on the dashboard while signed in, and the
+ * device then polls POST /v1/connect/poll until the box is linked.
+ */
+app.post("/v1/box/claim", deviceAuth, adminAuth, async (c) => {
+  const nb = noBody(c);
+  if (nb) return nb;
+  const nq = parseQuery(c, EmptyQuerySchema);
+  if (!nq.ok) return nq.res;
+  const p = c.get("principal");
+  const db = c.env.DB;
+  const box = await db.prepare("SELECT owner_id FROM boxes WHERE id = ?1").bind(p.boxId).first<{ owner_id: string | null }>();
+  if (box?.owner_id) return c.json({ error: "already_linked" }, 409);
+  const device = await db.prepare("SELECT name FROM devices WHERE id = ?1").bind(p.kind === "device" ? p.id : "").first<{ name: string }>();
+  // One live claim per box: a new request replaces any earlier pending one.
+  await db.prepare("DELETE FROM connect_requests WHERE box_id = ?1 AND kind = 'claim' AND status = 'pending'").bind(p.boxId).run();
+  return c.json(await createConnectRequest(c.env, c.req.raw, c.get("now"), "claim", device?.name ?? "This device", p.boxId), 201);
 });
 
 app.get("/v1/envelope", deviceAuth, async (c) => {
