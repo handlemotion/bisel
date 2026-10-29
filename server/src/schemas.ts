@@ -1,4 +1,4 @@
-import { z } from "zod";
+import * as z from "zod/mini";
 import { b64urlByteLength, isB64url } from "./encoding";
 
 export const MAX_BLOB_BYTES = 256 * 1024;
@@ -23,30 +23,34 @@ export const BODY_LIMITS = {
 export const MAX_ROTATE_ITEMS = 20_000;
 export const MAX_DEVICES = 64;
 
+// zod/mini, not the classic build: the classic import alone is ~25 ms of Worker startup (826 KB of source);
+// the same schemas on mini evaluate in well under a millisecond.
 const b64 = (maxBytes: number) =>
   z
     .string()
-    .min(1)
-    .refine(isB64url, "must be unpadded base64url")
-    .refine((s) => b64urlByteLength(s) <= maxBytes, "too large");
+    .check(z.minLength(1), z.refine(isB64url, "must be unpadded base64url"), z.refine((s) => b64urlByteLength(s) <= maxBytes, "too large"));
 
-const uint = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
-const epoch = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
+const intIn = (min: number) => z.int().check(z.minimum(min), z.maximum(Number.MAX_SAFE_INTEGER));
+const uint = intIn(0);
+const epoch = intIn(1);
+const rev = intIn(1);
 
 /** Client-chosen opaque ids (devices, items). E.g. 16 random bytes as base64url, or a UUID. */
-export const IdSchema = z.string().regex(/^[A-Za-z0-9_-]{16,64}$/);
+export const IdSchema = z.string().check(z.regex(/^[A-Za-z0-9_-]{16,64}$/));
 
 /** Device names are shown in UIs and logs: no control, format (bidi override) or line/paragraph separator characters. */
 const deviceName = z
   .string()
-  .min(1)
-  .max(100)
-  .regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]+$/u, "control or format characters are not allowed");
+  .check(
+    z.minLength(1),
+    z.maxLength(100),
+    z.regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]+$/u, "control or format characters are not allowed"),
+  );
 
 export const DeviceRegistrationSchema = z.strictObject({
   id: IdSchema,
   name: deviceName,
-  kind: z.string().regex(/^[a-z0-9_-]{1,32}$/),
+  kind: z.string().check(z.regex(/^[a-z0-9_-]{1,32}$/)),
   /** P-256 public key, X9.63 uncompressed (65 bytes), base64url. */
   sig_pubkey: b64(65),
   /** P-256 public key, X9.63 uncompressed (65 bytes), base64url. Opaque to the server. */
@@ -80,7 +84,7 @@ export const RecoveryRotateSchema = z.strictObject({
 });
 
 /** Tombstone: a marker sealed under VK (AAD id|rev|tomb), so other devices can tell a real delete from a forged one. */
-const marker = z.string().min(1).refine(isB64url, "must be unpadded base64url").refine((s) => b64urlByteLength(s) <= 256, "too large");
+const marker = b64(256);
 
 export const DeleteItemSchema = z.strictObject({ epoch, marker });
 
@@ -88,7 +92,7 @@ export const PutItemSchema = z.strictObject({
   base_rev: uint,
   /** Epoch of the VK this blob's item key is wrapped under; a stale epoch is refused (409 stale_epoch). */
   epoch,
-  blob: z.string().min(1).refine(isB64url, "must be unpadded base64url"),
+  blob: z.string().check(z.minLength(1), z.refine(isB64url, "must be unpadded base64url")),
 });
 
 const unique = (ids: string[]) => new Set(ids).size === ids.length;
@@ -102,57 +106,53 @@ export const RotateSchema = z.strictObject({
   /** head_seq the client's item snapshot is at. Any write since then makes the rotation fail (409). */
   base_seq: uint,
   /** Revoke this device in the same transaction (null = rotate only). */
-  revoke: IdSchema.nullable(),
+  revoke: z.nullable(IdSchema),
   /** Ed25519 public key derived from the new VK. The request's admin signature (made with the old key) authorises it. */
   new_admin_pubkey: b64(32),
   /** Every tombstone, re-sealed under the new VK. */
   tombstones: z
-    .array(z.strictObject({ id: IdSchema, rev: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER), marker }))
-    .max(MAX_ROTATE_ITEMS)
-    .refine((a) => unique(a.map((i) => i.id)), "duplicate tombstone id"),
+    .array(z.strictObject({ id: IdSchema, rev, marker }))
+    .check(z.maxLength(MAX_ROTATE_ITEMS), z.refine((a) => unique(a.map((i) => i.id)), "duplicate tombstone id")),
   items: z
     .array(
       z.strictObject({
         id: IdSchema,
-        rev: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+        rev,
         /** New wrapped item key: exactly 60 bytes, replaces the first 60 bytes of the stored blob. */
-        key: z.string().length(WRAPPED_KEY_CHARS).refine(isB64url, "must be unpadded base64url"),
+        key: z.string().check(z.length(WRAPPED_KEY_CHARS), z.refine(isB64url, "must be unpadded base64url")),
       }),
     )
-    .max(MAX_ROTATE_ITEMS)
-    .refine((a) => unique(a.map((i) => i.id)), "duplicate item id"),
+    .check(z.maxLength(MAX_ROTATE_ITEMS), z.refine((a) => unique(a.map((i) => i.id)), "duplicate item id")),
   devices: z
     .array(z.strictObject({ id: IdSchema, envelope: b64(MAX_KEY_ENVELOPE_BYTES) }))
-    .min(1)
-    .max(MAX_DEVICES)
-    .refine((a) => unique(a.map((d) => d.id)), "duplicate device id"),
+    .check(z.minLength(1), z.maxLength(MAX_DEVICES), z.refine((a) => unique(a.map((d) => d.id)), "duplicate device id")),
   recovery_envelope: b64(MAX_KEY_ENVELOPE_BYTES),
 });
 
+const digits = z.string().check(z.regex(/^\d{1,15}$/));
 const intParam = (def: number) =>
-  z
-    .string()
-    .regex(/^\d{1,15}$/)
-    .transform(Number)
-    .optional()
-    .transform((v) => v ?? def);
+  z.pipe(
+    z.optional(z.pipe(digits, z.transform(Number))),
+    z.transform((v) => v ?? def),
+  );
+const boundedInt = (min: number, max: number) => z.int().check(z.minimum(min), z.maximum(max));
 
 export const SyncQuerySchema = z.strictObject({
   since: intParam(0),
   /** Only events with a larger id (omit: the latest 50). */
-  events_since: z.string().regex(/^\d{1,15}$/).transform(Number).optional(),
-  limit: intParam(200).pipe(z.number().int().min(1).max(500)),
+  events_since: z.optional(z.pipe(digits, z.transform(Number))),
+  limit: z.pipe(intParam(200), boundedInt(1, 500)),
 });
 
 export const DeleteQuerySchema = z.strictObject({
-  base_rev: z.string().regex(/^\d{1,15}$/).transform(Number),
+  base_rev: z.pipe(digits, z.transform(Number)),
 });
 
 export const HistoryQuerySchema = z.strictObject({
-  id: IdSchema.optional(),
+  id: z.optional(IdSchema),
   /** History row id cursor: only rows after it. */
   after: intParam(0),
-  limit: intParam(100).pipe(z.number().int().min(1).max(500)),
+  limit: z.pipe(intParam(100), boundedInt(1, 500)),
 });
 
 export const EmptyQuerySchema = z.strictObject({});

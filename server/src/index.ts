@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { secureHeaders } from "hono/secure-headers";
-import type { ZodType } from "zod";
+import type { ZodMiniType } from "zod/mini";
 import {
   authenticate,
   clientIp,
@@ -112,7 +112,7 @@ const bad = (c: Ctx, error = "invalid_request", detail?: unknown) =>
 type Parsed<T> = { ok: true; data: T } | { ok: false; res: Response };
 
 /** Parse the already-read (and already-authenticated) body as JSON against a strict schema. */
-function parseJson<T>(c: Ctx, schema: ZodType<T>, maxBytes: number): Parsed<T> {
+function parseJson<T>(c: Ctx, schema: ZodMiniType<T>, maxBytes: number): Parsed<T> {
   const raw = c.get("body");
   if (raw.length > maxBytes) return { ok: false, res: c.json({ error: "too_large", max_bytes: maxBytes }, 413) };
   let json: unknown;
@@ -129,7 +129,7 @@ function parseJson<T>(c: Ctx, schema: ZodType<T>, maxBytes: number): Parsed<T> {
 }
 
 /** Query string against a strict schema; a repeated parameter is invalid (the signature covers both, the meaning would not be). */
-function parseQuery<T>(c: Ctx, schema: ZodType<T>): Parsed<T> {
+function parseQuery<T>(c: Ctx, schema: ZodMiniType<T>): Parsed<T> {
   const params = new URL(c.req.url).searchParams;
   const obj: Record<string, string> = {};
   for (const [k, v] of params) {
