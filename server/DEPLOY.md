@@ -89,6 +89,19 @@ pbpaste | pnpm exec wrangler secret put BOOTSTRAP_TOKEN --env prod       # reads
 
 (`pbcopy` leaves the token on the clipboard for step 9; clear it afterwards with `pbcopy < /dev/null`.)
 
+### Secrets live in Doppler
+
+Project `bisel` (Handlemotion workspace), config `prd`; `doppler setup` in `server/` binds this directory to it. Nothing syncs: `doppler run` injects
+the values for a command, so wrangler targets the right account (`CLOUDFLARE_ACCOUNT_ID`, the Bisel account) without a shell export.
+
+```bash
+doppler run -- pnpm deploy:prod
+doppler secrets get BOOTSTRAP_TOKEN --plain | pnpm exec wrangler secret put BOOTSTRAP_TOKEN --env prod   # token goes Doppler -> Worker, never the terminal
+```
+
+Add `CLOUDFLARE_API_TOKEN` there (an account-owned token on the Bisel account: Workers Scripts, D1 and Zone read/Workers Routes edit) to deploy
+without the OAuth login. After the real bootstrap, delete `BOOTSTRAP_TOKEN` from both the Worker and Doppler.
+
 ## 6. Flood rule in front of the Worker  [OWNER, dashboard]
 
 The binding in the Worker already allows 300 requests per minute per address and answers a bare `429`. It is approximate (counts are per
