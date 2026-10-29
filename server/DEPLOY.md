@@ -1,136 +1,214 @@
-# Deploying the bisel server
+# Deploying the bisel server to box.bisel.app
 
-Nothing in this repo has been deployed and no Cloudflare resource exists yet. These are the exact steps, in order.
-Every command runs from `bisel/server/` and uses the pinned `wrangler` (`pnpm exec wrangler`, no global install).
-Do not skip the verification section: the point of this deployment is that it answers **a bare 404 to anyone who is not a signed bisel device**.
+Nothing has been deployed yet: no Cloudflare resource exists. This is the exact step list, in order. Run every command from `bisel/server/`
+with the pinned wrangler (`pnpm exec wrangler`, never a global one).
 
-## What you must provide or do
+The Worker is `env.prod` in `wrangler.jsonc`: name `bisel-server`, route `box.bisel.app` (a Workers *Custom Domain*, so wrangler creates the
+proxied DNS record and the certificate itself), `workers.dev` and preview URLs off, per-address flood limit via the Workers rate-limiting binding,
+Workers Logs on with invocation logs and traces off. The hostname is public; what protects the data is that every request needs a registered
+device's signature and that the server only ever holds ciphertext. The one thing to protect is that **anything that is not a signed device gets a bare 404**.
 
-| # | What | Why |
+Legend: **[OWNER]** needs the owner's browser, login or decision; **[ANY]** can be run by a session on the owner's machine once the owner has done the
+[OWNER] steps.
+
+## Safety rules for whoever runs this
+
+- Every command here that touches Cloudflare carries `--env prod` and, for D1, `--remote`. Without `--remote`, wrangler's D1 commands only touch the local dev database.
+- Never print the bootstrap token or the 24-word phrase into a chat, a log or a file in the repo.
+- Never run the wipe in step 10 after the owner's real bootstrap (step 11): it destroys the vault. Time Travel can restore it, but it is not a thing to rely on.
+
+## 0. Prerequisites
+
+| # | What | Who |
 |---|------|-----|
-| 1 | A Cloudflare account with the **`bisel.app` zone** on it (nameservers pointing at Cloudflare) | the Worker is routed on a subdomain of it |
-| 2 | `pnpm exec wrangler login` (browser OAuth as you) | wrangler needs your account; I never see the token |
-| 3 | A **random hostname label** you generate yourself (step 1) | the server's only address; keep it out of git, chat logs and screenshots until it is in the app |
-| 4 | The **D1 database id** printed by `d1 create` (step 3), pasted into `wrangler.jsonc` | binds the Worker to the database |
-| 5 | A **bootstrap token** you generate and paste into `wrangler secret put` (step 5), stored in your password manager | authorises the one-time first-device registration |
-| 6 | The **zone rate-limit rule** (step 7), done in the dashboard | sheds floods before the Worker sees them |
-| 7 | The `AAAA` DNS record(s) in step 2 | Workers routes need a proxied hostname |
-| 8 | Plan: Workers **Free** should do for one person (not measured on Cloudflare: free is limited to 10 ms CPU and 50 D1 queries per request; a key rotation uses about a dozen queries regardless of vault size). Paid ($5) gives headroom and longer log retention. | |
-
-## 1. Pick the secret hostname
+| 0.1 | The `bisel.app` zone is **active on the Cloudflare account** the owner will log in with (nameservers at Cloudflare). The apex stays free for the marketing site. | [OWNER] |
+| 0.2 | `box.bisel.app` has **no existing DNS record**. A Custom Domain cannot be created over an existing CNAME (check dashboard → bisel.app → DNS → Records, delete any `box` record). | [OWNER] |
+| 0.3 | Plan: Workers **Free** works for one person (10 ms CPU and 50 D1 queries per request; a key rotation uses about a dozen queries). **Paid ($5/mo)** adds 30-day Time Travel instead of 7, longer log retention and CPU headroom; recommended. | [OWNER] decides |
+| 0.4 | `pnpm install` done in `server/`, and the flow tests pass before touching anything. | [ANY] |
 
 ```bash
-LABEL=$(openssl rand -hex 12)      # 96 random bits, e.g. 3f9a0c1d7e2b4a58c6d19e03
-echo "$LABEL.bisel.app"
+cd /Users/rodrigo/Workspace/Product/bisel/server
+pnpm install --frozen-lockfile
+pnpm typecheck && pnpm test          # 26 flow tests, local worker + local D1 only
 ```
 
-Write it down once in your password manager. Anyone who knows this name can *try* the API (they still need a registered device key, which they cannot get), so treat it as a secret, not as a credential.
+## 1. Log in to Cloudflare  [OWNER]
 
-## 2. DNS and certificate (keeps the name out of Certificate Transparency)
-
-Cloudflare's free **Universal SSL** certificate already covers `bisel.app` and `*.bisel.app`. Because the certificate is a wildcard, CT logs record only `*.bisel.app`, never your label. Do **not** order an advanced certificate that names the label explicitly.
-
-In the dashboard (DNS → Records), add **one wildcard record** and keep the proxy on:
-
-| Type | Name | Content | Proxy |
-|------|------|---------|-------|
-| `AAAA` | `*` | `100::` | Proxied (orange cloud) |
-
-`100::` is the discard prefix; the record only exists so Cloudflare accepts traffic for every subdomain. With a wildcard, *every* subdomain resolves identically, so DNS gives no way to find your label. (If you already serve something on `bisel.app` itself, leave it alone; the wildcard does not touch the apex.)
-
-## 3. Create the database
+Opens the owner's browser for OAuth; the token stays in wrangler's local config and is never shown to a session.
 
 ```bash
 pnpm exec wrangler login
-pnpm exec wrangler d1 create bisel          # add --location weur|enam|... if you want to pin the region
+pnpm exec wrangler whoami            # confirm it is the account that holds bisel.app
 ```
 
-Copy the printed `database_id` into `wrangler.jsonc`, under `env.prod.d1_databases[0].database_id` (replace `REPLACE_WITH_D1_DATABASE_ID`).
-In the same file replace `REPLACE_WITH_RANDOM_LABEL` in `env.prod.routes[0].pattern` with your label, so it reads `3f9a….bisel.app/*`.
-**Do not commit those two edits** (they identify your deployment): keep them in the working tree, or `git update-index --skip-worktree wrangler.jsonc`.
+## 2. Create the production database  [ANY]
 
-## 4. Apply the migrations to the real database
+```bash
+pnpm exec wrangler d1 create bisel --location weur     # weur|eeur|enam|wnam|apac|oc: pick the region closest to the owner
+```
+
+Decline any offer to add the binding to the config automatically. Copy the printed `database_id` and put it in `wrangler.jsonc`
+(`env.prod.d1_databases[0].database_id`, replacing `REPLACE_WITH_D1_DATABASE_ID`):
+
+```bash
+DB_ID=<paste-the-uuid>
+sed -i '' "s/REPLACE_WITH_D1_DATABASE_ID/$DB_ID/" wrangler.jsonc
+grep -n REPLACE wrangler.jsonc || echo "no placeholder left"
+```
+
+A D1 id is an identifier, not a credential; commit it (`git commit -m "server: production D1 id"`).
+
+## 3. Apply the migrations to the real database  [ANY]
 
 ```bash
 pnpm exec wrangler d1 migrations apply bisel --env prod --remote
+pnpm exec wrangler d1 migrations list bisel --env prod --remote     # expect: 0001_init, 0002_rotation, 0003_admin_history all applied
 ```
 
-Expect `0001_init.sql` and `0002_rotation.sql` to apply. (`--remote` is what touches Cloudflare; without it, the command only touches the local dev database.)
-
-## 5. Deploy, then set the bootstrap token
+## 4. Deploy the Worker and attach box.bisel.app  [ANY, after step 1]
 
 ```bash
-pnpm exec wrangler deploy --env prod
-openssl rand -base64 32                       # copy this; it is the bootstrap token
-pnpm exec wrangler secret put BOOTSTRAP_TOKEN --env prod     # paste it at the prompt
+pnpm deploy:prod        # = wrangler deploy --env prod
 ```
 
-Until the secret exists the bootstrap endpoint refuses everything (an empty token never matches). Save the token in your password manager: you type it into the Mac app exactly once, at onboarding.
+This uploads `bisel-server`, creates the Custom Domain `box.bisel.app` (DNS record and certificate included; allow a minute or two) and the rate-limit
+binding. `workers.dev` and preview URLs are off in the config. Until the secret in step 5 exists, the bootstrap endpoint refuses everything.
 
-## 6. Verify (all of it, before you bootstrap)
+In the dashboard (Workers & Pages → bisel-server → Settings → Domains & Routes) the only entry must be `box.bisel.app` (Custom Domain). If a
+`workers.dev` route or a preview URL shows up, disable it there. [OWNER, one look]
 
-Replace `H` with `$LABEL.bisel.app`.
+## 5. Set the secret  [ANY]
+
+`BOOTSTRAP_TOKEN` is the only secret the Worker reads. It lives only as a Worker secret (never in `wrangler.jsonc`, `.dev.vars` is local only).
+It authorises the one-time creation of the box. Use a throwaway token for the check in step 9, a different one for the real bootstrap in step 11.
 
 ```bash
-H=3f9a….bisel.app
+openssl rand -base64 32 | pbcopy                                          # token goes to the clipboard, not the terminal
+pbpaste | pnpm exec wrangler secret put BOOTSTRAP_TOKEN --env prod       # reads stdin
+```
 
-# a) Unauthenticated requests: a bare 404 with an empty body, whatever the path or method
-for p in / /v1/sync /v1/devices /v1/envelope /v1/bootstrap /v1/rotate /nope; do
-  printf '%-16s' "$p"; curl -s -o /dev/null -w '%{http_code} %{size_download}\n' "https://$H$p"
+(`pbcopy` leaves the token on the clipboard for step 9; clear it afterwards with `pbcopy < /dev/null`.)
+
+## 6. Flood rule in front of the Worker  [OWNER, dashboard]
+
+The binding in the Worker already allows 300 requests per minute per address and answers a bare `429`. It is approximate (counts are per
+Cloudflare location). A WAF rate-limiting rule sheds floods before the Worker is even invoked, so add one as a second layer.
+
+Dashboard → bisel.app → Security → WAF → **Rate limiting rules** → Create rule:
+
+- Name: `box flood`
+- **If** Hostname **equals** `box.bisel.app`
+- Characteristics: IP (the only option on Free)
+- Rate: **100 requests / 10 seconds** (Free allows only a 10 s period)
+- Action: **Block**, duration 10 seconds on Free (paid plans: 10 minutes)
+
+A device does one request per sync (every ~60 s) plus a few per edit, so 100 per 10 s per IP never touches the owner (a bulk import is slower
+than that, and anything above the rule resumes after the block).
+
+Do **not** add a WAF rule that blocks unknown paths or methods: Cloudflare's block page would differ from the Worker's bare 404.
+
+Optional, same area, one click: SSL/TLS → Edge Certificates → **Minimum TLS Version = 1.2**, **Always Use HTTPS** on. [OWNER]
+
+## 7. Verify the deployment (before any bootstrap)  [ANY]
+
+```bash
+H=box.bisel.app
+
+# a) Liveness: a bare 200 with no body and no identifying header, and nothing else answers
+curl -si "https://$H/healthz"                         # expect: HTTP/2 200, content-length: 0, no server-identifying body
+curl -s -o /dev/null -w 'POST /healthz: %{http_code} %{size_download}\n' -X POST "https://$H/healthz"   # expect 404 0
+
+# b) Unauthenticated requests: a bare 404 with an empty body, whatever the path or method
+for p in / /v1/sync /v1/devices /v1/envelope /v1/bootstrap /v1/rotate /v1/history /nope; do
+  printf '%-14s' "$p"; curl -s -o /dev/null -w '%{http_code} %{size_download}\n' "https://$H$p"
 done
 curl -s -o /dev/null -w 'bootstrap, wrong token: %{http_code} %{size_download}\n' -X POST -H 'X-Bisel-Bootstrap: wrong' "https://$H/v1/bootstrap"
-# expected: every line is "404 0"
+# expected: every line "404 0"
 
-# b) Routes and failures are indistinguishable: these two must be byte-identical apart from date / cf-ray
-diff <(curl -si "https://$H/v1/sync" | grep -viE '^(date|cf-ray|report-to|nel):') \
-     <(curl -si "https://$H/does-not-exist" | grep -viE '^(date|cf-ray|report-to|nel):') && echo identical
+# c) Routes and failures are indistinguishable: byte-identical apart from date / cf-ray
+diff <(curl -si "https://$H/v1/sync"  | grep -viE '^(date|cf-ray|report-to|nel|server-timing):') \
+     <(curl -si "https://$H/nope"     | grep -viE '^(date|cf-ray|report-to|nel|server-timing):') && echo identical
 
-# c) Hardening headers are present on the 404 itself
+# d) Hardening headers are on the 404 itself, and there is no CORS
 curl -si "https://$H/v1/sync" | grep -iE '^(cache-control|strict-transport|content-security|x-content-type|x-frame|referrer-policy|cross-origin)'
+curl -si -X OPTIONS -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: GET' "https://$H/v1/sync" | grep -i '^access-control' || echo "no CORS headers"
 
-# d) The Worker is not reachable anywhere else
-#    workers.dev is disabled in wrangler.jsonc ("workers_dev": false); in the dashboard, Workers & Pages → bisel-server → Settings → Domains & Routes
-#    must list only the one route and no workers.dev subdomain.
-curl -s -o /dev/null -w 'other label: %{http_code}\n' "https://not-the-label.bisel.app/v1/sync"   # expected: a Cloudflare 52x/1xxx, not 404 with empty body
-
-# e) The label is not in CT logs: https://crt.sh/?q=%25.bisel.app lists only "*.bisel.app", never your label.
+# e) workers.dev must be off: the dashboard check in step 4 is the proof; wrangler also reports it on deploy (no "workers.dev" URL in the output)
 ```
 
-If (a) or (b) shows anything but `404 0`, or (d) shows our 404 on any other hostname: stop, do not bootstrap, tell me.
+Flood limit (optional, once): `for i in $(seq 1 400); do curl -s -o /dev/null -w '%{http_code}\n' "https://$H/healthz"; done | sort | uniq -c`
+should show `429`s (from the Worker binding or the WAF rule), then recover within a minute.
 
-## 7. Zone rate-limit rule (Cloudflare dashboard)
+If (a)–(d) show anything but the expected output: stop, do not bootstrap.
 
-Security → WAF → **Rate limiting rules** → Create rule:
+## 8. Backups and Time Travel  [ANY]
 
-- **If** `Hostname` equals `<label>.bisel.app`
-- **Characteristics**: IP
-- **Rate**: 30 requests per 10 seconds (Free plan: period is fixed at 10 s; paid plans can use 1 minute and a longer block)
-- **Then**: Block, duration 10 s (Free) or 10 min (paid)
+D1 **Time Travel is always on** for every database (no switch to enable): point-in-time restore for **30 days on Workers Paid, 7 days on Free**.
+Check it is recording:
 
-Why it is needed: the Worker's own failed-auth counter only *delays* repeat offenders and stops charging D1 writes for them; it never refuses a valid signature (so you cannot be locked out by someone sharing your address). Flood protection is this rule. A normal device does one request per sync (every 60 s) plus a few on edits.
+```bash
+pnpm exec wrangler d1 time-travel info bisel --env prod          # prints the current bookmark
+```
 
-Do **not** add a WAF rule that blocks unknown paths: Cloudflare's block page would differ from the Worker's bare 404 and reveal that the hostname is live.
+Restore (only ever on the owner's say-so): `pnpm exec wrangler d1 time-travel restore bisel --env prod --timestamp=<RFC3339 or unix seconds>`
+(it prints the undo bookmark; restores are limited to 10 per 10 minutes).
 
-## 7b. Settings that matter (in `wrangler.jsonc`, `env.prod.vars`)
+Independent of Cloudflare, the app's `.bisel-backup` file plus the 24 words rebuilds the box on any new database. A raw SQL dump of the ciphertext
+can also be kept offline: `pnpm exec wrangler d1 export bisel --env prod --remote --output ~/bisel-d1-$(date +%F).sql` (it is ciphertext only).
 
-- `RECOVERY_ACTIVATION_DELAY_SECONDS` = `86400`: a device added through the 24 words cannot sign requests for 24 h, every enrolled device announces it at its next sync, and any of them can cancel it by revoking. This protects you if the phrase is ever seen by someone else. The price: **recovering after losing every device takes a day** before the new Mac can sync (you can restore a `.bisel-backup` onto a new server at once instead). Set `"0"` to recover instantly.
-- `HISTORY_RETENTION_DAYS` = `30`: the server keeps the previous version of every overwritten, deleted or re-keyed item for 30 days, so a bad write by a stolen device key can be undone from the app.
-- Destructive routes (rotate, approve, revoke, replace the recovery key) need a vault-admin signature that only an unlocked app can make; there is nothing to configure.
+## 9. Throwaway end-to-end check with the dev CLI  [ANY]
 
-## 8. First start
+This proves the deployed Worker + D1 work end to end (bootstrap, an encrypted write, a sync) with the software-key dev CLI. It writes test data
+that step 10 removes. Use the token from step 5 (still on the clipboard).
 
-1. In the Mac app onboarding enter `https://<label>.bisel.app`, the bootstrap token, and a device name. Write the 24 words on paper.
-2. Afterwards remove the secret, so the one-time endpoint cannot even be attempted:
-   ```bash
-   pnpm exec wrangler secret delete BOOTSTRAP_TOKEN --env prod
-   ```
-   (Restoring a vault from a `.bisel-backup` onto a fresh database needs a new token: set one again then.)
-3. Make a backup file from the app (Settings → Export backup) and keep it with the phrase's paper.
+```bash
+cd ../apple/Tools/bisel-dev
+H=/tmp/bisel-prod-check; rm -rf $H
+pbpaste | swift run bisel-dev bootstrap --home $H --server https://box.bisel.app --token - --name deploy-check   # prints a throwaway phrase; do not keep it
+swift run bisel-dev add  --home $H --title "deploy check" --username x --password "throwaway"
+swift run bisel-dev sync --home $H                                    # expect: pushed 0, pulled 0, head seq 2
+swift run bisel-dev list --home $H                                    # expect the one item
+cd ../../../server
+```
+
+Expect `bootstrapped device 'deploy-check' at https://box.bisel.app`. If a step answers 404 or fails, read the Worker logs: `pnpm exec wrangler tail --env prod --format pretty`
+(the Worker's own lines show `auth_fail` with a reason).
+
+## 10. Wipe the throwaway data  [ANY]  (only before the real bootstrap)
+
+`scripts/wipe-data.sql` empties every table the Worker writes to and leaves the schema and migration history. Afterwards `POST /v1/bootstrap` is
+possible again. Then remove the throwaway token.
+
+```bash
+pnpm exec wrangler d1 execute bisel --env prod --remote --file scripts/wipe-data.sql
+pnpm exec wrangler d1 execute bisel --env prod --remote --command "SELECT (SELECT COUNT(*) FROM meta) meta, (SELECT COUNT(*) FROM devices) devices, (SELECT COUNT(*) FROM items) items"
+#   expect 0, 0, 0
+pnpm exec wrangler secret delete BOOTSTRAP_TOKEN --env prod       # answer y
+rm -rf /tmp/bisel-prod-check; pbcopy < /dev/null
+```
+
+## 11. The real bootstrap  [OWNER]
+
+1. Generate the real token into the password manager, not into a chat: `openssl rand -base64 32 | pbcopy`, paste it into the password manager, then
+   `pbpaste | pnpm exec wrangler secret put BOOTSTRAP_TOKEN --env prod`.
+2. In the Mac app, create the box against `https://box.bisel.app` with that token. Write the 24 words on paper.
+3. Immediately remove the secret so the one-time endpoint cannot even be attempted:
+   `pnpm exec wrangler secret delete BOOTSTRAP_TOKEN --env prod`
+   (restoring from a `.bisel-backup` onto a fresh database needs a new token: set one again then).
+4. In the app, export a backup file and keep it with the paper.
+5. Optional: an uptime monitor on `https://box.bisel.app/healthz` (expects `200`; `503` means D1 is not answering).
+
+## Settings that matter (`env.prod.vars` in `wrangler.jsonc`)
+
+- `RECOVERY_ACTIVATION_DELAY_SECONDS` = `86400`: a device added through the 24 words cannot sign requests for 24 h, every enrolled device announces it at its next sync, and any of them can cancel it by revoking. **Recovering after losing every device takes a day** before the new Mac can sync (restoring a `.bisel-backup` onto a new server is immediate). `"0"` recovers instantly.
+- `HISTORY_RETENTION_DAYS` = `30`: the previous version of every overwritten, deleted or re-keyed item is kept 30 days, so a bad write by a stolen device key can be undone from the app.
+- `AUTH_FAIL_LIMIT` / `AUTH_FAIL_WINDOW_SECONDS` / `AUTH_BACKOFF_MS`: after 20 failed requests from one address in 10 minutes, its failing requests are answered a second late and cost no more D1 writes. A valid signature is never refused because of this.
+- Flood limit: `ratelimits` in `wrangler.jsonc` (300/min per address per location) plus the WAF rule of step 6.
+- Destructive routes (rotate, approve, revoke, replace the recovery key) need a vault-admin signature that only an unlocked app can make; nothing to configure.
 
 ## Operating notes
 
-- **Logs**: Workers Logs is on for `prod` (`wrangler tail --env prod`). Lines are JSON: auth failures with the reason, client IP, device id and path; requests with status. They never contain bodies, blobs, envelopes, keys or the token.
-- **Database recovery**: D1 Time Travel keeps 30 days (`pnpm exec wrangler d1 time-travel info bisel --env prod`). Independent of that, a `.bisel-backup` plus the 24 words rebuilds the vault on a new database.
-- **Key rotation**: revoking a device from the app rotates the vault key in one transaction; nothing to do on the server. Epoch and rotation events are in the `meta` and `events` tables.
-- **Updating the Worker**: `pnpm exec wrangler d1 migrations apply bisel --env prod --remote` (only when a new migration exists), then `pnpm exec wrangler deploy --env prod`.
-- **Teardown**: `pnpm exec wrangler delete --env prod`, `pnpm exec wrangler d1 delete bisel`, remove the DNS record. The vault is gone with the database; restore from a backup file.
+- **Logs**: Workers Logs is on for `prod`, with invocation logs and traces off, so the only lines are the Worker's own: `{evt, reason, ip (8-char hash), device (8-char prefix), method, path, status}`. Never bodies, blobs, envelopes, keys, tokens or request headers; query strings are redacted. Live: `pnpm exec wrangler tail --env prod`.
+- **Updating**: new migration → `pnpm exec wrangler d1 migrations apply bisel --env prod --remote`, then `pnpm deploy:prod`. Roll back a bad Worker with `pnpm exec wrangler rollback --env prod` (D1 schema changes are not rolled back by it).
+- **Key rotation**: revoking a device in the app rotates the vault key in one transaction; nothing to do on the server.
+- **Teardown**: `pnpm exec wrangler delete --env prod`, `pnpm exec wrangler d1 delete bisel`, remove the WAF rule. The box is gone with the database; restore from a backup file.

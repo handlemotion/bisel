@@ -146,9 +146,20 @@ A valid signature is **never refused because of failures**, so the owner cannot 
 After `AUTH_FAIL_LIMIT` (20) failed attempts from one `CF-Connecting-IP` inside `AUTH_FAIL_WINDOW_SECONDS` (600), further
 *failing* requests from that address are answered `AUTH_BACKOFF_MS` (1000 ms, plus up to 25 % jitter) late and cause no more D1
 writes (the counter stops at the limit; at most 20 000 addresses are tracked). Unknown routes, bad signatures, unknown devices and bad
-bootstrap tokens are all treated alike. There is no 429, because that would reveal the server. Flood protection is the
-Cloudflare zone rate-limit rule described in `DEPLOY.md`. Local test hook: `CF-Connecting-IP` is client-settable under `wrangler dev`
-(Cloudflare overwrites it in production).
+bootstrap tokens are all treated alike, and an authentication failure is always the same empty 404. Local test hook:
+`CF-Connecting-IP` is client-settable under `wrangler dev` (Cloudflare overwrites it in production).
+
+### Flood limit, /healthz, CORS, headers
+
+- **Flood limit.** Cloudflare's Workers rate-limiting binding (`RATE_LIMITER` in `wrangler.jsonc`) allows 300 requests per minute per
+  `CF-Connecting-IP`, per Cloudflare location, before any D1 work. Over it, every route answers an empty `429` with `Retry-After: 10`;
+  that says nothing about authentication. It is approximate by design (counts are local to a location and eventually consistent), so
+  `DEPLOY.md` also adds a WAF rate-limiting rule in front of the Worker. Requests without `CF-Connecting-IP` (local dev only) are not limited.
+- **`GET /healthz`** (and `HEAD`): empty `200` when D1 answers a `SELECT 1`, empty `503` when it does not. No version, name, counts or setup state; no signature.
+- **CORS.** None, on purpose: the clients are native apps. `OPTIONS` is the same empty 404 as any unknown route and no `Access-Control-*` header is ever sent.
+- **Headers.** Every response, 404 and 429 included, carries `Cache-Control: no-store`, `X-Content-Type-Options`, HSTS, a `default-src 'none'` CSP, `Referrer-Policy: no-referrer` and the cross-origin policies from `hono/secure-headers`.
+- **Logs.** The Worker writes only `evt` lines: hashed address, device id prefix, method, path, status, reason. Never bodies, blobs, keys, tokens or request headers.
+  `env.prod` keeps Workers Logs on with invocation logs and traces off, so Cloudflare adds no request-level records of its own.
 
 ## Endpoints
 
@@ -290,9 +301,10 @@ src/encoding.ts    base64url / hex
 migrations/        D1 migrations (wrangler d1 migrations)
 tests/             Playwright flow tests + tests/support/client.ts (signing client)
 scripts/smoke.ts   manual end-to-end script
+scripts/wipe-data.sql  empties every table (throwaway data after the first deploy check, DEPLOY.md step 10)
 ```
 
 ## Deploying (not done; only on the user's say-so)
 
-See [`DEPLOY.md`](DEPLOY.md): exact steps, verification, and what the owner has to provide. `wrangler.jsonc` has a local default
-environment and an `env.prod` with placeholders (`wrangler deploy --env prod`).
+See [`DEPLOY.md`](DEPLOY.md): exact steps, verification, and what the owner has to do. `wrangler.jsonc` has a local default
+environment and an `env.prod` for `box.bisel.app` with one placeholder, the D1 id (`pnpm deploy:prod`).
