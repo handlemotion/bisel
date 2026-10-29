@@ -24,7 +24,7 @@ extension Theme {
             text: "#FFFFFF", secondaryText: "#FFFFFF99", tertiaryText: "#FFFFFF80", placeholder: "#767676", valueLabel: "#767676", rowHover: "#101010", ring: "#424242",
             selection: "#282828", accent: "#7AA2FF", accentText: "#0B1020",
             pillPrimary: "#FFFFFF", pillPrimaryText: "#000000", pillSecondary: "#282828", pillSecondaryText: "#FFFFFF",
-            iconTile: "#FFFFFF", badge: "#FFFFFF1F", field: "#FFFFFF0F", success: "#30D158", warning: "#FFD60A", danger: "#FF453A"),
+            iconTile: "#FFFFFF", badge: "#FFFFFF1F", field: "#FFFFFF0F", success: "#30D158", warning: "#FFD60A", danger: "#FF453A", progress: "#84FF00"),
         radii: .init(card: 24, icon: 6, field: 8, badge: 4, valuesCard: 8),
         spacing: scale, fonts: fonts(.standard), card: card,
         glass: .init(material: .hud, tintOpacity: 0.40, selectionOpacity: 0.14, pillOpacity: 0.14, hoverOpacity: 0.06, borderOpacity: 0.12))
@@ -37,7 +37,7 @@ extension Theme {
             text: "#000000", secondaryText: "#00000099", tertiaryText: "#00000094", placeholder: "#767676", valueLabel: "#767676", rowHover: "#FAFAFA", ring: "#C4C4C4",
             selection: "#F2F2F2", accent: "#2F5BFF", accentText: "#FFFFFF",
             pillPrimary: "#000000", pillPrimaryText: "#FFFFFF", pillSecondary: "#F2F2F2", pillSecondaryText: "#000000",
-            iconTile: "#F2F2F2", badge: "#0000000F", field: "#0000000A", success: "#1E9E45", warning: "#C28A00", danger: "#D92D20"),
+            iconTile: "#F2F2F2", badge: "#0000000F", field: "#0000000A", success: "#1E9E45", warning: "#C28A00", danger: "#D92D20", progress: "#4FB300"),
         radii: .init(card: 24, icon: 6, field: 8, badge: 4, valuesCard: 8),
         spacing: scale, fonts: fonts(.standard), card: card,
         glass: .init(material: .popover, tintOpacity: 0.45, selectionOpacity: 0.08, pillOpacity: 0.08, hoverOpacity: 0.04, borderOpacity: 0.10))

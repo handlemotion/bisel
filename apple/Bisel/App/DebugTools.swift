@@ -17,12 +17,7 @@ enum DebugTools {
                           let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else {
                         Log.app.notice("snapshot: no main window"); return
                     }
-                    // Set-up and the recovery phrase hide the window from capture; lift that for the in-process bitmap only.
-                    let sharing = w.sharingType
-                    w.sharingType = .readOnly
-                    v.displayIfNeeded()
                     v.cacheDisplay(in: v.bounds, to: rep)
-                    w.sharingType = sharing
                     try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
                     Log.app.notice("snapshot written")
                 }

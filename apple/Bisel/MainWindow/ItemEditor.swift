@@ -128,7 +128,6 @@ struct ItemEditor: View {
         }
         .frame(width: 560, height: 640)
         .themedPage(theme)
-        .hiddenFromCapture()
     }
 
     private var passwordRow: some View {
@@ -142,7 +141,7 @@ struct ItemEditor: View {
                 .help("Generate a password").accessibilityIdentifier("editor-generate")
                 .popover(isPresented: $showGenerator) {
                     GeneratorView { draft.password = $0; showGenerator = false; showPassword = true }
-                        .padding(theme.spacing.l).frame(width: 340).themedPage(theme).hiddenFromCapture()
+                        .padding(theme.spacing.l).frame(width: 340).themedPage(theme)
                 }
         }
     }

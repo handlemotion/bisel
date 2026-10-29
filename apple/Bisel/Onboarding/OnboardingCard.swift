@@ -34,61 +34,85 @@ struct BrandMark: View {
     }
 }
 
-/// The onboarding surface IS the window: the command panel's glass (behind-window blur + theme tint) fills it, with a
-/// soft accent glow at the top, the mark, a title, a line of copy and the content. No card inside the window.
-struct OnboardingCard<Content: View>: View {
+/// The onboarding screens (Figma "Bisel", node 8:2): the window is the surface, filled like the command panel (glass, or
+/// solid with the Material setting). Progress bar on top, title and message, the step's content, and the actions pinned
+/// bottom-left. No traffic lights; the window closes from the Dock.
+struct OnboardingFrame<Content: View, Actions: View>: View {
+    /// 0...1, or nil for screens that are not part of the set-up route (lock screen).
+    var progress: Double?
     var title: String
-    var subtitle: String?
-    /// Width of the content column; the window is sized by `OnboardingLayout`.
-    var width: CGFloat = 340
+    var message: String?
     @ViewBuilder var content: Content
+    @ViewBuilder var actions: Actions
     @Environment(\.theme) private var theme
 
+    private let inset: CGFloat = 20   // Figma frame padding
     var body: some View {
-        ScrollView {
-            VStack(spacing: theme.spacing.l) {
-                BrandMark()
-                VStack(spacing: theme.spacing.s) {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 24) {
+                if let progress { ProgressTrack(value: progress) }
+                VStack(alignment: .leading, spacing: theme.spacing.l) {
                     Text(title)
-                        .font(theme.font(theme.fonts.detailTitle, weight: .semibold))
-                        .multilineTextAlignment(.center)
+                        .font(theme.font(theme.fonts.detailTitle))
                         .accessibilityAddTraits(.isHeader)
-                    if let subtitle {
-                        Text(subtitle)
-                            .font(theme.font(theme.fonts.row))
+                    if let message {
+                        // Figma body is 17 pt, a step above the search field size.
+                        Text(message)
+                            .font(theme.font(theme.fonts.search + 2))
+                            .lineSpacing(3)
                             .foregroundStyle(theme.colors.secondaryText.color)
-                            .multilineTextAlignment(.center)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+            }
+            ScrollView {
                 content
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, theme.spacing.l)
             }
-            .frame(maxWidth: width)
-            .padding(.horizontal, theme.spacing.l * 2)
-            .padding(.top, theme.spacing.l * 3)   // clears the traffic lights
-            .padding(.bottom, theme.spacing.l * 2)
-            .frame(maxWidth: .infinity)
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollIndicators(.never)
+            HStack(spacing: theme.spacing.m) { actions }
+                .padding(.top, theme.spacing.l)
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .background(
-            ZStack(alignment: .top) {
-                CardFill()
-                RadialGradient(colors: [theme.colors.accent.color.opacity(0.22), theme.colors.accent.color.opacity(0)],
-                               center: .top, startRadius: 0, endRadius: 420)
+        .padding(inset)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(CardFill())
+        .overlay(RoundedRectangle(cornerRadius: theme.radii.card, style: .continuous)
+            .strokeBorder(theme.colors.border.color, lineWidth: theme.card.hairline).allowsHitTesting(false))
+        .ignoresSafeArea()
+    }
+}
+
+/// 6 pt track (pill secondary) with the progress fill, 2 pt corners.
+struct ProgressTrack: View {
+    var value: Double
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        GeometryReader { g in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2).fill(theme.colors.pillSecondary.color)
+                RoundedRectangle(cornerRadius: 2).fill((theme.colors.progress ?? theme.colors.accent).color)
+                    .frame(width: g.size.width * max(0, min(1, value)))
             }
-            .ignoresSafeArea()
-        )
+        }
+        .frame(height: 6)
+        .animation(.easeInOut(duration: 0.25), value: value)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Set-up progress")
+        .accessibilityValue("\(Int(value * 100)) percent")
     }
 }
 
 /// Window sizes for the card phases.
 enum OnboardingLayout {
-    static let setup = NSSize(width: 440, height: 470)
-    static let phrase = NSSize(width: 600, height: 660)
-    static let locked = NSSize(width: 380, height: 380)
+    static let setup = NSSize(width: 400, height: 560)
+    static let phrase = NSSize(width: 420, height: 700)
+    static let locked = NSSize(width: 400, height: 300)
 }
 
-/// Full-width pill: primary (white on black in the default theme) or secondary.
+/// Figma pill: 36 pt high, hugs its label, 14 pt. Primary (white) or secondary (#282828).
 struct PillButtonStyle: ButtonStyle {
     var primary = true
     @Environment(\.theme) private var theme
@@ -96,10 +120,10 @@ struct PillButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(theme.font(theme.fonts.row, weight: .semibold))
+            .font(theme.font(theme.fonts.row))
             .foregroundStyle((primary ? theme.colors.pillPrimaryText : theme.colors.pillSecondaryText).color)
-            .frame(maxWidth: .infinity)
-            .frame(height: 40)
+            .padding(.horizontal, primary ? 12 : 14)
+            .frame(height: 36)
             .background(Capsule().fill((primary ? theme.colors.pillPrimary : theme.colors.pillSecondary).color))
             .opacity(enabled ? (configuration.isPressed ? 0.8 : 1) : 0.4)
             .contentShape(Capsule())

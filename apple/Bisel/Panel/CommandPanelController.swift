@@ -18,9 +18,16 @@ final class CommandPanelController {
     /// Verification drivers run the panel invisibly: fully transparent and click-through, so a run never flashes on the
     /// user's screen. (Window server still treats it as shown, so layout, timing and monitors are the real ones.)
     var debugStealth = false
+    #endif
     /// True while the Touch ID sheet is up: it takes key from the panel, which must not read as "click away".
     var authenticating = false
-    #endif
+    private var stealth: Bool {
+        #if DEBUG
+        debugStealth
+        #else
+        false
+        #endif
+    }
     private let host: NSHostingView<AnyView>
     private var keyMonitor: Any?
     private var target: NSRunningApplication?
@@ -120,7 +127,6 @@ final class CommandPanelController {
         model.presented = true  // instant open: no animation (user preference, like Raycast)
         renderRoot()
         layoutPanel(animated: false, reposition: true)
-        panel.sharingType = PanelCapture.hidden ? .none : .readOnly
         panel.ignoresMouseEvents = false
         #if DEBUG
         panel.alphaValue = debugStealth ? 0 : 1
@@ -134,7 +140,7 @@ final class CommandPanelController {
         startPointerTracking()
         panel.makeKeyAndOrderFront(nil)
         // Locked: ask for Touch ID right away (no set-up yet: go straight to set-up). Return stays as the retry.
-        if !model.isUnlocked, !debugStealth { model.runUnlock?() }
+        if !model.isUnlocked, !stealth { model.runUnlock?() }
         Log.panel.notice("STATE shown (visible=\(self.panel.isVisible) key=\(self.panel.isKeyWindow))")
         // Next runloop turn: animate to presented (ease in from the anchor).
         DispatchQueue.main.async { [weak self] in
@@ -521,17 +527,3 @@ enum PanelPosition: String, CaseIterable, Identifiable {
     }
 }
 
-/// Setting "Hide from screenshots and screen sharing": the panel shows passwords and OTPs, so in Release it is excluded
-/// from capture by other apps (`NSWindow.sharingType = .none`). Default OFF in Debug builds so it can be captured while
-/// iterating.
-enum PanelCapture {
-    static let defaultsKey = "panel.hideFromCapture"
-    static var hidden: Bool {
-        if let v = UserDefaults.standard.object(forKey: defaultsKey) as? Bool { return v }
-        #if DEBUG
-        return false
-        #else
-        return true
-        #endif
-    }
-}

@@ -2,16 +2,15 @@ import SwiftUI
 import UniformTypeIdentifiers
 import BiselCore
 
-/// First run on this Mac: new vault (bootstrap), recovery from the phrase, or restore from a backup file (SPEC §8.4/8.5).
+/// First run on this Mac, as a short route (Figma "Bisel", node 8:2):
+/// welcome → use locally (name this Mac) | connect to a box (server + recovery phrase) | restore a backup file,
+/// then the recovery phrase for a new box (PhraseGateView). The progress bar follows the route.
 struct SetupView: View {
     let service: VaultService
     @Environment(\.theme) private var theme
 
-    enum Mode: String, CaseIterable, Identifiable {
-        case create = "New box", recover = "Recover", restore = "Restore backup"
-        var id: String { rawValue }
-    }
-    @State private var mode: Mode = .create
+    enum Step { case welcome, local, connect, restore }
+    @State private var step: Step = SetupView.initialStep
     @State private var server = ""   // never persisted outside the vault store: the hostname is a secret (SPEC §6, review M17)
     @State private var token = ""
     @State private var deviceName = Host.current().localizedName ?? "Mac"
@@ -21,60 +20,69 @@ struct SetupView: View {
     @State private var error: String?
     @State private var debugPath = ""
 
+    private static var initialStep: Step {
+        #if DEBUG
+        switch ProcessInfo.processInfo.environment["BISEL_DEV_STEP"] {   // screenshots of each route step
+        case "local": return .local
+        case "connect": return .connect
+        case "restore": return .restore
+        default: break
+        }
+        #endif
+        return .welcome
+    }
+
     var body: some View {
-        OnboardingCard(title: title, subtitle: blurb) {
+        OnboardingFrame(progress: progress, title: title, message: message) {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
-                if mode != .create {
-                    field("Server URL", "https://your-server.example", $server, id: "setup-server")
-                    if mode != .recover { secureField("Bootstrap token", "Set with wrangler secret BOOTSTRAP_TOKEN", $token, id: "setup-token") }
-                }
-                field("This device's name", "MacBook", $deviceName, id: "setup-device")
-                if mode == .restore {
+                switch step {
+                case .welcome: EmptyView()
+                case .local:
+                    field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
+                case .connect:
+                    field("Server", "https://box.example.com", $server, id: "setup-server")
+                    phraseEditor
+                    field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
+                case .restore:
+                    HStack {
+                        Button("Choose backup file…") { picking = true }
+                            .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-pick-backup")
+                        Text(backupURL?.lastPathComponent ?? "None selected")
+                            .font(theme.font(theme.fonts.detail)).foregroundStyle(theme.colors.secondaryText.color).lineLimit(1)
+                    }
                     #if DEBUG
                     TextField("", text: $debugPath, prompt: Text("debug: backup file path")).onboardingField(theme)
                         .accessibilityIdentifier("setup-debug-path").onSubmit { backupURL = URL(fileURLWithPath: debugPath) }
                     #endif
-                    HStack {
-                        Button("Choose backup file…") { picking = true }
-                            .buttonStyle(PillButtonStyle(primary: false)).fixedSize()
-                            .accessibilityIdentifier("setup-pick-backup")
-                        Text(backupURL?.lastPathComponent ?? "None selected")
-                            .font(theme.font(theme.fonts.detail)).foregroundStyle(theme.colors.secondaryText.color).lineLimit(1)
-                    }
-                }
-                if mode != .create {
-                    VStack(alignment: .leading, spacing: theme.spacing.xs) {
-                        Caption("Recovery phrase (24 words)")
-                        TextEditor(text: $phrase)
-                            .font(theme.font(theme.fonts.value, weight: .regular))
-                            .frame(height: 76)
-                            .scrollContentBackground(.hidden)
-                            .padding(theme.spacing.s)
-                            .background(RoundedRectangle(cornerRadius: theme.radii.field + 2, style: .continuous).fill(theme.colors.field.color))
-                            .overlay(RoundedRectangle(cornerRadius: theme.radii.field + 2, style: .continuous)
-                                .strokeBorder(theme.colors.border.color, lineWidth: theme.card.hairline))
-                            .accessibilityIdentifier("setup-phrase")
-                    }
+                    field("Server", "https://box.example.com", $server, id: "setup-server")
+                    secureField("Bootstrap token", "Set with wrangler secret BOOTSTRAP_TOKEN", $token, id: "setup-token")
+                    phraseEditor
+                    field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
                 }
                 ErrorLine(text: error)
-                Button(action: go) {
+                if step == .local {
+                    Text(footer).font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.tertiaryText.color)
+                }
+            }
+        } actions: {
+            switch step {
+            case .welcome:
+                Button { go(.connect) } label: { Label("Connect to Box", systemImage: "shippingbox") }
+                    .buttonStyle(PillButtonStyle()).accessibilityIdentifier("setup-mode-recover")
+                Button("Use locally") { go(.local) }
+                    .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-create")
+            case .local, .connect, .restore:
+                Button(action: submit) {
                     if service.isBusy { ProgressView().controlSize(.small) } else { Text(actionTitle) }
                 }
                 .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
-                .disabled(service.isBusy || !ready)
-                .padding(.top, theme.spacing.xs)
-                .accessibilityIdentifier("setup-go")
-                Text(footer)
-                    .font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.tertiaryText.color)
-                    .frame(maxWidth: .infinity).multilineTextAlignment(.center)
-                // New box is the normal path; the other two are for a Mac that is joining or rebuilding one.
-                HStack(spacing: theme.spacing.l) {
-                    if mode != .create { Button("Back to new box") { mode = .create; error = nil }.accessibilityIdentifier("setup-mode-create") }
-                    if mode != .recover { Button("I have a recovery phrase") { mode = .recover; error = nil }.accessibilityIdentifier("setup-mode-recover") }
-                    if mode != .restore { Button("Restore from a backup file") { mode = .restore; error = nil }.accessibilityIdentifier("setup-mode-restore") }
+                .disabled(service.isBusy || !ready).accessibilityIdentifier("setup-go")
+                Button("Back") { go(.welcome) }
+                    .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-back")
+                if step == .connect {
+                    Button("Restore backup") { go(.restore) }
+                        .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-restore")
                 }
-                .buttonStyle(.link).font(theme.font(theme.fonts.caption))
-                .frame(maxWidth: .infinity)
             }
         }
         .fileImporter(isPresented: $picking, allowedContentTypes: [UTType(filenameExtension: "bisel-backup") ?? .json, .json]) { r in
@@ -82,29 +90,55 @@ struct SetupView: View {
         }
     }
 
+    // MARK: copy and route
+
+    private var progress: Double { step == .welcome ? 0.2 : 0.5 }
+
     private var title: String {
-        switch mode {
-        case .create: "Welcome to Bisel"
-        case .recover: "Recover your box"
-        case .restore: "Restore from a backup"
+        switch step {
+        case .welcome: "Welcome to Bisel"
+        case .local: "Use this Mac"
+        case .connect: "Connect to a box"
+        case .restore: "Restore a backup"
         }
     }
 
-    private var blurb: String {
-        switch mode {
-        case .create: "Your keys are made on this Mac. Nothing leaves it until you connect a server."
-        case .recover: "Enter your recovery phrase to rebuild the box on this Mac from the server."
+    private var message: String {
+        switch step {
+        case .welcome: "Bisel is the password manager you don’t wait for. You set up a box once, and open it with your biometrics on your Apple device."
+        case .local: "Your keys are made on this Mac. Nothing leaves it until you connect a server."
+        case .connect: "Enter your box’s server and its 24-word recovery phrase to bring it to this Mac."
         case .restore: "Re-create the box on a fresh server from a .bisel-backup file and its recovery phrase."
         }
     }
-    private var actionTitle: String { switch mode { case .create: "Create box"; case .recover: "Recover"; case .restore: "Restore" } }
+
+    private var actionTitle: String {
+        switch step { case .local: "Create box"; case .connect: "Connect"; case .restore: "Restore"; case .welcome: "" }
+    }
+
     private var footer: String {
         BiselEnvironment.usesSoftwareKeys ? "Debug build: device keys are kept in a plain file, not the Secure Enclave." : "Device keys are created in the Secure Enclave and need Touch ID."
     }
+
     private var ready: Bool {
-        !deviceName.isEmpty && (mode == .create || (!server.isEmpty && (mode == .recover || !token.isEmpty)))
-            && (mode == .create || !phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            && (mode != .restore || backupURL != nil)
+        guard !deviceName.isEmpty else { return false }
+        switch step {
+        case .welcome: return false
+        case .local: return true
+        case .connect: return !server.isEmpty && !phraseText.isEmpty
+        case .restore: return !server.isEmpty && !token.isEmpty && !phraseText.isEmpty && backupURL != nil
+        }
+    }
+
+    private var phraseText: String { phrase.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private func go(_ to: Step) { error = nil; step = to }
+
+    // MARK: fields
+
+    /// Masked: the phrase is a secret, so it is censored on screen (and in screenshots) while typed or pasted.
+    private var phraseEditor: some View {
+        secureField("Recovery phrase (24 words)", "word1 word2 word3 …", $phrase, id: "setup-phrase")
     }
 
     private func field(_ title: String, _ prompt: String, _ text: Binding<String>, id: String) -> some View {
@@ -121,10 +155,12 @@ struct SetupView: View {
         }
     }
 
-    private func go() {
+    // MARK: submit
+
+    private func submit() {
         error = nil
         let name = deviceName.trimmingCharacters(in: .whitespaces)
-        if mode == .create {
+        if step == .local {
             Task {
                 do { try await service.bootstrapLocal(deviceName: name) } catch { self.error = describe(error) }
             }
@@ -135,11 +171,12 @@ struct SetupView: View {
         let tok = token.trimmingCharacters(in: .whitespacesAndNewlines)
         let words = phrase
         let file = backupURL
+        let route = step
         Task {
             do {
-                switch mode {
-                case .create: break
-                case .recover: try await service.recover(server: url, phrase: words, deviceName: name)
+                switch route {
+                case .welcome, .local: break
+                case .connect: try await service.recover(server: url, phrase: words, deviceName: name)
                 case .restore:
                     guard let file else { return }
                     let scoped = file.startAccessingSecurityScopedResource()
@@ -162,6 +199,8 @@ struct PhraseGateView: View {
     var onDone: () -> Void
     @Environment(\.theme) private var theme
     @State private var stored = false
+    /// The words are censored until asked for, so a screenshot or screen share never catches them by accident.
+    @State private var revealed = false
     /// Three random positions the user must re-enter, so "I have stored it" means the words were really written down (review M5).
     @State private var picks = Array((1...24).shuffled().prefix(3)).sorted()
     @State private var answers = ["", "", ""]
@@ -173,25 +212,25 @@ struct PhraseGateView: View {
     }
 
     var body: some View {
-        OnboardingCard(title: title,
-                       subtitle: "These 24 words are the only way back into your box if every device is lost. Write them down or store them somewhere safe. They are shown once and never saved by Bisel.",
-                       width: 520) {
+        OnboardingFrame(progress: title == "Your recovery phrase" ? 0.8 : nil, title: title,
+                        message: "These 24 words are the only way back into your box if every device is lost. Write them down or store them somewhere safe. They are shown once and never saved by Bisel.") {
             VStack(alignment: .leading, spacing: theme.spacing.l) {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.s), count: 4), alignment: .leading, spacing: theme.spacing.s) {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.s), count: 3), alignment: .leading, spacing: theme.spacing.s) {
                     ForEach(Array(phrase.words.enumerated()), id: \.offset) { i, w in
                         HStack(spacing: theme.spacing.s) {
                             Text("\(i + 1)").font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.tertiaryText.color)
                                 .frame(width: 20, alignment: .trailing)
-                            Text(w).font(theme.font(theme.fonts.value, weight: .medium)).textSelection(.disabled)
+                            Text(revealed ? w : String(repeating: "•", count: 7))
+                                .font(theme.font(theme.fonts.value, weight: .medium)).textSelection(.disabled)
+                                .accessibilityLabel(w)
                                 .accessibilityIdentifier("phrase-word-\(i + 1)")
                         }
                         .padding(.vertical, theme.spacing.s).padding(.horizontal, theme.spacing.s)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(RoundedRectangle(cornerRadius: theme.radii.field, style: .continuous).fill(theme.colors.field.color))
-                        .overlay(RoundedRectangle(cornerRadius: theme.radii.field, style: .continuous)
-                            .strokeBorder(theme.colors.border.color, lineWidth: theme.card.hairline))
                     }
                 }
+                Toggle("Show the words", isOn: $revealed).accessibilityIdentifier("phrase-reveal")
                 Toggle("I have stored it", isOn: $stored).accessibilityIdentifier("phrase-stored")
                 VStack(alignment: .leading, spacing: theme.spacing.s) {
                     Caption("To check, type these words from your copy:")
@@ -202,10 +241,11 @@ struct PhraseGateView: View {
                         }
                     }
                 }
-                Button("Continue", action: onDone)
-                    .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
-                    .disabled(!confirmed).accessibilityIdentifier("phrase-continue")
             }
+        } actions: {
+            Button("Continue", action: onDone)
+                .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
+                .disabled(!confirmed).accessibilityIdentifier("phrase-continue")
         }
     }
 }
@@ -217,14 +257,15 @@ struct LockedView: View {
     @State private var working = false
 
     var body: some View {
-        OnboardingCard(title: "Bisel is locked", subtitle: "Unlock your box to search, fill and copy.") {
-            VStack(spacing: theme.spacing.m) {
-                Button { unlock() } label: { Label("Unlock with Touch ID", systemImage: "touchid") }
-                    .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
-                    .disabled(working).accessibilityIdentifier("unlock-button")
+        OnboardingFrame(progress: nil, title: "Bisel is locked", message: "Unlock your box to search, fill and copy.") {
+            VStack(alignment: .leading, spacing: theme.spacing.m) {
                 ErrorLine(text: error)
                 SyncStatusView(service: service, compact: true)
             }
+        } actions: {
+            Button { unlock() } label: { Label("Unlock with Touch ID", systemImage: "touchid") }
+                .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
+                .disabled(working).accessibilityIdentifier("unlock-button")
         }
     }
 

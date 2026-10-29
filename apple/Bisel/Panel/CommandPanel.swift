@@ -25,7 +25,7 @@ final class CommandPanel: NSPanel {
         isMovable = true  // dragged only from the search bar (WindowDragGesture); never by its background
         // Values (password, OTP) are visible in this panel: keep it out of screenshots, recordings and screen sharing
         // made by other apps (SPEC.md §4/§8).
-        sharingType = .none  // applied per show from the "Hide from screenshots" setting (PanelCapture)
+        sharingType = .readOnly
         acceptsMouseMovedEvents = true
         animationBehavior = .none
         isReleasedWhenClosed = false

@@ -17,11 +17,11 @@ settings:
     SWIFT_STRICT_CONCURRENCY: complete
     MACOSX_DEPLOYMENT_TARGET: "26.0"
     ENABLE_HARDENED_RUNTIME: YES
-    # No signing identity exists on the dev machine yet: ad-hoc sign ("-").
-    # Replace with a Developer ID identity + DEVELOPMENT_TEAM for release.
-    CODE_SIGN_STYLE: Manual
-    CODE_SIGN_IDENTITY: "-"
-    DEVELOPMENT_TEAM: ""
+    # Apple Development signing (team ZVGTVNUPVA, paid Individual) so the Secure Enclave and Touch ID paths run.
+    # project.dev.yml overrides this back to ad-hoc for the software-key build.
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "Apple Development"
+    DEVELOPMENT_TEAM: ZVGTVNUPVA
     CODE_SIGNING_ALLOWED: YES
     CODE_SIGNING_REQUIRED: YES
     ENABLE_USER_SCRIPT_SANDBOXING: YES

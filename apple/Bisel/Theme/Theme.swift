@@ -62,6 +62,8 @@ struct Theme: Codable, Hashable, Identifiable, Sendable {
         var success: HexColor
         var warning: HexColor
         var danger: HexColor
+        /// Onboarding progress bar fill. Optional so theme files written before it existed keep loading (falls back to `accent`).
+        var progress: HexColor?
     }
 
     struct Radii: Codable, Hashable, Sendable {

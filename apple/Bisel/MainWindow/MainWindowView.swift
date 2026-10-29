@@ -3,19 +3,19 @@ import SwiftUI
 import BiselCore
 
 struct MainWindowView: View {
+    /// The window is for settings only; the command panel (⌘⇧Space) is the way into the box.
     enum Section: String, CaseIterable, Identifiable {
-        case vault = "Box", generator = "Generator", devices = "Devices", importer = "Import", settings = "Settings"
+        case settings = "General", devices = "Devices", importer = "Import"
         var id: String { rawValue }
         var symbol: String {
             switch self {
-            case .vault: "key.fill"; case .generator: "wand.and.stars"; case .devices: "laptopcomputer.and.iphone"
-            case .importer: "square.and.arrow.down"; case .settings: "gearshape"
+            case .settings: "gearshape"; case .devices: "laptopcomputer.and.iphone"; case .importer: "square.and.arrow.down"
             }
         }
     }
 
     private let service = AppModel.shared.service
-    @State private var section: Section? = .vault
+    @State private var section: Section? = .settings
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -38,12 +38,7 @@ struct MainWindowView: View {
         .themedPage(theme, opaque: cardSize == nil)
         .panelMaterial()
         .background(WindowAccessor { w in
-            // Only the recovery phrase is hidden from screenshots and screen sharing; set-up itself can be captured.
-            var hide = PanelCapture.hidden || service.pendingPhrase != nil
-            #if DEBUG
-            if ProcessInfo.processInfo.environment["BISEL_DEV_CAPTURE"] != nil { hide = service.pendingPhrase != nil }
-            #endif
-            w.sharingType = hide ? .none : .readOnly
+            w.sharingType = .readOnly   // nothing is hidden from screenshots; sensitive values are masked in the UI instead
             w.isRestorable = false
             DockPresence.windowAppeared(w)
             style(w)
@@ -73,7 +68,8 @@ struct MainWindowView: View {
             w.titleVisibility = .hidden
             w.styleMask.insert(.fullSizeContentView)
             w.styleMask.remove(.resizable)
-            w.standardWindowButton(.zoomButton)?.isHidden = true
+            // No traffic lights on the onboarding screens: the window closes from the Dock.
+            for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = true }
             w.isMovableByWindowBackground = true
             w.hasShadow = true
             if abs(w.contentLayoutRect.width - size.width) > 1 || abs(w.contentLayoutRect.height - size.height) > 1 {
@@ -86,7 +82,7 @@ struct MainWindowView: View {
             w.titlebarSeparatorStyle = .automatic
             w.titleVisibility = .visible
             w.styleMask.insert(.resizable)
-            w.standardWindowButton(.zoomButton)?.isHidden = false
+            for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = false }
             w.isMovableByWindowBackground = false
             if w.contentLayoutRect.width < 820 || w.contentLayoutRect.height < 540 {
                 w.setContentSize(NSSize(width: max(820, w.contentLayoutRect.width), height: max(540, w.contentLayoutRect.height)))
@@ -122,13 +118,7 @@ struct MainWindowView: View {
                 .padding(theme.spacing.m)
             }
         } detail: {
-            switch section ?? .vault {
-            case .vault: VaultBrowser(service: service)
-            case .generator:
-                ScrollView { VStack(alignment: .leading) {
-                    Text("Password generator").font(theme.font(theme.fonts.title, weight: .semibold)).padding(.bottom, theme.spacing.m)
-                    GeneratorView().frame(maxWidth: 420)
-                }.padding(theme.spacing.l).frame(maxWidth: .infinity, alignment: .leading) }
+            switch section ?? .settings {
             case .devices: DevicesView(service: service)
             case .importer: ImportView(service: service)
             case .settings: SettingsView()
@@ -143,7 +133,6 @@ struct SettingsView: View {
     @State private var icons = IconStore.shared
     @State private var position = PanelPosition.current
     @State private var material = PanelMaterial.current
-    @State private var hideFromCapture = PanelCapture.hidden
     @State private var strict = SecuritySettings.requireTouchID
     @State private var closeAfterCopy = CommandPanelModel.closeAfterCopy
     @State private var fillWindow = VaultService.fillWindowMinutes
@@ -210,8 +199,6 @@ struct SettingsView: View {
                     .onChange(of: closeAfterCopy) { _, new in UserDefaults.standard.set(new, forKey: CommandPanelModel.closeAfterCopyKey) }
             }
             Section("Security") {
-                Toggle("Hide from screenshots and screen sharing", isOn: $hideFromCapture)
-                    .onChange(of: hideFromCapture) { _, new in UserDefaults.standard.set(new, forKey: PanelCapture.defaultsKey) }
                 Toggle("Require Touch ID to reveal or copy password and OTP", isOn: $strict)
                     .onChange(of: strict) { _, new in UserDefaults.standard.set(new, forKey: SecuritySettings.requireTouchIDKey) }
                 Text("Off: values are visible while the box is unlocked and copy without another prompt. On: masked until a fresh Touch ID check, and every copy asks again.")
@@ -260,7 +247,7 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .sheet(item: Binding(get: { phraseSheet.map { PhraseBox(phrase: $0) } }, set: { if $0 == nil { phraseSheet = nil } })) { box in
             PhraseGateView(service: service, phrase: box.phrase, title: "Your new recovery phrase") { phraseSheet = nil; service.confirmPhraseStored() }
-                .frame(width: 640, height: 520).themedPage(ThemeStore.shared.current).hiddenFromCapture(force: true)
+                .frame(width: 640, height: 520).themedPage(ThemeStore.shared.current)
         }
     }
 

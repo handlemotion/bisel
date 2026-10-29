@@ -15,13 +15,6 @@ struct WindowAccessor: NSViewRepresentable {
 }
 
 extension View {
-    /// Excludes the hosting window (sheet, popover, panel) from screenshots and screen sharing where the OS honours
-    /// `NSWindow.sharingType` (the "Hide from screenshots and screen sharing" setting; default on in Release), or always when `force`.
-    func hiddenFromCapture(force: Bool = false) -> some View {
-        background(WindowAccessor { w in w.sharingType = (force || PanelCapture.hidden) ? .none : .readOnly })
-    }
-
-    /// Themed page background + text color for main-window screens.
     /// `opaque: false` leaves the background to the content (the onboarding screens draw the glass themselves).
     func themedPage(_ theme: Theme, opaque: Bool = true) -> some View {
         self.foregroundStyle(theme.colors.text.color)
