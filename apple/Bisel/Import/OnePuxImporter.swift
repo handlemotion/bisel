@@ -81,7 +81,7 @@ enum OnePuxImporter {
                 switch kind {
                 case "totp":
                     guard let s = payload as? String, !s.isEmpty else { continue }
-                    if item.totp == nil, let p = OTPAuth.parse(s) { item.totp = p.params }
+                    if item.totp == nil, let p = TOTPSetup.parsed(s) { item.totp = p.params }
                     else { extraTOTP.append(CustomField(label: label, value: s, secret: true)) }
                 case "concealed":
                     guard let s = payload as? String, !s.isEmpty else { continue }

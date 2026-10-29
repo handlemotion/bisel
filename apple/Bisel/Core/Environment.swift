@@ -90,6 +90,13 @@ func describe(_ error: Error) -> String {
         case .unsupportedPayloadVersion(let v): return "Item format v\(v) is newer than this app"
         case .needsUnlockToResolveConflict: return "Unlock to resolve a sync conflict"
         }
+    case let e as ItemActionError:
+        switch e {
+        case .draftIsNew, .draftIsEdit: return "That form cannot be saved this way"
+        case .undoUnavailable: return "That item can no longer be brought back"
+        }
+    case is ItemValidationError: return "Some fields need attention"
+    case let e as ItemConflict: return e.itemWasDeleted ? "The item was deleted on another device" : "The item changed on another device"
     case BiselCryptoError.invalidRecoveryPhrase: return "That isn't a valid 24-word recovery phrase"
     case BiselCryptoError.authenticationFailed: return "Wrong key (the data could not be authenticated)"
     default: return error.localizedDescription

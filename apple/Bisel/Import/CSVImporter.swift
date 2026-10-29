@@ -56,7 +56,7 @@ enum CSVImporter {
             if !pass.isEmpty { item.password = pass }
             if !notes.isEmpty { item.notes = notes }
             if !totp.isEmpty {
-                if let p = OTPAuth.parse(totp) { item.totp = p.params } else { out.skipped.append("\(name): one-time code not understood (kept out)") }
+                if let p = TOTPSetup.parsed(totp) { item.totp = p.params } else { out.skipped.append("\(name): one-time code not understood (kept out)") }
             }
             let tags = v("tags").split(whereSeparator: { ",;".contains($0) }).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
             item.tags = tags

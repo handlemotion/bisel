@@ -341,19 +341,25 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     func save(_ item: Item) async throws -> Item {
         guard let vault else { throw BiselVault.VaultError.notConfigured }
         let saved = try await vault.save(item)
-        await reload()
-        pendingChanges = (try? await vault.pendingChanges()) ?? pendingChanges
-        Task { await sync(reason: "save") }
+        await didChangeLocally(reason: "save")
         return saved
     }
+
+    /// After the vault actor stored a local change: refresh rows, index and the pending count, then sync in the background.
+    func didChangeLocally(reason: String) async {
+        await reload()
+        if let vault { pendingChanges = (try? await vault.pendingChanges()) ?? pendingChanges }
+        Task { await sync(reason: reason) }
+    }
+
+    /// An operation found the core locked (its own timer ran out): bring the app's phase in line.
+    func coreReportedLocked() { setPhase(.locked) }
 
     func delete(id: String) async throws {
         guard let vault else { throw BiselVault.VaultError.notConfigured }
         try await vault.delete(id: id)
         usage.forget(id)
-        await reload()
-        pendingChanges = (try? await vault.pendingChanges()) ?? pendingChanges
-        Task { await sync(reason: "delete") }
+        await didChangeLocally(reason: "delete")
     }
 
     /// Imports many items without per-item syncing; one sync at the end.

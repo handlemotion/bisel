@@ -138,6 +138,8 @@ final class CommandPanelModel {
 
     @ObservationIgnored let source: VaultSearchSource
     @ObservationIgnored let secrets: VaultSecretProvider
+    /// Add / edit / delete / generate, see ACTIONS.md.
+    @ObservationIgnored let items: PanelItemActions
     @ObservationIgnored var runFill: ((FillPlan, VaultSearchResult) -> Void)?
     @ObservationIgnored var runCopy: ((SecretKind, VaultSearchResult) -> Void)?
     @ObservationIgnored var runOpenURL: ((VaultSearchResult) -> Void)?
@@ -204,6 +206,8 @@ final class CommandPanelModel {
     init(source: VaultSearchSource, secrets: VaultSecretProvider) {
         self.source = source
         self.secrets = secrets
+        items = PanelItemActions(source as? VaultItemActions)
+        items.onChange = { [weak self] in self?.refresh() }
     }
 
     /// Full reset, run on every show AND every hide: opens as the recents list with the first item selected,
