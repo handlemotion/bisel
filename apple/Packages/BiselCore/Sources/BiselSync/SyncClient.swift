@@ -460,6 +460,8 @@ public struct SyncClient: Sendable {
             let body = try? JSONCoding.decoder.decode(ConflictResponse.self, from: data)
             if body?.error == "exists" { throw SyncError.exists }
             if body?.error == "stale_epoch" { throw RotationError.staleEpoch(serverEpoch: body?.epoch ?? 0) }
+            // The box is at its size limit: not a conflict (retrying the same write can only fail the same way).
+            if body?.error == "box_full" { throw SyncError.server(status: 409, code: "box_full") }
             throw SyncError.conflict(current: body?.current?.record)
         case 413: throw SyncError.tooLarge
         default:

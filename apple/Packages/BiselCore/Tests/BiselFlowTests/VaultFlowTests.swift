@@ -303,6 +303,24 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("a box at its size limit says so: the edits stay pending, nothing is duplicated, and room makes them go through")
+    func boxFullIsNotAConflict() async throws {
+        try await TestServer.with(vars: ["MAX_ITEMS_PER_BOX": "4"]) { server in
+            let a = try Device("a")
+            try await a.bootstrap(server)   // the manifest is the first record
+            for n in 1...4 { _ = try await a.vault.save(login("Item \(n)", password: "pw\(n)")) }
+            await #expect(throws: SyncError.server(status: 409, code: "box_full")) { _ = try await a.vault.sync() }
+            #expect(try server.value("SELECT COUNT(*) FROM items") == "4")
+            #expect(try await a.vault.items().items.count == 4, "nothing was dropped or duplicated locally")
+            let pending = try await a.vault.pendingChanges()
+            #expect(pending >= 1)
+            try await a.vault.delete(id: try await a.vault.items().items[0].id)   // a delete of a pending-only item frees nothing; of a pushed one it does
+            try server.sql("UPDATE boxes SET item_count = 0")                    // stand-in for room appearing (limit raised)
+            _ = try await a.vault.sync()
+            #expect(try await a.vault.pendingChanges() == 0)
+        }
+    }
+
     @Test("after the server's database is restored from an earlier point, the device uploads again what the restore lost")
     func deviceReseedsARestoredServer() async throws {
         try await TestServer.with { server in
