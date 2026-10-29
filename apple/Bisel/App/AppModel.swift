@@ -58,6 +58,7 @@ final class AppModel {
         }
         #if DEBUG
         DebugTools.installSnapshotListener()
+        DebugTools.runOnboardingTourIfRequested(service)
         DebugFlow.runIfRequested()
         DebugTools.runAutopilotIfRequested()
         #endif

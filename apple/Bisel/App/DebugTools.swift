@@ -6,6 +6,19 @@ import AppKit
 enum DebugTools {
     /// Debug builds: a distributed notification `app.bisel.dev.snapshot` (userInfo `path`) writes a PNG of the main window's
     /// contents rendered in-process (works with the screen locked or the window behind others). Never compiled into Release.
+    /// BISEL_DEV_TOUR=1: creates a box, waits for the recovery phrase screen to settle, then presses Back (discards it), so
+    /// the transitions can be captured from outside. Throwaway stores only.
+    @MainActor
+    static func runOnboardingTourIfRequested(_ service: VaultService) {
+        guard ProcessInfo.processInfo.environment["BISEL_DEV_TOUR"] != nil else { return }
+        Task {
+            try? await Task.sleep(for: .seconds(4))
+            try? await service.bootstrapLocal(deviceName: "tour")
+            try? await Task.sleep(for: .seconds(4))
+            await service.discardNewBox()
+        }
+    }
+
     @MainActor
     static func installSnapshotListener() {
         // `app.bisel.dev.snapshot.<pid>` reaches one process when several debug builds run at once.

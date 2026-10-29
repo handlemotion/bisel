@@ -14,6 +14,8 @@ struct SetupView: View {
     @State private var step: Step = SetupView.initialStep
     @State private var words = Array(repeating: "", count: 24)
     @State private var error: String?
+    /// True for a moment while the screen fades out before the next step takes its place.
+    @State private var leaving = false
 
     private static var initialStep: Step {
         #if DEBUG
@@ -25,14 +27,14 @@ struct SetupView: View {
     private var deviceName: String { Host.current().localizedName ?? "Mac" }
 
     var body: some View {
-        OnboardingFrame(progress: step == .welcome ? 0.2 : 0.5, title: title, message: message, centered: step == .recover) {
+        OnboardingFrame(progress: step == .welcome ? 0.2 : 0.5, title: title, message: message, centered: step == .recover, dim: leaving) {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
                 switch step {
                 case .welcome:
                     VStack(alignment: .leading, spacing: theme.spacing.l) {
-                        OnboardingRow(icon: "IconKeyboardDown", text: "Start by using cmd + shift + space")
-                        OnboardingRow(icon: "IconKeyhole", text: "Autofills natively in Safari or in Chromium via extensions")
-                        OnboardingRow(icon: "IconCloudSync2", text: "Syncs directly iPhones and other Macs")
+                        OnboardingRow(icon: "IconKeyboardDown", text: "Start by using cmd + shift + space", delay: 0.12)
+                        OnboardingRow(icon: "IconKeyhole", text: "Autofills natively in Safari or in Chromium via extensions", delay: 0.18)
+                        OnboardingRow(icon: "IconCloudSync2", text: "Syncs directly iPhones and other Macs", delay: 0.24)
                     }
                     .padding(theme.spacing.l)
                 case .recover:
@@ -48,10 +50,10 @@ struct SetupView: View {
                 }
                 .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
                 .disabled(service.isBusy).accessibilityIdentifier("setup-go")
-                Button("I already have one") { error = nil; step = .recover }
+                Button("I already have one") { go(.recover) }
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-recover")
             case .recover:
-                Button("Back") { error = nil; step = .welcome }
+                Button("Back") { go(.welcome) }
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-back")
                 Button("Upload file", action: uploadPhrase)
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-upload")
@@ -72,6 +74,17 @@ struct SetupView: View {
         step == .welcome
             ? "Bisel is the password manager we meant to be easy to reach while staying amazingly secure, working fully on a command menu taking less time to reach your info."
             : "Paste your 24 words into any cell, or upload the file you saved."
+    }
+
+    /// Fades the current step out, then swaps in the next one, whose texts and cells fade in one after another.
+    private func go(_ next: Step) {
+        error = nil
+        leaving = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(170))
+            step = next
+            leaving = false
+        }
     }
 
     private func create() {

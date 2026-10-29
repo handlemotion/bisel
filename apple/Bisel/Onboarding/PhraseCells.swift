@@ -37,6 +37,7 @@ struct PhraseCellChrome<Word: View>: View {
         .frame(maxWidth: .infinity)
         .background(shape.fill(theme.colors.field.color))
         .overlay(shape.strokeBorder(focused ? theme.colors.text.color.opacity(0.35) : .clear, lineWidth: theme.card.hairline))
+        .cascade(0.12 + Double(number - 1) * 0.012, rise: 4)
     }
 }
 

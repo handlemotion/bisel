@@ -192,9 +192,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         isBusy = true; defer { isBusy = false }
         do { try await vault.removeLocalDevice() } catch { Log.app.error("discarding the new box failed") }
         setRecoveryUnconfirmed(false)
+        await refreshPhase()   // first: the phase goes back to set-up while the phrase is still held, so no other screen shows
         pendingPhrase = nil
         freshBox = false
-        await refreshPhase()
     }
 
     /// Registers this Mac's vault with a fresh server, then uploads everything made while it was local.

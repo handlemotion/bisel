@@ -22,23 +22,29 @@ struct MainWindowView: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        Group {
+        // Screens cross-fade in place (a ZStack, so they never share layout), over a solid black backing in the card phases
+        // so nothing behind the window shows through while two of them overlap.
+        ZStack {
             if let e = service.startupError {
                 ContentUnavailableView("Bisel can't start", systemImage: "exclamationmark.triangle", description: Text(e))
             } else if usesFixture {
                 fixtureNotice
             } else if service.phase == .needsSetup {
-                SetupView(service: service)
+                SetupView(service: service).transition(.opacity)
             } else if let phrase = service.pendingPhrase {
                 PhraseGateView(service: service, phrase: phrase) { service.confirmPhraseStored(); showImport = true }
+                    .transition(.opacity)
             } else if showImport {
                 OnboardingImportView(service: service) { showImport = false; dismissWindow(id: "main") }
+                    .transition(.opacity)
             } else if service.phase == .locked {
-                LockedView(service: service)
+                LockedView(service: service).transition(.opacity)
             } else {
                 unlocked
             }
         }
+        .background(cardSize == nil ? Color.clear : Theme.biselDark.colors.background.color)
+        .animation(.easeInOut(duration: 0.28), value: screenKey)
         .frame(minWidth: cardSize == nil ? 820 : 0, minHeight: cardSize == nil ? 540 : 0)
         .themedPage(theme, opaque: cardSize == nil)
         .panelMaterial()
@@ -92,6 +98,15 @@ struct MainWindowView: View {
                 w.setContentSize(NSSize(width: max(820, w.frame.width), height: max(540, w.frame.height)))
             }
         }
+    }
+
+    /// Which screen is up; changing it cross-fades.
+    private var screenKey: String {
+        if service.startupError != nil { return "error" }
+        if service.phase == .needsSetup { return "setup" }
+        if service.pendingPhrase != nil { return "phrase" }
+        if showImport { return "import" }
+        return service.phase == .locked ? "locked" : "unlocked"
     }
 
     private var usesFixture: Bool {

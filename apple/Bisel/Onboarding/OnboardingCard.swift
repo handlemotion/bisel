@@ -10,6 +10,8 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
     var message: String?
     /// Centre the content vertically between the text above and the actions below (otherwise it sits under the text and scrolls).
     var centered = false
+    /// Fades the text, content and actions out (the progress bar stays) just before a step changes.
+    var dim = false
     @ViewBuilder var content: Content
     @ViewBuilder var actions: Actions
     private let theme = Theme.biselDark   // onboarding is always the solid black frame from Figma
@@ -23,14 +25,17 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
                     Text(title)
                         .font(theme.font(theme.fonts.detailTitle - 4))
                         .accessibilityAddTraits(.isHeader)
+                        .id(title).cascade(0)
                     if let message {
                         Text(message)
                             .font(theme.font(theme.fonts.search))
                             .lineSpacing(4)
                             .foregroundStyle(theme.colors.secondaryText.color)
                             .fixedSize(horizontal: false, vertical: true)
+                            .id(message).cascade(0.05)
                     }
                 }
+                .opacity(dim ? 0 : 1)
             }
             if centered {
                 // The content sits close to the actions (they add their own 16 pt of padding), the rest of the free space goes
@@ -41,22 +46,28 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
                     Spacer().frame(height: theme.spacing.s)
                 }
                 .frame(maxHeight: .infinity)
+                .id(title)
+                .opacity(dim ? 0 : 1)
             } else {
-                ScrollView {
-                    content
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, theme.spacing.l)
+                VStack(spacing: 0) {
+                    content.frame(maxWidth: .infinity, alignment: .leading).padding(.top, theme.spacing.l)
+                    Spacer(minLength: 0)
                 }
-                .scrollBounceBehavior(.basedOnSize)
-                .scrollIndicators(.never)
+                .frame(maxHeight: .infinity)
+                .id(title)
+                .opacity(dim ? 0 : 1)
             }
             HStack(spacing: theme.spacing.m) { actions }
                 .padding(.top, theme.spacing.l)
+                .id(title)
+                .cascade(0.28, rise: 0)
+                .opacity(dim ? 0 : 1)
         }
         .padding(inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.colors.background.color)
         .overlay(rim)
+        .animation(.easeIn(duration: 0.15), value: dim)
         .foregroundStyle(theme.colors.text.color)
         .environment(\.theme, theme)
         .preferredColorScheme(.dark)
@@ -78,6 +89,7 @@ extension OnboardingFrame {
 struct OnboardingRow: View {
     var icon: String
     var text: String
+    var delay = 0.1
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -87,6 +99,7 @@ struct OnboardingRow: View {
             Spacer(minLength: 0)
         }
         .foregroundStyle(theme.colors.secondaryText.color)
+        .cascade(delay)
     }
 }
 
@@ -196,4 +209,27 @@ extension View {
     func onboardingField(_ theme: Theme, placeholder: String? = nil, text: String = "") -> some View {
         modifier(OnboardingField(theme: theme, placeholder: placeholder, text: text))
     }
+}
+
+
+/// Fades a view in and lifts it a few points into place, `delay` seconds after it appears. Giving a row of views rising
+/// delays makes them arrive one after another. With Reduce Motion it is a plain, quick fade.
+struct Cascade: ViewModifier {
+    var delay: Double
+    var rise: CGFloat
+    @State private var shown = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(shown ? 1 : 0)
+            .offset(y: shown || reduceMotion ? 0 : rise)
+            .onAppear {
+                withAnimation(.easeOut(duration: reduceMotion ? 0.12 : 0.38).delay(reduceMotion ? 0 : delay)) { shown = true }
+            }
+    }
+}
+
+extension View {
+    func cascade(_ delay: Double, rise: CGFloat = 6) -> some View { modifier(Cascade(delay: delay, rise: rise)) }
 }
