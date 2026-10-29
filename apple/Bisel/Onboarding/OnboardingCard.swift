@@ -1,20 +1,5 @@
 import SwiftUI
 
-/// The Bisel mark: a square with its top-left corner cut at 45° (a bevelled edge).
-struct BevelShape: Shape {
-    func path(in r: CGRect) -> Path {
-        let c = r.width * 0.38
-        var p = Path()
-        p.move(to: CGPoint(x: r.minX + c, y: r.minY))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
-        p.addLine(to: CGPoint(x: r.minX, y: r.maxY))
-        p.addLine(to: CGPoint(x: r.minX, y: r.minY + c))
-        p.closeSubpath()
-        return p
-    }
-}
-
 /// The onboarding screens (Figma "Bisel", node 8:2): the window is the surface, filled like the command panel (glass, or
 /// solid with the Material setting). Progress bar on top, title and message, the step's content, and the actions pinned
 /// bottom-left. No traffic lights; the window closes from the Dock.
@@ -58,10 +43,21 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
         .padding(inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.colors.background.color)
+        .overlay(rim)
         .foregroundStyle(theme.colors.text.color)
         .environment(\.theme, theme)
         .preferredColorScheme(.dark)
         .ignoresSafeArea()
+    }
+}
+
+extension OnboardingFrame {
+    /// Thin edge light on the window's own outline (its corner radius is about 20 pt, measured), brightest on top.
+    var rim: some View {
+        RoundedRectangle(cornerRadius: 20, style: .continuous)
+            .strokeBorder(LinearGradient(colors: [.white.opacity(0.22), .white.opacity(0.07), .white.opacity(0.12)],
+                                         startPoint: .top, endPoint: .bottom), lineWidth: 1)
+            .allowsHitTesting(false)
     }
 }
 

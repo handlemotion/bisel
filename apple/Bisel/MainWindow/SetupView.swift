@@ -1,31 +1,25 @@
 import SwiftUI
-import UniformTypeIdentifiers
 import BiselCore
 
 /// First run on this Mac, as a short route (Figma "Bisel", node 8:2):
-/// welcome → use locally (name this Mac) | connect to a box (server + recovery phrase) | restore a backup file,
+/// welcome → use locally (name this Mac) | connect to a box (server + recovery phrase),
 /// then the recovery phrase for a new box (PhraseGateView). The progress bar follows the route.
 struct SetupView: View {
     let service: VaultService
-    @Environment(\.theme) private var theme
+    private let theme = Theme.biselDark   // onboarding is always the black frame
 
-    enum Step { case welcome, local, connect, restore }
+    enum Step { case welcome, local, connect }
     @State private var step: Step = SetupView.initialStep
     @State private var server = ""   // never persisted outside the vault store: the hostname is a secret (SPEC §6, review M17)
-    @State private var token = ""
     @State private var deviceName = Host.current().localizedName ?? "Mac"
     @State private var phrase = ""
-    @State private var backupURL: URL?
-    @State private var picking = false
     @State private var error: String?
-    @State private var debugPath = ""
 
     private static var initialStep: Step {
         #if DEBUG
         switch ProcessInfo.processInfo.environment["BISEL_DEV_STEP"] {   // screenshots of each route step
         case "local": return .local
         case "connect": return .connect
-        case "restore": return .restore
         default: break
         }
         #endif
@@ -51,25 +45,6 @@ struct SetupView: View {
                         field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
                     }
                     phraseEditor
-                case .restore:
-                    HStack(alignment: .top, spacing: theme.spacing.m) {
-                        field("Server", "https://box.example.com", $server, id: "setup-server")
-                        secureField("Bootstrap token", "Set with wrangler secret BOOTSTRAP_TOKEN", $token, id: "setup-token")
-                    }
-                    HStack(alignment: .top, spacing: theme.spacing.m) {
-                        phraseEditor
-                        field("This Mac's name", "MacBook", $deviceName, id: "setup-device")
-                    }
-                    HStack {
-                        Button("Choose backup file…") { picking = true }
-                            .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-pick-backup")
-                        Text(backupURL?.lastPathComponent ?? "None selected")
-                            .font(theme.font(theme.fonts.detail)).foregroundStyle(theme.colors.secondaryText.color).lineLimit(1)
-                    }
-                    #if DEBUG
-                    TextField("", text: $debugPath, prompt: Text("debug: backup file path")).onboardingField(theme)
-                        .accessibilityIdentifier("setup-debug-path").onSubmit { backupURL = URL(fileURLWithPath: debugPath) }
-                    #endif
                 }
                 ErrorLine(text: error)
             }
@@ -80,25 +55,18 @@ struct SetupView: View {
                     .buttonStyle(PillButtonStyle()).accessibilityIdentifier("setup-mode-recover")
                 Button("Use locally") { go(.local) }
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-create")
-            case .local, .connect, .restore:
+            case .local, .connect:
+                Button("Back") { go(.welcome) }
+                    .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-back")
+                Spacer(minLength: 0)
                 Button(action: submit) {
                     if service.isBusy { ProgressView().controlSize(.small) } else { Text(actionTitle) }
                 }
                 .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
                 .disabled(service.isBusy || !ready).accessibilityIdentifier("setup-go")
-                Button("Back") { go(.welcome) }
-                    .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-back")
-                if step == .connect {
-                    Button("Restore backup") { go(.restore) }
-                        .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-restore")
-                }
             }
         }
-        .fileImporter(isPresented: $picking, allowedContentTypes: [UTType(filenameExtension: "bisel-backup") ?? .json, .json]) { r in
-            if case .success(let u) = r { backupURL = u }
-        }
     }
-
     // MARK: copy and route
 
     private var progress: Double { step == .welcome ? 0.2 : 0.5 }
@@ -108,7 +76,6 @@ struct SetupView: View {
         case .welcome: "Welcome to Bisel"
         case .local: "Set up on this Mac"
         case .connect: "Use a box"
-        case .restore: "Restore a backup"
         }
     }
 
@@ -117,12 +84,11 @@ struct SetupView: View {
         case .welcome: "Bisel is the password manager we meant to be easy to reach while staying amazingly secure, working fully on a command menu taking less time to reach your info."
         case .local: "We make your keys right here on this Mac, and nothing leaves it until you decide to connect a server."
         case .connect: "Add the server your box lives on and your 24-word recovery phrase, and this Mac joins it."
-        case .restore: "Pick your .bisel-backup file, point it at a fresh server and add your recovery phrase, and we rebuild the box there."
         }
     }
 
     private var actionTitle: String {
-        switch step { case .local: "Create box"; case .connect: "Connect"; case .restore: "Restore"; case .welcome: "" }
+        switch step { case .local: "Create box"; case .connect: "Connect"; case .welcome: "" }
     }
 
     private var ready: Bool {
@@ -131,7 +97,6 @@ struct SetupView: View {
         case .welcome: return false
         case .local: return true
         case .connect: return !server.isEmpty && !phraseText.isEmpty
-        case .restore: return !server.isEmpty && !token.isEmpty && !phraseText.isEmpty && backupURL != nil
         }
     }
 
@@ -149,14 +114,14 @@ struct SetupView: View {
     private func field(_ title: String, _ prompt: String, _ text: Binding<String>, id: String) -> some View {
         VStack(alignment: .leading, spacing: theme.spacing.xs) {
             Caption(title)
-            TextField("", text: text, prompt: Text(prompt)).onboardingField(theme).accessibilityIdentifier(id)
+            TextField("", text: text, prompt: Text(prompt).foregroundStyle(theme.colors.placeholder.color)).onboardingField(theme).accessibilityIdentifier(id)
         }
     }
 
     private func secureField(_ title: String, _ prompt: String, _ text: Binding<String>, id: String) -> some View {
         VStack(alignment: .leading, spacing: theme.spacing.xs) {
             Caption(title)
-            SecureField("", text: text, prompt: Text(prompt)).onboardingField(theme).accessibilityIdentifier(id)
+            SecureField("", text: text, prompt: Text(prompt).foregroundStyle(theme.colors.placeholder.color)).onboardingField(theme).accessibilityIdentifier(id)
         }
     }
 
@@ -173,22 +138,11 @@ struct SetupView: View {
         }
         let (url, bad) = ServerURLCheck.parse(server)
         guard let url else { error = bad; return }
-        let tok = token.trimmingCharacters(in: .whitespacesAndNewlines)
         let words = phrase
-        let file = backupURL
-        let route = step
         Task {
             do {
-                switch route {
-                case .welcome, .local: break
-                case .connect: try await service.recover(server: url, phrase: words, deviceName: name)
-                case .restore:
-                    guard let file else { return }
-                    let scoped = file.startAccessingSecurityScopedResource()
-                    defer { if scoped { file.stopAccessingSecurityScopedResource() } }
-                    try await service.importBackup(from: file, phrase: words, server: url, token: tok, deviceName: name)
-                }
-                phrase = ""; token = ""
+                try await service.recover(server: url, phrase: words, deviceName: name)
+                phrase = ""
             } catch {
                 self.error = describe(error)
             }
@@ -202,7 +156,7 @@ struct PhraseGateView: View {
     let phrase: RecoveryPhrase
     var title = "Your recovery phrase"
     var onDone: () -> Void
-    @Environment(\.theme) private var theme
+    private let theme = Theme.biselDark   // onboarding is always the black frame
     @State private var stored = false
     /// The words are censored until asked for, so a screenshot or screen share never catches them by accident.
     @State private var revealed = false
@@ -241,13 +195,14 @@ struct PhraseGateView: View {
                     Caption("Quick check, type these words from your copy")
                     HStack(spacing: theme.spacing.m) {
                         ForEach(0..<3, id: \.self) { i in
-                            TextField("", text: $answers[i], prompt: Text("Word \(picks[i])")).onboardingField(theme)
+                            TextField("", text: $answers[i], prompt: Text("Word \(picks[i])").foregroundStyle(theme.colors.placeholder.color)).onboardingField(theme)
                                 .autocorrectionDisabled().accessibilityIdentifier("phrase-check-\(i + 1)")
                         }
                     }
                 }
             }
         } actions: {
+            Spacer(minLength: 0)
             Button("Continue", action: onDone)
                 .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
                 .disabled(!confirmed).accessibilityIdentifier("phrase-continue")
@@ -257,7 +212,7 @@ struct PhraseGateView: View {
 
 struct LockedView: View {
     let service: VaultService
-    @Environment(\.theme) private var theme
+    private let theme = Theme.biselDark   // onboarding is always the black frame
     @State private var error: String?
     @State private var working = false
 

@@ -24,7 +24,7 @@ extension View {
     }
 }
 
-/// Bisel is a menu-bar app (no Dock icon) until one of its windows is on screen; then it gets a Dock icon with the mark,
+/// Bisel is a menu-bar app (no Dock icon) until one of its windows is on screen; then it gets a Dock icon (AppIcon.icon),
 /// and goes back to the menu bar when the last window closes.
 @MainActor
 enum DockPresence {
@@ -33,7 +33,6 @@ enum DockPresence {
     static func windowAppeared(_ window: NSWindow) {
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
-            NSApp.applicationIconImage = BrandIcon.image
             NSApp.activate()
         }
         guard observer == nil else { return }
@@ -46,24 +45,6 @@ enum DockPresence {
             }
         }
     }
-}
-
-/// The Dock icon: a flat black tile with the white mark on the standard icon grid. No gradient, rim or halo.
-@MainActor
-enum BrandIcon {
-    static let image: NSImage = {
-        let tile: CGFloat = 824   // Apple's icon grid inside the 1024 canvas
-        let view = ZStack {
-            RoundedRectangle(cornerRadius: tile * 0.2237, style: .continuous)
-                .fill(Color(white: 0.04))
-                .frame(width: tile, height: tile)
-            BevelShape().fill(.white).frame(width: tile * 0.52, height: tile * 0.52)
-        }
-        .frame(width: 1024, height: 1024)
-        let r = ImageRenderer(content: view)
-        r.scale = 1
-        return r.nsImage ?? NSImage()
-    }()
 }
 
 /// Section header / caption styles from Theme tokens.
