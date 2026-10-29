@@ -39,7 +39,14 @@ struct DevicesView: View {
                 .padding(.vertical, 2)
             }
             .scrollContentBackground(.hidden)
-            .overlay { if devices.isEmpty && !loading { ContentUnavailableView("No devices", systemImage: "laptopcomputer") } }
+            .overlay {
+                if service.isLocalOnly {
+                    ContentUnavailableView(service.deviceName, systemImage: "laptopcomputer",
+                                           description: Text("This Mac holds the only copy of your box."))
+                } else if devices.isEmpty && !loading {
+                    ContentUnavailableView("No devices", systemImage: "laptopcomputer")
+                }
+            }
             Caption("A revoked device is refused by the server immediately. Adding a second Mac or an iPhone comes with the iPhone app.")
         }
         .padding(theme.spacing.l)

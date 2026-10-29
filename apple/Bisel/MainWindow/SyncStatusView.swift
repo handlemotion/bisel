@@ -16,7 +16,7 @@ struct SyncStatusView: View {
             if !compact && service.isUnlocked && !service.isLocalOnly {
                 Spacer(minLength: 0)
                 Button { Task { await service.sync(reason: "manual") } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.borderless).help("Sync now").accessibilityIdentifier("sync-now")
+                    .buttonStyle(.borderless).help("Sync now").accessibilityLabel("Sync now").accessibilityIdentifier("sync-now")
                     .disabled(service.syncState == .syncing)
             }
         }
