@@ -10,7 +10,10 @@ final class Toast {
 
     func show(_ text: String, isError: Bool = false, duration: Duration = .seconds(2.2)) {
         let theme = ThemeStore.shared.current
-        let host = NSHostingView(rootView: ToastView(text: text, isError: isError).environment(\.theme, theme))
+        let prefs = AccessibilityStore.shared.preferences
+        let host = NSHostingView(rootView: ToastView(text: text, isError: isError)
+            .environment(\.theme, theme.adjusted(for: prefs))
+            .environment(\.accessibilityPreferences, prefs))
         host.setFrameSize(host.fittingSize)
         let p = panel ?? {
             let p = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
@@ -29,10 +32,11 @@ final class Toast {
         p.appearance = NSAppearance(named: theme.appearance == .dark ? .darkAqua : .aqua)
         p.contentView = host
         let size = host.fittingSize
-        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens.first
         let vf = screen?.visibleFrame ?? .zero
         p.setFrame(NSRect(x: vf.midX - size.width / 2, y: vf.maxY - size.height - 56, width: size.width, height: size.height), display: true)
         p.orderFrontRegardless()
+        PanelAnnouncer.announce(text, priority: isError ? .high : .medium)
         hideTask?.cancel()
         hideTask = Task { [weak p] in
             try? await Task.sleep(for: duration)
@@ -59,5 +63,8 @@ private struct ToastView: View {
         .environment(\.colorScheme, theme.colorScheme)
         .fixedSize()
         .padding(theme.spacing.s)
+        .panelMaterial()
+        // Spoken by VoiceOver as one status, since the toast never takes focus.
+        .accessibilityElement(children: .combine)
     }
 }

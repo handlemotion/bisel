@@ -37,10 +37,29 @@ final class CommandPanel: NSPanel {
     var dragHandleWidth: CGFloat = 40
     /// Called when a drag ends, so the controller can snap the card back to its default spot when it is close.
     var onDragEnded: (() -> Void)?
+    var onDragBegan: (() -> Void)?
+    /// Maps the origin the pointer asks for to the origin the panel actually takes (snapping to the default spot).
+    var dragFilter: ((NSPoint) -> NSPoint)?
 
     /// A press in the bar becomes a window drag once the pointer moves a few points; a plain click is replayed to
     /// the view hierarchy so the text field still places its caret. (SwiftUI's WindowDragGesture fought the text
     /// field for the same pixels, which made dragging unreliable and made the text scroll.)
+    /// Our own drag loop (not `performDrag`) so the controller can snap the panel and draw guides while it moves.
+    private func runDrag(from down: NSEvent) {
+        let startMouse = convertPoint(toScreen: down.locationInWindow)
+        let startOrigin = frame.origin
+        onDragBegan?()
+        while let next = nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture,
+                                   inMode: .eventTracking, dequeue: true) {
+            if next.type == .leftMouseUp { break }
+            let m = NSEvent.mouseLocation
+            var origin = NSPoint(x: startOrigin.x + m.x - startMouse.x, y: startOrigin.y + m.y - startMouse.y)
+            if let f = dragFilter { origin = f(origin) }
+            setFrameOrigin(origin)
+        }
+        onDragEnded?()
+    }
+
     private func trackBarPress(_ down: NSEvent) {
         let start = down.locationInWindow
         while let next = nextEvent(matching: [.leftMouseDragged, .leftMouseUp], until: .distantFuture,
@@ -52,8 +71,7 @@ final class CommandPanel: NSPanel {
             }
             let p = next.locationInWindow
             if hypot(p.x - start.x, p.y - start.y) > 3 {
-                performDrag(with: down)
-                onDragEnded?()
+                runDrag(from: down)
                 return
             }
         }

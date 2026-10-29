@@ -14,16 +14,25 @@ final class CommandPanelController {
     private let panel = CommandPanel()
     #if DEBUG
     var debugPanel: NSPanel { panel }
+    var debugHost: NSView { host }
+    /// Verification drivers run the panel invisibly: fully transparent and click-through, so a run never flashes on the
+    /// user's screen. (Window server still treats it as shown, so layout, timing and monitors are the real ones.)
+    var debugStealth = false
     #endif
     private let host: NSHostingView<AnyView>
     private var keyMonitor: Any?
     private var target: NSRunningApplication?
     private var openedAt: ContinuousClock.Instant?
     private let themeStore: ThemeStore
+    private let accessibilityStore: AccessibilityStore
 
-    init(model: CommandPanelModel, themeStore: ThemeStore = .shared) {
+    init(model: CommandPanelModel, themeStore: ThemeStore = .shared, accessibilityStore: AccessibilityStore = .shared) {
         self.model = model
         self.themeStore = themeStore
+        self.accessibilityStore = accessibilityStore
+        // A borderless panel has no title bar, but assistive technologies still name the window by its title.
+        panel.title = String(localized: "bisel command panel")
+        panel.setAccessibilityLabel(String(localized: "bisel command panel"))
         host = NSHostingView(rootView: AnyView(EmptyView()))
         host.sizingOptions = []
         panel.contentView = host
@@ -53,8 +62,13 @@ final class CommandPanelController {
         renderRoot()
         KeyboardShortcuts.onKeyDown(for: .commandPanel) { [weak self] in self?.toggle() }
         trackTheme()
+        #if DEBUG
+        PanelDebugDriver.startIfRequested(controller: self)
+        #endif
         model.resetPosition = { [weak self] in self?.resetDragOffset() }
-        panel.onDragEnded = { [weak self] in MainActor.assumeIsolated { self?.snapIfClose() } }
+        panel.onDragBegan = { [weak self] in MainActor.assumeIsolated { self?.beginDrag() } }
+        panel.dragFilter = { [weak self] p in MainActor.assumeIsolated { self?.filterDrag(p) ?? p } }
+        panel.onDragEnded = { [weak self] in MainActor.assumeIsolated { self?.endDrag() } }
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: panel, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.panelMoved() }
         }
@@ -79,7 +93,7 @@ final class CommandPanelController {
 
     var isVisible: Bool { state != .hidden }
 
-    static var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    @MainActor static var reduceMotion: Bool { AccessibilityStore.shared.preferences.reduceMotion }
 
     /// Open/close animations are off: the panel appears and disappears instantly. Flip to bring them back.
     static let animated = false
@@ -100,11 +114,16 @@ final class CommandPanelController {
         // Fully reset BEFORE the window can be seen: no stale query/results/selection/confirmation, and the content
         // starts in its "not presented" (scaled, transparent) state so nothing flashes.
         model.reset(targetName: target?.localizedName)
+        clearEditingHistory()
         model.presented = true  // instant open: no animation (user preference, like Raycast)
         renderRoot()
         layoutPanel(animated: false, reposition: true)
         panel.sharingType = PanelCapture.hidden ? .none : .readOnly
         panel.ignoresMouseEvents = false
+        #if DEBUG
+        panel.alphaValue = debugStealth ? 0 : 1
+        if debugStealth { panel.ignoresMouseEvents = true }
+        #endif
         host.layoutSubtreeIfNeeded()
         panel.displayIfNeeded()
         state = .shown
@@ -141,6 +160,7 @@ final class CommandPanelController {
             panel.orderOut(nil)
             state = .hidden
             model.reset(targetName: nil)
+            clearEditingHistory()
             Log.panel.notice("STATE hidden (immediate)")
             return
         }
@@ -154,6 +174,13 @@ final class CommandPanelController {
         }
         hideWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    /// The search field's undo stack would otherwise grow with every edit for the life of the app (and keep what was
+    /// typed in memory). A fresh panel has nothing to undo.
+    private func clearEditingHistory() {
+        (panel.fieldEditor(false, for: nil) as? NSTextView)?.undoManager?.removeAllActions()
+        panel.undoManager?.removeAllActions()
     }
 
     func hide() { hide("api") }
@@ -212,19 +239,37 @@ final class CommandPanelController {
             MainActor.assumeIsolated {
                 guard let self, let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
                       app.processIdentifier != self.target?.processIdentifier else { return }  // bisel itself / the app we are filling: not a switch
-                self.hide("appActivated:\(app.bundleIdentifier ?? "?")")
+                Log.panel.notice("frontmost app changed to \(app.bundleIdentifier ?? "?", privacy: .private)")
+                self.hide("appActivated")
             }
         })
         observers.append(ws.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.hide("spaceChanged") }
         })
+        // The panel shows secrets: never leave it up across sleep, a sleeping display or a fast-user switch.
+        for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
+            observers.append(ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.hide("sleepOrSessionChange") }
+            })
+        }
+        // A display was added, removed or rearranged while the panel is up: put it back on a screen that exists.
+        screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.state == .shown else { return }
+                self.layoutPanel(animated: false, reposition: true)
+            }
+        }
     }
+
+    private var screenObserver: NSObjectProtocol?
 
     private func removeMonitors() {
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors = []
         observers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
         observers = []
+        if let o = screenObserver { NotificationCenter.default.removeObserver(o) }
+        screenObserver = nil
         removeKeyMonitor()
     }
 
@@ -270,15 +315,36 @@ final class CommandPanelController {
 
     // MARK: rendering
 
+    private var renderedTheme: Theme?
+    private var renderedPreferences: AccessibilityPreferences?
+
+    /// Installs the SwiftUI root for the current theme and accessibility switches. Skipped when neither changed: the
+    /// hosted view graph (and its `@AppStorage` observers) then lives for the app's lifetime instead of being rebuilt on
+    /// every show.
     private func renderRoot() {
-        let theme = themeStore.current
-        host.rootView = AnyView(CommandPanelView(model: model).environment(\.theme, theme))
-        panel.appearance = NSAppearance(named: theme.appearance == .dark ? .darkAqua : .aqua)
+        let prefs = accessibilityStore.preferences
+        let theme = themeStore.current.adjusted(for: prefs)
+        guard theme != renderedTheme || prefs != renderedPreferences else { return }
+        renderedTheme = theme
+        renderedPreferences = prefs
+        host.rootView = AnyView(CommandPanelView(model: model)
+            .environment(\.theme, theme)
+            .environment(\.accessibilityPreferences, prefs))
+        let name: NSAppearance.Name = switch (theme.appearance, prefs.increaseContrast) {
+        case (.dark, true): .accessibilityHighContrastDarkAqua
+        case (.dark, false): .darkAqua
+        case (.light, true): .accessibilityHighContrastAqua
+        case (.light, false): .aqua
+        }
+        panel.appearance = NSAppearance(named: name)
     }
 
+    /// Re-renders when the theme (system light/dark, family) or a system accessibility switch changes, also while the
+    /// panel is open.
     private func trackTheme() {
         withObservationTracking {
             _ = themeStore.current
+            _ = accessibilityStore.preferences
         } onChange: { [weak self] in
             Task { @MainActor in
                 self?.renderRoot()
@@ -287,12 +353,19 @@ final class CommandPanelController {
         }
     }
 
+    /// The display that has the pointer, else the main one, else any; nil only while no display is attached.
+    private static var screenUnderPointer: NSScreen? {
+        NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens.first
+    }
+
     /// Fixed-size card in a screen corner (setting `PanelPosition`), on the screen that has the mouse, inset by the
     /// spacing token from `visibleFrame` so it clears the Dock and the menu bar. The window never resizes.
     private func layoutPanel(animated: Bool, reposition: Bool = false) {
         let theme = themeStore.current
         let size = CGSize(width: theme.card.width, height: theme.card.height)
-        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
+        // No screen at all (every display asleep or mid-reconfiguration): keep the current frame; the screen-change
+        // observer lays the panel out again as soon as one is back.
+        guard let screen = Self.screenUnderPointer else { return }
         let vf = screen.visibleFrame
         let inset = theme.spacing.l
         let base: CGPoint = switch PanelPosition.current {
@@ -304,7 +377,7 @@ final class CommandPanelController {
         }
         baseOrigin = base
         panel.dragBarHeight = theme.card.topBarHeight
-        panel.dragHandleWidth = theme.spacing.m + theme.card.searchIconBox + theme.spacing.xs
+        panel.dragHandleWidth = theme.spacing.l + theme.card.searchIconBox + theme.spacing.xs
         let off = Self.dragOffset
         let origin = CGPoint(x: min(max(base.x + off.width, vf.minX), vf.maxX - size.width),
                              y: min(max(base.y + off.height, vf.minY), vf.maxY - size.height))
@@ -333,13 +406,41 @@ final class CommandPanelController {
         UserDefaults.standard.set([off.width, off.height], forKey: Self.dragKey)
     }
 
-    /// Like Raycast: letting go near the default spot snaps the card onto it (with an alignment tick on the trackpad).
-    private func snapIfClose() {
-        guard state == .shown else { return }
+    /// Like Raycast: while dragging, guide lines mark the default spot (brighter the closer the card is) and the card
+    /// locks onto it, with the guides turning blue and an alignment tick on the trackpad, when it comes close.
+    private let guides = DragGuides()
+    private var snapLocked = false
+
+    private func beginDrag() {
+        snapLocked = false
+        guard let screen = panel.screen ?? Self.screenUnderPointer else { return }
+        guides.show(on: screen, below: panel)
+        updateGuides(origin: panel.frame.origin, locked: false)
+    }
+
+    private func filterDrag(_ proposed: NSPoint) -> NSPoint {
+        let locked = hypot(proposed.x - baseOrigin.x, proposed.y - baseOrigin.y) <= Self.snapDistance
+        if locked && !snapLocked {
+            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        }
+        snapLocked = locked
+        let origin = locked ? baseOrigin : proposed
+        updateGuides(origin: origin, locked: locked)
+        return origin
+    }
+
+    private func updateGuides(origin: NSPoint, locked: Bool) {
+        let half = CGSize(width: panel.frame.width / 2, height: panel.frame.height / 2)
+        guides.update(guide: CGPoint(x: baseOrigin.x + half.width, y: baseOrigin.y + half.height),
+                      panelCenter: CGPoint(x: origin.x + half.width, y: origin.y + half.height),
+                      locked: locked)
+    }
+
+    private func endDrag() {
+        guides.hide()
         let dx = panel.frame.origin.x - baseOrigin.x, dy = panel.frame.origin.y - baseOrigin.y
-        guard hypot(dx, dy) <= Self.snapDistance, hypot(dx, dy) > 0.5 else { return }
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-        resetDragOffset()
+        if hypot(dx, dy) < 0.5 { UserDefaults.standard.removeObject(forKey: Self.dragKey) }  // locked: back to the default
+        snapLocked = false
     }
     static let snapDistance: CGFloat = 40
 
@@ -404,10 +505,10 @@ enum PanelPosition: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .center: "Center (slightly raised)"
-        case .bottomRight: "Bottom right"
-        case .topRight: "Top right"
-        case .bottomCenter: "Bottom center"
+        case .center: String(localized: "Center (slightly raised)")
+        case .bottomRight: String(localized: "Bottom right")
+        case .topRight: String(localized: "Top right")
+        case .bottomCenter: String(localized: "Bottom center")
         }
     }
     static let defaultsKey = "panel.position"

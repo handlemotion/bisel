@@ -94,7 +94,7 @@ struct CommandPanelView: View {
                 .accessibilityInputLabels([Text("Search logins"), Text("Search")])
                 .accessibilityIdentifier("panel.search")
         }
-        .padding(theme.spacing.m)
+        .padding(.horizontal, theme.spacing.l)
         .frame(height: theme.card.topBarHeight)
         // The whole bar is the drag handle (handled in CommandPanel.sendEvent); double-click empty space re-centers.
         .background {
@@ -176,7 +176,7 @@ struct CommandPanelView: View {
                     .accessibilityLabel(r.title)
                     .accessibilityValue(model.spokenDescription(ofResultAt: i))
                     .accessibilityAddTraits(i == model.selected ? [.isButton, .isSelected] : .isButton)
-                    .accessibilityInputLabels([Text(verbatim: r.title), Text(verbatim: r.domain)].filter { _ in true })
+                    .accessibilityInputLabels([r.title, r.domain].filter { !$0.isEmpty })
                     .accessibilityAction { model.selectResult(at: i) }
                     .accessibilityAction(named: Text("Copy password")) { model.activateResult(at: i, .plain) }
                     .accessibilityAction(named: Text("Copy username")) { model.activateResult(at: i, .shift) }
@@ -334,8 +334,6 @@ private struct DetailPane: View {
         }
         .padding(theme.spacing.l)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(model.selectedResult.map { Text("Details for \($0.title)") } ?? Text("Details"))
     }
 }
 
@@ -449,12 +447,49 @@ private struct ValueRow: View {
     @Environment(\.theme) private var theme
     @Environment(\.glassMode) private var glass
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityPreferences) private var a11y
+    private var reduceMotion: Bool { a11y.reduceMotion }
 
     var body: some View {
+        // The code's remaining time changes the spoken value; refresh it every 5 s, not per frame, so a focused
+        // VoiceOver cursor is not interrupted. Other rows never re-render for it.
+        if row == .otp {
+            TimelineView(.periodic(from: .now, by: 5)) { ctx in content(now: ctx.date) }
+        } else {
+            content(now: .now)
+        }
+    }
+
+    /// What VoiceOver reads after the row's name. Passwords are NEVER put in the accessibility tree (any assistive
+    /// client could read it), and the live one-time code is only spoken on request ("Read code" action).
+    private func spokenValue(now: Date) -> String {
+        if let flash = model.flashes[row] { return flash.text }
+        switch row {
+        case .username, .website: return model.displayValue(row, for: item)
+        case .password: return String(localized: "Hidden")
+        case .otp:
+            guard model.isOTPRevealed(for: item) else { return String(localized: "Hidden") }
+            let period = Double(max(model.otpPeriod(for: item), 1))
+            let left = Int((period - now.timeIntervalSince1970.truncatingRemainder(dividingBy: period)).rounded(.up))
+            let rounded = max(5, (left + 4) / 5 * 5)
+            return String(localized: "6 digits, about \(rounded) seconds left")
+        }
+    }
+
+    /// Voice Control names: "Click Password", "Click Copy password", …
+    private var inputLabels: [String] {
+        switch row {
+        case .otp: [row.spokenLabel, String(localized: "OTP"), String(localized: "Copy one-time code")]
+        case .username: [row.label, String(localized: "Copy username")]
+        case .password: [row.label, String(localized: "Copy password")]
+        case .website: [row.label, String(localized: "Copy website")]
+        }
+    }
+
+    private func content(now: Date) -> some View {
         let flash = model.flashes[row]
         let ok = flash.map { !$0.isError } ?? false
-        HStack(spacing: theme.spacing.m) {
+        return HStack(spacing: theme.spacing.m) {
             Text(row.label)
                 .font(theme.font(theme.fonts.value))
                 .foregroundStyle(theme.dimColor(theme.colors.valueLabel, glass: glass))
@@ -476,7 +511,7 @@ private struct ValueRow: View {
                         if ok {
                             Image(systemName: "checkmark")
                                 .foregroundStyle(theme.colors.success.color)
-                                .symbolEffect(.bounce, options: .speed(1.6), value: flash)
+                                .symbolEffect(.bounce, options: .speed(1.6), value: reduceMotion ? nil : flash)
                         }
                         Text(flash.text)
                             .foregroundStyle(flash.isError ? theme.colors.warning.color : theme.colors.text.color)
@@ -493,7 +528,14 @@ private struct ValueRow: View {
                        : (model.hoveredValue == row ? theme.hoverFill(glass: glass) : .clear))
         .animation(reduceMotion ? .easeOut(duration: 0.1) : .smooth(duration: 0.15), value: flash)
         .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(row.spokenLabel)
+        .accessibilityValue(spokenValue(now: now))
+        .accessibilityHint(row == .otp && !model.isOTPRevealed(for: item) ? Text("Touch ID reveals it") : Text("Activate to copy"))
+        .accessibilityAddTraits(.isButton)
+        .accessibilityInputLabels(inputLabels)
+        .accessibilityAction { model.activateValue(row) }
+        .accessibilityAction(named: Text("Read code aloud")) { model.speakOTP() }
         .accessibilityIdentifier("panel.value.\(row.rawValue)")
     }
 }
@@ -504,20 +546,40 @@ private struct ValueRow: View {
 private struct CountdownRing: View {
     let period: Int
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityPreferences) private var a11y
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.1)) { ctx in
+        // Reduce Motion: the ring steps once a second instead of draining continuously.
+        TimelineView(.periodic(from: .now, by: a11y.reduceMotion ? 1 : 0.1)) { ctx in
             let t = ctx.date.timeIntervalSince1970
             let remaining = 1 - t.truncatingRemainder(dividingBy: Double(period)) / Double(period)
-            ZStack {
-                Circle().stroke(theme.colors.ring.color, lineWidth: theme.card.ringStroke)
-                Circle().trim(from: 0, to: remaining)
-                    .stroke(tint(remaining), style: StrokeStyle(lineWidth: theme.card.ringStroke, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
+            let seconds = Int((remaining * Double(period)).rounded(.up))
+            // Differentiate Without Color: the state must not rest on green → red alone. Add the seconds as a number
+            // and switch the arc to a dashed stroke in the last quarter.
+            HStack(spacing: theme.spacing.xs) {
+                if a11y.differentiateWithoutColor {
+                    Text(verbatim: "\(seconds)")
+                        .font(theme.font(theme.fonts.caption, weight: .medium).monospacedDigit())
+                        .foregroundStyle(theme.colors.secondaryText.color)
+                }
+                ZStack {
+                    Circle().stroke(theme.colors.ring.color, lineWidth: theme.card.ringStroke)
+                    Circle().trim(from: 0, to: remaining)
+                        .stroke(tint(remaining), style: arcStyle(lowTime: remaining < 0.25))
+                        .rotationEffect(.degrees(-90))
+                }
+                .padding(theme.card.ringStroke / 2)
+                .frame(width: theme.card.ringSize, height: theme.card.ringSize)
             }
-            .padding(theme.card.ringStroke / 2)
-            .frame(width: theme.card.ringSize, height: theme.card.ringSize)
         }
+        .accessibilityHidden(true)  // the row's spoken value carries the remaining time
+    }
+
+    private func arcStyle(lowTime: Bool) -> StrokeStyle {
+        if a11y.differentiateWithoutColor && lowTime {
+            return StrokeStyle(lineWidth: theme.card.ringStroke, lineCap: .butt, dash: [2.2, 2.2])
+        }
+        return StrokeStyle(lineWidth: theme.card.ringStroke, lineCap: .round)
     }
 
     private func tint(_ f: Double) -> Color {

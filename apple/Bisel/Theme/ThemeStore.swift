@@ -40,7 +40,6 @@ final class ThemeStore {
         let app = NSApplication.shared
         systemIsDark = Self.isDark(app.effectiveAppearance)
         appearanceObservation = app.observe(\.effectiveAppearance, options: [.new]) { [weak self] app, _ in
-            nonisolated(unsafe) let app = app
             MainActor.assumeIsolated { self?.systemIsDark = Self.isDark(app.effectiveAppearance) }
         }
         reload()
