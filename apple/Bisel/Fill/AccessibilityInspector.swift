@@ -3,6 +3,11 @@ import ApplicationServices
 
 typealias FieldKind = SecretKind
 
+/// The classified element, kept so the fill engine can check focus has not moved before it types (security review M9).
+struct AXRef: @unchecked Sendable {
+    let element: AXUIElement
+}
+
 /// Value-type snapshot of the focused UI element of the frontmost app. Nothing here is a secret; label hints
 /// are used for inference only and are never logged.
 struct FocusedField: Sendable {
@@ -19,6 +24,7 @@ struct FocusedField: Sendable {
     var kind: FieldKind
     /// Whether the app is exposing a usable AX focus at all.
     var hasElement: Bool
+    var ref: AXRef? = nil
 
     var describe: String {
         "role=\(role ?? "nil") subrole=\(subrole ?? "nil") text=\(isTextInput) secure=\(isSecure) kind=\(kind.rawValue) terminal=\(isTerminal)"
@@ -72,7 +78,7 @@ enum AccessibilityInspector {
         AXUIElementSetMessagingTimeout(el, 0.5)
         let a = AXUIElementSetAttributeValue(el, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         let b = AXUIElementSetAttributeValue(el, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        Log.fill.notice("enabled Chromium AX for \(key, privacy: .public): manual=\(a.rawValue) enhanced=\(b.rawValue)")
+        Log.fill.notice("enabled Chromium AX for \(key): manual=\(a.rawValue) enhanced=\(b.rawValue)")
         return true
     }
 
@@ -149,7 +155,18 @@ enum AccessibilityInspector {
         }
         return FocusedField(pid: pid, bundleID: bundleID, role: role, subrole: subrole, isTextInput: textInput,
                             isSecure: secure, isClearlyNotText: notText && !textInput, isTerminal: terminal,
-                            kind: kind, hasElement: true)
+                            kind: kind, hasElement: true, ref: AXRef(element: el))
+    }
+
+    /// True while `field` is still what the user is looking at: the target app is frontmost and its focused element is the one that
+    /// was classified. Checked before every typed chunk; anything else (⌘-Tab, Spotlight, a notification, a focus change) aborts.
+    static func isStillFocused(_ field: FocusedField, target: NSRunningApplication) -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier,
+              let want = field.ref?.element else { return false }
+        let appEl = AXUIElementCreateApplication(target.processIdentifier)
+        AXUIElementSetMessagingTimeout(appEl, 0.3)
+        guard let now = element(appEl, kAXFocusedUIElementAttribute) else { return false }
+        return CFEqual(want, now)
     }
 
     /// Length of the focused element's AX value, if readable. Used only to confirm a keystroke delivery grew the

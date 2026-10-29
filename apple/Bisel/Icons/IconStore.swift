@@ -2,11 +2,17 @@ import AppKit
 import CryptoKit
 import ImageIO
 import Observation
+import Security
 import UniformTypeIdentifiers
 
 /// Site icons for result rows, fetched DIRECTLY from the site on this device. No third-party icon service ever
 /// sees a domain (SPEC.md §8 "Site icons"). Icons live only in this cache (Application Support/bisel/icons),
 /// never in the vault, never synced, never sent to the server.
+///
+/// OFF by default (opt-in, security review M13): every enabled lookup tells the network (DNS, SNI, source IP) which sites are in
+/// the vault. Hosts must pass `IconHostPolicy` (no IP literals / local names / non-443 ports; all resolved addresses public).
+/// The decoder only sees images of an allow-listed type with sane pixel dimensions (M11). Cache file names are an HMAC under a
+/// per-install key held in the Keychain (L8); without a Keychain (unsigned builds) icons are kept in memory only.
 ///
 /// Policy: HTTPS only; ephemeral session (no cookies, no cache, no credentials); no Referer; generic User-Agent;
 /// ≤3 redirects and only within the same registrable domain; HTML head capped at 64 KB, images at 256 KB; the
@@ -38,14 +44,25 @@ final class IconStore {
     }
 
     private init() {
-        UserDefaults.standard.register(defaults: [Self.enabledKey: true])
+        UserDefaults.standard.register(defaults: [Self.enabledKey: false])
+        // Icons used to be on by default. That was never a choice, so everyone starts from "off" once (review M13).
+        if !UserDefaults.standard.bool(forKey: "icons.optInMigrated") {
+            UserDefaults.standard.set(false, forKey: Self.enabledKey)
+            UserDefaults.standard.set(true, forKey: "icons.optInMigrated")
+        }
         enabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
         memory.countLimit = 400
     }
 
+    /// File/cache key: HMAC-SHA256 of the registrable domain under the per-install key, so a copy of the cache directory (backup,
+    /// disk image) cannot be tested for "does this vault contain mybank.com".
     nonisolated static func key(for domain: String) -> String {
-        SHA256.hash(data: Data(DomainName.registrable(domain).utf8)).map { String(format: "%02x", $0) }.joined()
+        let mac = HMAC<SHA256>.authenticationCode(for: Data(DomainName.registrable(domain).utf8), using: IconKey.shared.key)
+        return Data(mac).map { String(format: "%02x", $0) }.joined()
     }
+
+    /// Persist to disk only when the key itself survives restarts.
+    nonisolated static var canPersist: Bool { IconKey.shared.persistent }
 
     /// Instant lookup (memory, then disk). Never touches the network.
     func cached(_ domain: String) -> NSImage? {
@@ -53,7 +70,7 @@ final class IconStore {
         let k = Self.key(for: domain)
         if let img = memory.object(forKey: k as NSString) { return img }
         let file = Self.directory.appending(path: "\(k).png")
-        if let data = try? Data(contentsOf: file), let img = NSImage(data: data) {
+        if Self.canPersist, let data = try? Data(contentsOf: file), let img = NSImage(data: data) {
             memory.setObject(img, forKey: k as NSString)
             return img
         }
@@ -66,7 +83,7 @@ final class IconStore {
         if let img = cached(domain) { return img }
         let k = Self.key(for: domain)
         let neg = Self.directory.appending(path: "\(k).neg")
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: neg.path),
+        if Self.canPersist, let attrs = try? FileManager.default.attributesOfItem(atPath: neg.path),
            let mtime = attrs[.modificationDate] as? Date, Date().timeIntervalSince(mtime) < Self.negativeTTL {
             return nil
         }
@@ -88,15 +105,18 @@ final class IconStore {
 
     private func finish(domain: String, key k: String, png: Data?, cancelled: Bool) -> NSImage? {
         guard enabled else { return nil }
-        try? FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true)
+        let persist = Self.canPersist
+        if persist { try? FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true) }
         if let png, let img = NSImage(data: png) {
-            try? png.write(to: Self.directory.appending(path: "\(k).png"))
-            try? FileManager.default.removeItem(at: Self.directory.appending(path: "\(k).neg"))
+            if persist {
+                try? png.write(to: Self.directory.appending(path: "\(k).png"))
+                try? FileManager.default.removeItem(at: Self.directory.appending(path: "\(k).neg"))
+            }
             memory.setObject(img, forKey: k as NSString)
             loadedCount += 1
             return img
         }
-        if !cancelled {
+        if !cancelled && persist {
             // Negative cache: remember the failure for 7 days (file mtime is the timestamp; no domain inside).
             try? Data().write(to: Self.directory.appending(path: "\(k).neg"))
         }
@@ -136,6 +156,13 @@ enum IconFetcher {
     static let imageCap = 256 * 1024
     static let maxRedirects = 3
     static let outputPixels = 96
+    /// Largest image we agree to decode, per side and in total (M11). Real favicons are ≤ 512 px.
+    static let maxSide = 1024
+    static let maxPixels = 1_000_000
+    static let maxFrames = 16
+
+    /// remote address actually connected to, by task id (filled by the session delegate's metrics callback)
+    static let remote = RemoteAddresses()
 
     private static let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
@@ -156,15 +183,23 @@ enum IconFetcher {
     /// Returns a 96 px PNG for `host`'s icon, or nil.
     @concurrent
     static func fetchIcon(host: String) async -> Data? {
+        guard allowed(host: host, port: nil) else {
+            Log.icons.notice("icon fetch refused by host policy")
+            return nil
+        }
         let registrable = DomainName.registrable(host)
-        guard let origin = URL(string: "https://\(host)/") else { return nil }
+        var oc = URLComponents(); oc.scheme = "https"; oc.host = host; oc.path = "/"
+        guard let origin = oc.url else { return nil }
         var candidates: [URL] = []
         if let (html, finalURL) = await get(origin, accept: "text/html,*/*;q=0.5", cap: htmlCap, range: true),
            let text = String(data: html, encoding: .utf8) ?? String(data: html, encoding: .isoLatin1) {
-            candidates = iconLinks(in: text, base: finalURL).filter { DomainName.registrable($0.host() ?? "") == registrable }
+            candidates = iconLinks(in: text, base: finalURL).filter {
+                DomainName.registrable($0.host() ?? "") == registrable && allowed(host: $0.host() ?? "", port: $0.port)
+            }
         }
         // /favicon.ico ranks after sized <link rel=icon> candidates but before apple-touch-icon.
-        if let fav = URL(string: "https://\(host)/favicon.ico") {
+        var fc = URLComponents(); fc.scheme = "https"; fc.host = host; fc.path = "/favicon.ico"
+        if let fav = fc.url {
             let firstTouch = candidates.firstIndex { $0.absoluteString.lowercased().contains("apple-touch") } ?? candidates.count
             candidates.insert(fav, at: firstTouch)
         }
@@ -177,18 +212,23 @@ enum IconFetcher {
     }
 
     /// Reads at most `cap` bytes. Returns the data and the final URL after (policy-checked) redirects.
+    nonisolated static func allowed(host: String, port: Int?) -> Bool {
+        IconHostPolicy.acceptable(host: host, port: port) && IconHostPolicy.resolvesToPublicAddressesOnly(host)
+    }
+
     private static func get(_ url: URL, accept: String, cap: Int, range: Bool) async -> (Data, URL)? {
-        guard url.scheme == "https" else { return nil }
+        guard url.scheme == "https", allowed(host: url.host() ?? "", port: url.port) else { return nil }
         var req = URLRequest(url: url)
         req.httpShouldHandleCookies = false
         req.setValue(accept, forHTTPHeaderField: "Accept")
         req.setValue(nil, forHTTPHeaderField: "Referer")
         if range { req.setValue("bytes=0-\(cap - 1)", forHTTPHeaderField: "Range") }
         #if DEBUG
-        Log.icons.debug("ICONFETCH \(url.host() ?? "?", privacy: .public)\(url.path(), privacy: .public)")
+        Log.icons.debug("ICONFETCH \(url.host() ?? "?")\(url.path())")
         #endif
         do {
             let (bytes, resp) = try await session.bytes(for: req)
+            defer { remote.forget(bytes.task.taskIdentifier) }
             guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
             if resp.expectedContentLength > Int64(cap), !range { return nil }
             var data = Data()
@@ -196,6 +236,8 @@ enum IconFetcher {
                 data.append(b)
                 if data.count >= cap { if range { break } else { return nil } }
             }
+            // The address we really connected to must be public too (DNS can change between the check and the connect).
+            if let addr = remote.address(for: bytes.task.taskIdentifier), !IconHostPolicy.isPublic(addressString: addr) { return nil }
             return (data, resp.url ?? url)
         } catch { return nil }
     }
@@ -230,14 +272,19 @@ enum IconFetcher {
     }
 
     /// Must decode as an image (ImageIO); picks the frame nearest the output size and re-encodes a 96 px PNG.
-    private static func normalize(_ data: Data) -> Data? {
+    static func normalize(_ data: Data) -> Data? {
         guard data.count >= 32, let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        // Allow-listed container types only: ImageIO's rarer decoders (WebP, TIFF, JPEG 2000, RAW…) are recurring CVE surface.
+        guard let type = CGImageSourceGetType(src).flatMap({ UTType($0 as String) }),
+              [UTType.png, .jpeg, .gif, .ico].contains(where: { type.conforms(to: $0) }) else { return nil }
         let count = CGImageSourceGetCount(src)
-        guard count > 0 else { return nil }
+        guard count > 0, count <= maxFrames else { return nil }
         var best = 0, bestDelta = Int.max
         for i in 0..<count {
+            // Dimensions come from the headers: reject before any pixel is decoded (a 194 KB PNG can declare 40000 × 40000).
             guard let props = CGImageSourceCopyPropertiesAtIndex(src, i, nil) as? [CFString: Any],
-                  let w = props[kCGImagePropertyPixelWidth] as? Int else { continue }
+                  let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int,
+                  w > 0, h > 0, w <= maxSide, h <= maxSide, w * h <= maxPixels else { return nil }
             let d = abs(w - outputPixels)
             if d < bestDelta { best = i; bestDelta = d }
         }
@@ -312,7 +359,8 @@ private final class RedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked
         lock.withLock { counts[task.taskIdentifier] = n }
         guard n <= IconFetcher.maxRedirects, let new = request.url, new.scheme == "https",
               let from = task.originalRequest?.url?.host(), let to = new.host(),
-              DomainName.registrable(from) == DomainName.registrable(to) else {
+              DomainName.registrable(from) == DomainName.registrable(to),
+              IconFetcher.allowed(host: to, port: new.port) else {
             completionHandler(nil)  // deliver the redirect response itself; it is not 2xx, so the fetch fails
             return
         }
@@ -321,7 +369,44 @@ private final class RedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked
         completionHandler(r)
     }
 
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        if let addr = metrics.transactionMetrics.last?.remoteAddress { IconFetcher.remote.set(addr, for: task.taskIdentifier) }
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         lock.withLock { _ = counts.removeValue(forKey: task.taskIdentifier) }
+    }
+}
+
+/// Remote address of each finished task, for the "connected to a public address" check.
+final class RemoteAddresses: @unchecked Sendable {
+    private let lock = NSLock()
+    private var table: [Int: String] = [:]
+    func set(_ a: String, for id: Int) { lock.withLock { table[id] = a } }
+    func address(for id: Int) -> String? { lock.withLock { table[id] } }
+    func forget(_ id: Int) { lock.withLock { _ = table.removeValue(forKey: id) } }
+}
+
+/// Per-install random key for the icon cache names. Lives in the Keychain (data-protection keychain; needs a signed build).
+/// If that is unavailable the key is memory-only and nothing is written to disk.
+final class IconKey: @unchecked Sendable {
+    static let shared = IconKey()
+    let key: SymmetricKey
+    let persistent: Bool
+
+    private init() {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "app.bisel.mac.icon-cache",
+                                    kSecAttrAccount as String: "hmac-key", kSecUseDataProtectionKeychain as String: true]
+        var found: CFTypeRef?
+        if SecItemCopyMatching(query.merging([kSecReturnData as String: true]) { $1 } as CFDictionary, &found) == errSecSuccess,
+           let d = found as? Data, d.count == 32 {
+            key = SymmetricKey(data: d); persistent = true; return
+        }
+        let fresh = SymmetricKey(size: .bits256)
+        let data = fresh.withUnsafeBytes { Data($0) }
+        let add = query.merging([kSecValueData as String: data, kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]) { $1 }
+        let status = SecItemAdd(add as CFDictionary, nil)
+        key = fresh; persistent = status == errSecSuccess
+        if !persistent { Log.icons.notice("icon cache key not stored (keychain status \(status)): icons stay in memory this run") }
     }
 }

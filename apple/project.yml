@@ -30,12 +30,16 @@ settings:
     OTHER_CODE_SIGN_FLAGS: "--options=runtime"
   configs:
     Debug:
+      ENABLE_USER_SCRIPT_SANDBOXING: NO   # the Debug-only ATS phase edits the built Info.plist
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG BISEL_DEV_FIXTURE"
       # The preview debug dylib is ad-hoc signed separately and fails hardened-runtime library validation
       # (different "team"), so the app would not launch. Link everything into the executable instead.
       ENABLE_DEBUG_DYLIB: NO
     Release:
       SWIFT_COMPILATION_MODE: wholemodule
+      # Xcode otherwise injects com.apple.security.get-task-allow into ad-hoc / development signed builds, which lets any
+      # same-user process attach to the app and read VK (security review H4). The gate below fails the build if it is there.
+      CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
 
 packages:
   KeyboardShortcuts:
@@ -72,6 +76,22 @@ targets:
       - package: SwiftCSV
       - package: BiselCore
         product: BiselCore
+    postBuildScripts:
+      - name: "Release gate: no get-task-allow"
+        basedOnDependencyAnalysis: false
+        shell: /bin/bash
+        script: |
+          if [ "$CONFIGURATION" = "Debug" ]; then
+            /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity" "$TARGET_BUILD_DIR/$INFOPLIST_PATH" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" -c "Add :NSAppTransportSecurity:NSAllowsLocalNetworking bool true" "$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+          fi
+          if [ "$CONFIGURATION" = "Release" ]; then
+            xcent="$TARGET_TEMP_DIR/$PRODUCT_NAME.app.xcent"
+            if [ -f "$xcent" ] && grep -q "get-task-allow" "$xcent"; then
+              echo "error: get-task-allow is in the Release entitlements ($xcent). A debugger could read the vault key." >&2
+              exit 1
+            fi
+          fi
     entitlements:
       path: Bisel/Bisel.entitlements
       # Deliberately NO com.apple.security.app-sandbox: Accessibility fill needs an
@@ -90,6 +110,8 @@ targets:
         NSHumanReadableCopyright: "Personal use."
         NSAppleEventsUsageDescription: "Bisel does not script other apps."
         NSFaceIDUsageDescription: "Bisel uses Touch ID to unlock your vault."
+        # No ATS exception here: Release is https-only. Debug builds get NSAllowsLocalNetworking from the build phase below so the
+        # local dev server (http://localhost) works (security review L13).
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.bisel.mac
@@ -133,6 +155,9 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: app.bisel.mac.uitests
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: Bisel
+        # The ad-hoc signed test bundle must load into Xcode's runner: no hardened runtime / library validation here.
+        ENABLE_HARDENED_RUNTIME: NO
+        OTHER_CODE_SIGN_FLAGS: ""
 
 schemes:
   Bisel:

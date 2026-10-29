@@ -47,6 +47,25 @@ final class FillEngine {
         return await Self.perform(plan, target: target, fetch: fetch)
     }
 
+    /// Why this field must not receive this kind of secret (security review M9), or nil. A password goes only into a secure field
+    /// (macOS then also turns on secure event input) or, when the user forced it from ⌘K, into any field, but never into a terminal
+    /// unless secure input is on (shell history, `sudo` prompts).
+    nonisolated static func refusal(for kind: SecretKind, in field: FocusedField, forced: Bool) -> String? {
+        guard kind == .password else { return nil }
+        guard field.ref != nil else { return "Can't verify the focused field in this app, so the password was not typed" }
+        if field.isTerminal && !IsSecureEventInputEnabled() {
+            return "This terminal isn't in secure input mode, so the password was not typed"
+        }
+        if !field.isSecure && !forced { return "That isn't a password field. Use ⌘K → Fill password to type it anyway" }
+        return nil
+    }
+
+    /// Asked before each typed chunk: the target is still frontmost and focus is still on the element that was classified.
+    private nonisolated static func stillThere(_ field: FocusedField, _ target: NSRunningApplication) -> Bool {
+        if field.ref == nil { return NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier }
+        return AccessibilityInspector.isStillFocused(field, target: target)
+    }
+
     @concurrent
     private static func perform(_ plan: FillPlan, target: NSRunningApplication, fetch: SecretFetch) async -> FillOutcome {
         await KeyEventTyper.waitForModifierRelease()
@@ -61,43 +80,49 @@ final class FillEngine {
             try? await Task.sleep(for: .milliseconds(120))
             field = AccessibilityInspector.focusedField(of: target)
         }
-        Log.fill.notice("target \(target.bundleIdentifier ?? "?", privacy: .public): \(field.describe, privacy: .public) secureInput=\(IsSecureEventInputEnabled())")
+        Log.fill.notice("target \(target.bundleIdentifier ?? "?"): \(field.describe) secureInput=\(IsSecureEventInputEnabled())")
         if field.isClearlyNotText {
             return .notATextField("Focus is on a \(field.role ?? "control"), not a text field")
         }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier else {
+            return .failed("The app you were in is no longer in front, nothing was typed")
+        }
 
         let method = field.bundleID.flatMap { preferredMethod[$0] } ?? .keyEvents
+        let stopped = FillOutcome.failed("Focus moved while filling, typing stopped")
         do {
             switch plan {
-            case .auto:
-                let value = try await fetch(field.kind)
-                let used = await deliver(value, field: field, target: target, method: method)
-                return .filled("Filled \(field.kind.rawValue) (\(used.rawValue))")
-            case .explicit(let kind):
+            case .auto, .explicit:
+                let kind: SecretKind, forced: Bool
+                if case .explicit(let k) = plan { kind = k; forced = true } else { kind = field.kind; forced = false }
+                if let why = refusal(for: kind, in: field, forced: forced) { return .failed(why) }
                 let value = try await fetch(kind)
-                let used = await deliver(value, field: field, target: target, method: method)
-                return .filled("Filled \(kind.rawValue) (\(used.rawValue))")
+                guard await deliver(value, field: field, target: target, method: method) != nil else { return stopped }
+                return .filled("Filled \(kind.rawValue)")
             case .userTabPassword:
                 let user = try await fetch(.username)
-                _ = await deliver(user, field: field, target: target, method: method)
+                guard await deliver(user, field: field, target: target, method: method) != nil else { return stopped }
                 try? await Task.sleep(for: .milliseconds(60))
+                guard stillThere(field, target) else { return stopped }
                 KeyEventTyper.press(KeyEventTyper.tabKey)
                 try? await Task.sleep(for: .milliseconds(180))
-                // After Tab the focus moved: re-read it so verification looks at the password field.
+                // After Tab the focus moved: re-read it. The password only goes into a secure field (never read before that).
                 let next = AccessibilityInspector.focusedField(of: target)
+                if let why = refusal(for: .password, in: next, forced: false) { return .failed("Username typed. " + why) }
                 let pass = try await fetch(.password)
-                let used = await deliver(pass, field: next, target: target, method: method)
-                return .filled("Filled username, Tab, password (\(used.rawValue))")
+                guard await deliver(pass, field: next, target: target, method: method) != nil else { return stopped }
+                return .filled("Filled username, Tab, password")
             }
         } catch {
             return .failed(error.localizedDescription)
         }
     }
 
-    /// Delivers one value; returns the method that actually carried it.
+    /// Delivers one value; returns the method that actually carried it, or nil if it was stopped because focus moved.
     @concurrent
-    private static func deliver(_ text: String, field: FocusedField, target: NSRunningApplication, method: DeliveryMethod) async -> DeliveryMethod {
+    private static func deliver(_ text: String, field: FocusedField, target: NSRunningApplication, method: DeliveryMethod) async -> DeliveryMethod? {
         if method == .paste {
+            guard stillThere(field, target) else { return nil }
             await pasteTemporarily(text)
             return .paste
         }
@@ -105,15 +130,19 @@ final class FillEngine {
         // and only when the value is readable before and after.
         let canVerify = field.isTextInput && !field.isTerminal && !text.isEmpty
         let before = canVerify ? AccessibilityInspector.focusedValueLength(of: target) : nil
-        KeyEventTyper.type(text)
+        guard KeyEventTyper.type(text, proceed: { stillThere(field, target) }) else { return nil }
         guard canVerify, let before else { return .keyEvents }
-        try? await Task.sleep(for: .milliseconds(120))
-        if let after = AccessibilityInspector.focusedValueLength(of: target), after == before {
-            Log.fill.notice("key events did not change the field value; falling back to paste")
-            await pasteTemporarily(text)
-            return .paste
+        // The AX value can lag the keystrokes. Wait for it, and fall back to paste only if it is readable and truly unchanged
+        // after 500 ms (never when it merely can't be read, so a slow app can't receive the secret twice).
+        for _ in 0..<10 {
+            try? await Task.sleep(for: .milliseconds(50))
+            guard let after = AccessibilityInspector.focusedValueLength(of: target) else { return .keyEvents }
+            if after != before { return .keyEvents }
         }
-        return .keyEvents
+        guard stillThere(field, target) else { return nil }
+        Log.fill.notice("key events did not change the field value; falling back to paste")
+        await pasteTemporarily(text)
+        return .paste
     }
 
     @concurrent

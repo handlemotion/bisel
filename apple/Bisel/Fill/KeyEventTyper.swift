@@ -24,9 +24,14 @@ enum KeyEventTyper {
         }
     }
 
-    /// Types `text` character by character. `\t` and `\n` become real Tab/Return key presses.
-    static func type(_ text: String, interKeyDelay: useconds_t = 2_000) {
+    /// Types `text` character by character. `\t` and `\n` become real Tab/Return key presses. `proceed` is asked before the
+    /// first character and then every `chunk` characters; when it says no, typing stops. Returns false if it was stopped.
+    @discardableResult
+    static func type(_ text: String, interKeyDelay: useconds_t = 2_000, chunk: Int = 6, proceed: () -> Bool = { true }) -> Bool {
+        var n = 0
         for ch in text {
+            if n % chunk == 0, !proceed() { return false }
+            n += 1
             switch ch {
             case "\t": press(tabKey)
             case "\n", "\r", "\r\n": press(returnKey)
@@ -34,6 +39,7 @@ enum KeyEventTyper {
             }
             usleep(interKeyDelay)
         }
+        return true
     }
 
     static func press(_ key: CGKeyCode, flags: CGEventFlags = []) {

@@ -1,42 +1,88 @@
 import KeyboardShortcuts
 import SwiftUI
+import BiselCore
 
 struct MainWindowView: View {
     enum Section: String, CaseIterable, Identifiable {
-        case vault = "Vault", settings = "Settings"
+        case vault = "Vault", generator = "Generator", devices = "Devices", importer = "Import", settings = "Settings"
         var id: String { rawValue }
-        var symbol: String { self == .vault ? "key.fill" : "gearshape" }
+        var symbol: String {
+            switch self {
+            case .vault: "key.fill"; case .generator: "wand.and.stars"; case .devices: "laptopcomputer.and.iphone"
+            case .importer: "square.and.arrow.down"; case .settings: "gearshape"
+            }
+        }
     }
 
+    private let service = AppModel.shared.service
     @State private var section: Section? = .vault
     @Environment(\.theme) private var theme
 
     var body: some View {
-        NavigationSplitView {
-            List(Section.allCases, selection: $section) { s in
-                Label(s.rawValue, systemImage: s.symbol).tag(s)
-            }
-            .navigationSplitViewColumnWidth(min: 160, ideal: 180)
-        } detail: {
-            switch section ?? .vault {
-            case .vault: VaultPlaceholder()
-            case .settings: SettingsView()
+        Group {
+            if let e = service.startupError {
+                ContentUnavailableView("Bisel can't start", systemImage: "exclamationmark.triangle", description: Text(e))
+            } else if usesFixture {
+                fixtureNotice
+            } else if service.phase == .needsSetup {
+                SetupView(service: service)
+            } else if let phrase = service.pendingPhrase {
+                PhraseGateView(service: service, phrase: phrase) { service.confirmPhraseStored() }
+            } else if service.phase == .locked {
+                LockedView(service: service)
+            } else {
+                unlocked
             }
         }
-        .frame(minWidth: 760, minHeight: 480)
-        .navigationTitle(AppModel.shared.vault.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel")
-        .foregroundStyle(theme.colors.text.color)
+        .frame(minWidth: 820, minHeight: 540)
+        .themedPage(theme)
+        .background(WindowAccessor { w in
+            // Always hidden while a recovery phrase can be on screen (set-up entry, the one-time display).
+            w.sharingType = (PanelCapture.hidden || service.pendingPhrase != nil || service.phase == .needsSetup) ? .none : .readOnly
+            w.isRestorable = false
+        })
+        .navigationTitle(service.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel")
     }
-}
 
-private struct VaultPlaceholder: View {
-    @Environment(\.theme) private var theme
+    private var usesFixture: Bool {
+        #if BISEL_DEV_FIXTURE
+        BiselEnvironment.useDevFixture
+        #else
+        false
+        #endif
+    }
 
-    var body: some View {
-        ContentUnavailableView {
-            Label("Vault UI comes with BiselCore", systemImage: "lock.shield")
-        } description: {
-            Text("The command panel (\(AppModel.shared.vault.provenanceLabel ?? "vault")) and the fill engine are live. Item list, editing, devices, recovery and import land with the vault.")
+    private var fixtureNotice: some View {
+        ContentUnavailableView("Dev fixture is active", systemImage: "testtube.2",
+                               description: Text("This run uses the fake panel fixture. Start without it to use the real vault."))
+    }
+
+    private var unlocked: some View {
+        NavigationSplitView {
+            List(Section.allCases, selection: $section) { s in
+                Label(s.rawValue, systemImage: s.symbol).tag(s).accessibilityIdentifier("nav-\(s.rawValue)")
+            }
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190)
+            .safeAreaInset(edge: .bottom) {
+                VStack(alignment: .leading, spacing: theme.spacing.s) {
+                    SyncStatusView(service: service)
+                    Button("Lock", systemImage: "lock") { service.lock(reason: "manual") }
+                        .buttonStyle(.borderless).accessibilityIdentifier("lock-button")
+                }
+                .padding(theme.spacing.m)
+            }
+        } detail: {
+            switch section ?? .vault {
+            case .vault: VaultBrowser(service: service)
+            case .generator:
+                ScrollView { VStack(alignment: .leading) {
+                    Text("Password generator").font(theme.font(theme.fonts.title, weight: .semibold)).padding(.bottom, theme.spacing.m)
+                    GeneratorView().frame(maxWidth: 420)
+                }.padding(theme.spacing.l).frame(maxWidth: .infinity, alignment: .leading) }
+            case .devices: DevicesView(service: service)
+            case .importer: ImportView(service: service)
+            case .settings: SettingsView()
+            }
         }
     }
 }
@@ -50,9 +96,37 @@ struct SettingsView: View {
     @State private var hideFromCapture = PanelCapture.hidden
     @State private var strict = SecuritySettings.requireTouchID
     @State private var closeAfterCopy = CommandPanelModel.closeAfterCopy
+    @State private var fillWindow = VaultService.fillWindowMinutes
+    @State private var idleLock = VaultService.idleLockMinutes
+    @State private var phraseSheet: RecoveryPhrase?
+    @State private var vaultMessage: String?
+    private let service = AppModel.shared.service
 
     var body: some View {
         Form {
+            Section("Vault") {
+                LabeledContent("Server") { Text(service.serverURL?.absoluteString ?? "—").textSelection(.enabled) }
+                LabeledContent("This device") { Text(service.deviceName) }
+                LabeledContent("Keys") { Text(BiselEnvironment.usesSoftwareKeys ? "Software (debug build, not secure)" : "Secure Enclave") }
+                Picker("Keep unlocked for", selection: $fillWindow) {
+                    ForEach([1, 2, 5, 10, 15, 30], id: \.self) { Text("\($0) min").tag($0) }
+                }
+                .onChange(of: fillWindow) { _, v in UserDefaults.standard.set(v, forKey: VaultService.fillWindowKey) }
+                Picker("Lock after idle", selection: $idleLock) {
+                    ForEach([1, 2, 5, 10, 15, 30], id: \.self) { Text("\($0) min").tag($0) }
+                }
+                .onChange(of: idleLock) { _, v in UserDefaults.standard.set(v, forKey: VaultService.idleLockKey) }
+                Text("The vault also locks on sleep, screen lock and fast user switching.").font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Backup and recovery") {
+                HStack {
+                    Button("Export backup…") { exportBackup() }.accessibilityIdentifier("settings-export")
+                    Button("New recovery phrase…") { newPhrase() }.accessibilityIdentifier("settings-new-phrase")
+                }
+                if let vaultMessage { Text(vaultMessage).font(.caption).foregroundStyle(.secondary) }
+                Text("A backup holds the encrypted items and the recovery envelope. Only the recovery phrase opens it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Command panel") {
                 KeyboardShortcuts.Recorder("Global shortcut", name: .commandPanel)
                 Picker("Position", selection: $position) {
@@ -79,7 +153,7 @@ struct SettingsView: View {
             }
             Section("Site icons") {
                 Toggle("Load site icons", isOn: $icons.enabled)
-                Text("Icons are fetched directly from each site (HTTPS, no cookies, no third-party service) and cached on this Mac only.")
+                Text("Off by default. When on, Bisel contacts each site in your vault to fetch its icon, so your network and DNS provider can see which sites you use. Icons come straight from the site (HTTPS, public addresses only, no cookies, no third-party service) and are cached on this Mac only.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Text(icons.cacheSizeDescription).foregroundStyle(.secondary)
@@ -118,5 +192,39 @@ struct SettingsView: View {
         .onAppear { accessibility.start() }
         .onDisappear { accessibility.stop() }
         .navigationTitle("Settings")
+        .sheet(item: Binding(get: { phraseSheet.map { PhraseBox(phrase: $0) } }, set: { if $0 == nil { phraseSheet = nil } })) { box in
+            PhraseGateView(service: service, phrase: box.phrase, title: "Your new recovery phrase") { phraseSheet = nil; service.confirmPhraseStored() }
+                .frame(width: 640, height: 520).themedPage(ThemeStore.shared.current).hiddenFromCapture(force: true)
+        }
+    }
+
+    private struct PhraseBox: Identifiable { let phrase: RecoveryPhrase; var id: String { phrase.text } }
+
+    private func exportBackup() {
+        #if DEBUG
+        if let path = ProcessInfo.processInfo.environment["BISEL_DEV_EXPORT_PATH"] {   // flow tests: no out-of-process save panel
+            Task {
+                do { try await service.exportBackup(to: URL(fileURLWithPath: path)); vaultMessage = "Backup written to \(URL(fileURLWithPath: path).lastPathComponent)" }
+                catch { vaultMessage = describe(error) }
+            }
+            return
+        }
+        #endif
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "bisel-\(Date().formatted(.iso8601.year().month().day())).bisel-backup"
+        panel.title = "Export backup"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task {
+            do { try await service.exportBackup(to: url); vaultMessage = "Backup written to \(url.lastPathComponent)" }
+            catch { vaultMessage = describe(error) }
+        }
+    }
+
+    private func newPhrase() {
+        Task {
+            do { phraseSheet = try await service.rotateRecovery(); vaultMessage = "The old phrase no longer works." }
+            catch KeyStoreError.userCancelled { vaultMessage = "Cancelled" }
+            catch { vaultMessage = describe(error) }
+        }
     }
 }

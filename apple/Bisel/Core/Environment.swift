@@ -48,7 +48,7 @@ enum BiselEnvironment {
 /// fallback) to BiselCore's gate protocol, so edit / delete / revoke inside the core ask for Touch ID.
 struct AppGate: BiselKeyStore.BiometricGate {
     func authenticate(reason: String) async throws {
-        do { try await BiometricGate.authenticate(reason: reason) }
+        do { try await BiometricGate.authenticate(reason: reason, grantsCredit: false) }
         catch BiometricGate.Failure.denied { throw KeyStoreError.userCancelled }
         catch { throw KeyStoreError.failed(error.localizedDescription) }
     }

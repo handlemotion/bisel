@@ -7,8 +7,12 @@ struct BiselApp: App {
     @State private var themes = ThemeStore.shared
 
     var body: some Scene {
-        MenuBarExtra("Bisel", systemImage: "lock.shield.fill") {
+        MenuBarExtra {
             MenuBarContent()
+        } label: {
+            // The label exists from launch (menu content only exists once opened), so it can hand non-view code the
+            // `openWindow` action in time for the first-run set-up window.
+            Image(systemName: "lock.shield.fill").modifier(OpenWindowBridge())
         }
 
         Window("Bisel", id: "main") {
@@ -48,6 +52,8 @@ private struct MenuBarContent: View {
             AppModel.shared.openMainWindow = { openWindow(id: "main") }
             AppModel.shared.showMainWindow()
         }
+        Button("Sync Now") { Task { await AppModel.shared.service.sync(reason: "menu") } }
+        Button("Lock") { AppModel.shared.service.lock(reason: "menu") }
         Divider()
         Button("Accessibility Setup…") { AppModel.shared.onboarding.show() }
         Button("Reload Themes") { ThemeStore.shared.reload() }

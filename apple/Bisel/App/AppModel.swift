@@ -1,14 +1,17 @@
 import AppKit
+import KeyboardShortcuts
 import SwiftUI
+import BiselCore
 
-/// Composition root. Today the vault is the dev fixture (Debug) or a permanently locked stub (Release);
-/// BiselCore's vault replaces `vault` when it lands.
+/// Composition root. The panel is backed by `VaultService` (BiselCore's `Vault` actor); a Debug build can swap in
+/// the fake dev fixture with `BISEL_DEV_FIXTURE=1` (never compiled into Release).
 @MainActor
 final class AppModel {
     static let shared = AppModel()
 
-    typealias Vault = VaultSearchSource & VaultSecretProvider
-    let vault: any Vault
+    typealias PanelVault = VaultSearchSource & VaultSecretProvider
+    let service = VaultService()
+    let vault: any PanelVault
     let panelModel: CommandPanelModel
     let panelController: CommandPanelController
     let accessibility = AccessibilityMonitor()
@@ -19,26 +22,62 @@ final class AppModel {
 
     private init() {
         #if BISEL_DEV_FIXTURE
-        vault = DevFixtureVault()
+        vault = BiselEnvironment.useDevFixture ? DevFixtureVault() : service
         #else
-        vault = LockedVault()
+        vault = service
         #endif
         panelModel = CommandPanelModel(source: vault, secrets: vault)
         panelController = CommandPanelController(model: panelModel)
         wirePanelActions()
+        #if DEBUG
+        // Scripted flow runs (BISEL_DEV_FLOW) must not grab the global hotkey or open windows on someone's screen.
+        if ProcessInfo.processInfo.environment["BISEL_DEV_FLOW"] != nil { KeyboardShortcuts.disable(.commandPanel) }
+        #endif
     }
 
     func start() {
         Log.app.notice("bisel started; accessibility trusted=\(AccessibilityInspector.isTrusted())")
-        if !AccessibilityInspector.isTrusted() { onboarding.show() }
+        service.onLockStateChange = { [weak self] in self?.panelModel.refresh() }
+        Task {
+            await service.start()
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["BISEL_DEV_AUTOUNLOCK"] == "1", service.phase == .locked {
+                Log.app.fault("BISEL_DEV_AUTOUNLOCK=1 (debug build only)")
+                try? await service.unlock(reason: "dev autounlock")
+            }
+            #endif
+            // First launch: the main window is where set-up happens. Accessibility onboarding follows once a vault exists.
+            if isScriptedFlow { return }
+            if service.phase == .needsSetup && !BiselEnvironment.useDevFixture { showMainWindow() }
+            else if !AccessibilityInspector.isTrusted() { onboarding.show() }
+        }
+        // Panel opened → sync (SPEC §6: on panel open).
+        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] note in
+            guard note.object is CommandPanel else { return }
+            MainActor.assumeIsolated { if let self, self.service.isUnlocked { Task { await self.service.sync(reason: "panel") } } }
+        }
         #if DEBUG
+        DebugTools.installSnapshotListener()
+        DebugFlow.runIfRequested()
         DebugTools.runAutopilotIfRequested()
         #endif
     }
 
     func showMainWindow() {
-        openMainWindow?()
-        NSApp.activate()
+        Task {
+            // `openMainWindow` is installed by the menu-bar label a moment after launch.
+            for _ in 0..<20 where openMainWindow == nil { try? await Task.sleep(for: .milliseconds(150)) }
+            openMainWindow?()
+            NSApp.activate()
+        }
+    }
+
+    private var isScriptedFlow: Bool {
+        #if DEBUG
+        ProcessInfo.processInfo.environment["BISEL_DEV_FLOW"] != nil
+        #else
+        false
+        #endif
     }
 
     func terminate() { SecureClipboard.shared.clearOnTerminate() }
@@ -46,10 +85,7 @@ final class AppModel {
     // MARK: panel actions
 
     private func wirePanelActions() {
-        panelModel.runUnlock = { [weak self] in
-            self?.panelController.hide()
-            self?.showMainWindow()
-        }
+        panelModel.runUnlock = { [weak self] in self?.unlockFromPanel() }
 
         panelModel.runClose = { [weak self] in self?.panelController.hide("api") }
 
@@ -65,9 +101,6 @@ final class AppModel {
             let id = item.id
             Task {
                 let outcome = await FillEngine.shared.fill(plan, into: target) { kind in
-                    if SecuritySettings.requireTouchID && kind.requiresFreshBiometricWhenFilled() {
-                        try await BiometricGate.authenticate(reason: "Fill a one-time code")
-                    }
                     return try await vault.secret(kind, for: id)
                 }
                 self.finish(outcome, itemID: id)
@@ -82,9 +115,6 @@ final class AppModel {
             let what = kind == .totp ? "One-time code" : kind.rawValue.capitalized
             Task {
                 do {
-                    if SecuritySettings.requireTouchID && kind.requiresFreshBiometricWhenCopied() {
-                        try await BiometricGate.authenticate(reason: "Copy \(what.lowercased())")
-                    }
                     let value = try await vault.secret(kind, for: item.id)
                     SecureClipboard.shared.copySecret(value)
                     vault.recordUse(id: item.id)
@@ -106,7 +136,26 @@ final class AppModel {
         panelModel.runOpenURL = { [weak self] item in
             guard let self else { return }
             panelController.hide()
-            if let url = vault.url(for: item.id) { NSWorkspace.shared.open(url) }
+            if let url = vault.url(for: item.id) {
+                if let why = URLPolicy.openWithPolicy(url.absoluteString) { Toast.shared.show(why, isError: true) }
+            } else {
+                Toast.shared.show("This item has no web address that can be opened", isError: true)
+            }
+        }
+    }
+
+    /// Touch ID right in the panel; with no vault on this Mac yet, send the user to set-up in the main window.
+    private func unlockFromPanel() {
+        guard service.phase != .needsSetup else {
+            panelController.hide()
+            showMainWindow()
+            return
+        }
+        Task {
+            do { try await service.unlock(reason: "Unlock bisel to use the command panel") }
+            catch KeyStoreError.userCancelled {}
+            catch BiometricGate.Failure.denied {}
+            catch { Toast.shared.show(describe(error), isError: true) }
         }
     }
 
@@ -114,7 +163,7 @@ final class AppModel {
         switch outcome {
         case .filled(let text):
             vault.recordUse(id: itemID)
-            Log.fill.notice("\(text, privacy: .public)")
+            Log.fill.notice("\(text)")
         case .needsAccessibility:
             onboarding.show()
         case .notATextField(let why):

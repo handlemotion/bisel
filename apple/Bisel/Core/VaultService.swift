@@ -66,6 +66,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     @ObservationIgnored private var rowsByID: [String: ItemRow] = [:]
     @ObservationIgnored private var pollTimer: Timer?
     @ObservationIgnored private var syncing = false
+    @ObservationIgnored private var syncChain: Task<Void, Never>?
+    @ObservationIgnored private var otpGatedAt: [String: ContinuousClock.Instant] = [:]
     @ObservationIgnored private var lockMonitor: LockMonitor?
     /// Called on lock/unlock so the panel can redraw.
     @ObservationIgnored var onLockStateChange: (() -> Void)?
@@ -85,7 +87,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
                                     fillWindow: 30 * 60, deviceKind: "mac"))
         } catch {
             startupError = "Could not open the local vault store: \(error.localizedDescription)"
-            Log.app.error("vault init failed: \(error.localizedDescription, privacy: .public)")
+            Log.app.error("vault init failed: \(error.localizedDescription)")
         }
     }
 
@@ -138,21 +140,23 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         setPhase(.unlocked)
         await reload()
         Task { await sync(reason: "unlock") }
+        await resumeUnconfirmedRecovery()
     }
 
     /// Zeroes VK (inside the core) and drops every decrypted/derived thing the app holds.
     func lock(reason: String) {
         guard phase == .unlocked else { return }
-        Log.app.notice("locking: \(reason, privacy: .public)")
+        Log.app.notice("locking: \(reason)")
         setPhase(.locked)
         Task { await vault?.lock() }
         // Lock the core synchronously enough: a second call below is idempotent.
     }
 
     private func dropDecryptedState() {
-        rows = []; rowsByID = [:]
+        rows = []; rowsByID = [:]; otpGatedAt = [:]
         index.replace([])
-        pendingPhrase = nil
+        undecryptable = 0
+        // pendingPhrase is deliberately kept: losing the only copy of a just-created phrase to an idle lock would be worse.
     }
 
     // MARK: set-up flows (all leave the vault unlocked on this Mac)
@@ -161,6 +165,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         guard let vault else { throw BiselVault.VaultError.notConfigured }
         isBusy = true; defer { isBusy = false }
         let phrase = try await vault.bootstrap(server: server, bootstrapToken: token, deviceName: deviceName)
+        setRecoveryUnconfirmed(true)   // the server now holds an envelope for a phrase nobody has confirmed storing yet
         pendingPhrase = phrase
         await refreshPhase()
         setPhase(.unlocked)
@@ -168,6 +173,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
 
     func confirmPhraseStored() {
         pendingPhrase = nil
+        setRecoveryUnconfirmed(false)
         Task { await sync(reason: "setup") }
     }
 
@@ -199,7 +205,29 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     func rotateRecovery() async throws -> RecoveryPhrase {
         guard let vault else { throw BiselVault.VaultError.notConfigured }
         let phrase = try await vault.rotateRecovery()
+        setRecoveryUnconfirmed(true)   // cleared by `confirmPhraseStored()` once the user re-enters words from it
         return phrase
+    }
+
+    // MARK: unconfirmed recovery phrase (security review M5)
+
+    /// A marker file (no secret inside) that survives a quit or crash between "phrase generated" and "I have stored it".
+    private var unconfirmedMarker: URL { directory.appendingPathComponent("recovery-unconfirmed") }
+    var recoveryUnconfirmed: Bool { FileManager.default.fileExists(atPath: unconfirmedMarker.path) }
+
+    private func setRecoveryUnconfirmed(_ on: Bool) {
+        if on { FileManager.default.createFile(atPath: unconfirmedMarker.path, contents: Data()) }
+        else { try? FileManager.default.removeItem(at: unconfirmedMarker) }
+    }
+
+    /// The phrase from last time was never confirmed and can't be shown again: make a new one (Touch ID) and show it.
+    private func resumeUnconfirmedRecovery() async {
+        guard phase == .unlocked, pendingPhrase == nil, recoveryUnconfirmed else { return }
+        do {
+            pendingPhrase = try await rotateRecovery()
+            Log.app.notice("recovery phrase was never confirmed: issued a new one")
+            AppModel.shared.showMainWindow()
+        } catch { Log.app.error("could not re-issue the recovery phrase: \(describe(error))") }
     }
 
     // MARK: items
@@ -214,7 +242,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             apply(rows: all)
             undecryptable = listing.undecryptable.count
         } catch {
-            Log.app.error("reload failed: \(describe(error), privacy: .public)")
+            Log.app.error("reload failed: \(describe(error))")
             if case BiselVault.VaultError.locked = error { setPhase(.locked) }
         }
     }
@@ -292,7 +320,17 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
 
     /// Push local edits, resolve conflicts (remote wins; local edit kept as "<title> (conflict)"), pull. Offline-tolerant.
     func sync(reason: String) async {
-        guard let vault, phase != .needsSetup, !syncing else { return }
+        // Requests run one after another (a caller that awaits always sees a pass that started after its own edits);
+        // the background poll just skips a tick while one is running.
+        if reason == "poll" && syncing { return }
+        let previous = syncChain
+        let run = Task { await previous?.value; await performSync(reason: reason) }
+        syncChain = run
+        await run.value
+    }
+
+    private func performSync(reason: String) async {
+        guard let vault, phase != .needsSetup else { return }
         syncing = true
         syncState = .syncing
         defer { syncing = false }
@@ -300,8 +338,14 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             let report = try await vault.sync()
             pendingChanges = (try? await vault.pendingChanges()) ?? 0
             syncState = .synced(Date())
-            lastConflicts = report.conflicts.count
-            Log.app.notice("sync(\(reason, privacy: .public)): pushed=\(report.pushed) pulled=\(report.pulled) conflicts=\(report.conflicts.count) deferred=\(report.deferredConflicts.count)")
+            if !report.conflicts.isEmpty { lastConflicts = report.conflicts.count }
+            Log.app.notice("sync(\(reason)): pushed=\(report.pushed) pulled=\(report.pulled) conflicts=\(report.conflicts.count) deferred=\(report.deferredConflicts.count)")
+            if report.rotationAdopted, await !vault.isUnlocked {
+                // Another device rotated the vault key (a revoke): the core locked itself. Drop everything and ask for Touch ID.
+                setPhase(.locked)
+                Toast.shared.show("Vault key changed on another device. Unlock to continue", duration: .seconds(4))
+                return
+            }
             if report.pulled > 0 || report.pushed > 0 || !report.conflicts.isEmpty { await reload() }
             if !report.conflicts.isEmpty {
                 Toast.shared.show("\(report.conflicts.count) sync conflict(s): your edit was kept as “… (conflict)”", isError: true, duration: .seconds(4))
@@ -312,10 +356,10 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             case .network(let m): syncState = .offline(m)
             default: syncState = .failed(describe(e))
             }
-            Log.app.notice("sync(\(reason, privacy: .public)) failed: \(describe(e), privacy: .public)")
+            Log.app.notice("sync(\(reason)) failed: \(describe(e))")
         } catch {
             syncState = .failed(describe(error))
-            Log.app.error("sync(\(reason, privacy: .public)) failed: \(describe(error), privacy: .public)")
+            Log.app.error("sync(\(reason)) failed: \(describe(error))")
         }
     }
 
@@ -335,6 +379,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
 
     func secret(_ kind: SecretKind, for id: String) async throws -> String {
         guard isUnlocked else { throw VaultError.locked }
+        try await gateStrict(kind, id)
         let item: Item
         do { item = try await self.item(id: id) }
         catch BiselVault.VaultError.locked { setPhase(.locked); throw VaultError.locked }
@@ -352,9 +397,21 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         }
     }
 
+    /// SPEC §4 strict mode ("Require Touch ID to reveal or copy password and OTP"): every read of a password or OTP, from any caller
+    /// (copy, fill, panel), needs a fresh `LAContext` check unless the caller just ran it (single-use credit). The panel refreshes a
+    /// revealed OTP at each period boundary, so an OTP read for an item already revealed in the last 35 s does not prompt again.
+    private func gateStrict(_ kind: SecretKind, _ id: String) async throws {
+        guard SecuritySettings.requireTouchID, kind != .username else { return }
+        if kind == .totp, let t = otpGatedAt[id], ContinuousClock.now - t < .seconds(35) { otpGatedAt[id] = .now; return }
+        if !BiometricGate.consumeCredit() {
+            try await BiometricGate.authenticate(reason: kind == .totp ? "Use one-time code" : "Use password", grantsCredit: false)
+        }
+        if kind == .totp { otpGatedAt[id] = .now }
+    }
+
     func url(for id: String) -> URL? {
         guard let first = rowsByID[id]?.urls.first else { return nil }
-        return URL(string: first.contains("://") ? first : "https://\(first)")
+        return URLPolicy.allowed(first)
     }
 
     func totpPeriod(for id: String) -> Int { rowsByID[id]?.totpPeriod ?? 30 }

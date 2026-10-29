@@ -26,4 +26,12 @@ open(os.path.join(out, "fake-logins.csv"), "w").write(
  'CSV Shop (FAKE),https://shop.csv-fake.test,csv.user@fake.test,"FAKE,comma;pass",otpauth://totp/Shop:u?secret=GEZDGNBVGY3TQOJQ&issuer=Shop,0,0,"shopping;fake","multi\nline note"\n'
  'CSV Bank (FAKE),https://bank.csv-fake.test,bank.user,FAKE-bank-pass,,0,0,,\n'
  'CSV Note (FAKE),,,,,0,0,,only a note body\n')
+# hostile archives (must be refused)
+good = json.dumps(data)
+with zipfile.ZipFile(os.path.join(out, "evil-dotdot.1pux"), "w") as z:
+    z.writestr("export.data", good); z.writestr("../evil.txt", "x")
+with zipfile.ZipFile(os.path.join(out, "evil-symlink.1pux"), "w") as z:
+    z.writestr("export.data", good)
+    info = zipfile.ZipInfo("link"); info.create_system = 3; info.external_attr = (0o120777 << 16)
+    z.writestr(info, "/etc/passwd")
 print("ok")

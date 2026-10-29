@@ -4,6 +4,24 @@ import AppKit
 /// DEBUG-ONLY verification aids. Compiled out of Release. Nothing here runs on a normal launch: everything is
 /// opt-in through an explicit environment variable or the "Debug:" menu item.
 enum DebugTools {
+    /// Debug builds: a distributed notification `app.bisel.dev.snapshot` (userInfo `path`) writes a PNG of the main window's
+    /// contents rendered in-process (works with the screen locked or the window behind others). Never compiled into Release.
+    @MainActor
+    static func installSnapshotListener() {
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("app.bisel.dev.snapshot"), object: nil, queue: .main) { note in
+            guard let path = note.userInfo?["path"] as? String else { return }
+            MainActor.assumeIsolated {
+                guard let w = NSApp.windows.first(where: { $0.title.hasPrefix("Bisel") && $0.isVisible && !($0 is NSPanel) }),
+                      let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else {
+                    Log.app.notice("snapshot: no main window"); return
+                }
+                v.cacheDisplay(in: v.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                Log.app.notice("snapshot written")
+            }
+        }
+    }
+
     /// Gives you 3 s to focus a field in another app, then logs how the fill engine classifies it
     /// (role/subrole/kind only; never text). Read with:  log stream --predicate 'subsystem == "app.bisel.mac"'
     @MainActor

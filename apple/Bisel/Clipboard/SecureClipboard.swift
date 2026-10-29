@@ -90,14 +90,12 @@ final class SecureClipboard {
     func restore(_ snap: Snapshot, ifChangeCountIs expected: Int) {
         let pb = NSPasteboard.general
         guard pb.changeCount == expected else { return }
-        pb.prepareForNewContents(with: [])
+        // Same write path as a copy: starts with prepareForNewContents(.currentHostOnly) so restoring never makes an earlier
+        // local-only secret eligible for Universal Clipboard (L9). Items are put back through setData on this pasteboard; only the
+        // first item's types survive (a multi-item clipboard is flattened, which is acceptable for a restore after a paste).
+        pb.prepareForNewContents(with: [.currentHostOnly])
         ownedChangeCount = nil
-        guard !snap.items.isEmpty else { return }
-        let items = snap.items.map { dict -> NSPasteboardItem in
-            let it = NSPasteboardItem()
-            for (t, d) in dict { it.setData(d, forType: t) }
-            return it
-        }
-        pb.writeObjects(items)
+        guard let first = snap.items.first else { return }
+        for (t, d) in first { pb.setData(d, forType: t) }
     }
 }
