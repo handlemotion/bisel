@@ -33,21 +33,22 @@ struct MainWindowView: View {
             } else if usesFixture {
                 fixtureNotice
             } else if service.phase == .needsSetup {
-                SetupView(service: service).transition(.opacity)
+                SetupView(service: service).transition(Self.swap)
             } else if let phrase = service.pendingPhrase {
                 PhraseGateView(service: service, phrase: phrase) { service.confirmPhraseStored(); showImport = true }
-                    .transition(.opacity)
+                    .transition(Self.swap)
             } else if showImport {
                 OnboardingImportView(service: service) { showImport = false; dismissWindow(id: "main") }
-                    .transition(.opacity)
+                    .transition(Self.swap)
             } else if service.phase == .locked {
-                LockedView(service: service).transition(.opacity)
+                LockedView(service: service).transition(Self.swap)
             } else {
                 unlocked
             }
         }
         .background(cardSize == nil ? Color.clear : Theme.biselDark.colors.background.color)
-        .animation(.easeInOut(duration: 0.28), value: screenKey)
+        .animation(.easeOut(duration: 0.2), value: screenKey)
+        .environment(\.cascadeLead, 0.2)   // a new screen waits for the old one to fade out
         // SwiftUI owns the window size (the scene is .contentSize): the island is exactly its fixed frame, the settings window
         // grows from a 820x540 minimum. No AppKit resizing, so the hosting view can never lag behind the window.
         .frame(minWidth: cardSize?.width ?? 820, maxWidth: cardSize?.width ?? .infinity,
@@ -104,7 +105,10 @@ struct MainWindowView: View {
         }
     }
 
-    /// Which screen is up; changing it cross-fades.
+    /// The old screen fades out; the new one is simply there and fades in on its own cascade, after `cascadeLead`.
+    private static let swap = AnyTransition.asymmetric(insertion: .identity, removal: .opacity)
+
+    /// Which screen is up; changing it fades the old one out.
     private var screenKey: String {
         if service.startupError != nil { return "error" }
         if service.phase == .needsSetup { return "setup" }

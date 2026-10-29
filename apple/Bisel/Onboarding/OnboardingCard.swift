@@ -68,7 +68,6 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.colors.background.color)
         .overlay(rim)
-        .animation(.easeIn(duration: 0.15), value: dim)
         .foregroundStyle(theme.colors.text.color)
         .environment(\.theme, theme)
         .preferredColorScheme(.dark)
@@ -220,17 +219,30 @@ struct Cascade: ViewModifier {
     var rise: CGFloat
     @State private var shown = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.cascadeLead) private var lead
 
     func body(content: Content) -> some View {
         content
             .opacity(shown ? 1 : 0)
             .offset(y: shown || reduceMotion ? 0 : rise)
             .onAppear {
-                withAnimation(.easeOut(duration: reduceMotion ? 0.12 : 0.38).delay(reduceMotion ? 0 : delay)) { shown = true }
+                withAnimation(.easeOut(duration: reduceMotion ? 0.12 : 0.38).delay(reduceMotion ? 0 : lead + delay)) { shown = true }
             }
     }
 }
 
 extension View {
     func cascade(_ delay: Double, rise: CGFloat = 6) -> some View { modifier(Cascade(delay: delay, rise: rise)) }
+}
+
+
+private struct CascadeLeadKey: EnvironmentKey { static let defaultValue = 0.0 }
+
+extension EnvironmentValues {
+    /// Extra seconds every `cascade` waits, so a screen that replaces another one starts fading in only after the old
+    /// one has faded out (fades never overlap).
+    var cascadeLead: Double {
+        get { self[CascadeLeadKey.self] }
+        set { self[CascadeLeadKey.self] = newValue }
+    }
 }
