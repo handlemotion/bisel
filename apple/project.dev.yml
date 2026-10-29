@@ -1,0 +1,18 @@
+# Dev spec: same app, but BiselCore is built with the SoftwareKeys trait so an UNSIGNED Debug build can create
+# device keys (persistent Secure Enclave keys fail with -34018 without a signing identity).
+# Generate:  cd apple && xcodegen generate --spec project.dev.yml      -> BiselDev.xcodeproj
+# NEVER archive or ship from BiselDev.xcodeproj: its BiselCore contains the software key store in every
+# configuration. Release builds come from project.yml (Bisel.xcodeproj), which has no trait.
+include:
+  - project.yml
+name: BiselDev
+packages:
+  BiselCore:
+    path: Packages/BiselCore
+    traits: [SoftwareKeys]
+targets:
+  Bisel:
+    settings:
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG BISEL_DEV_FIXTURE BISEL_SOFTWARE_KEYS"

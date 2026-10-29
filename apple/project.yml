@@ -1,0 +1,150 @@
+# XcodeGen spec for the Bisel Mac app (SPEC.md §3, §8, §10).
+# Generate with:  cd apple && xcodegen generate
+# Never hand-edit Bisel.xcodeproj (it is generated and git-ignored).
+name: Bisel
+
+options:
+  bundleIdPrefix: app.bisel
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+  defaultConfig: Debug
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    # No signing identity exists on the dev machine yet: ad-hoc sign ("-").
+    # Replace with a Developer ID identity + DEVELOPMENT_TEAM for release.
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGNING_ALLOWED: YES
+    CODE_SIGNING_REQUIRED: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    # Xcode drops --options runtime when the identity is ad-hoc ("-"); force it so dev builds run with the
+    # same hardened-runtime restrictions as the Developer ID build will.
+    OTHER_CODE_SIGN_FLAGS: "--options=runtime"
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG BISEL_DEV_FIXTURE"
+      # The preview debug dylib is ad-hoc signed separately and fails hardened-runtime library validation
+      # (different "team"), so the app would not launch. Link everything into the executable instead.
+      ENABLE_DEBUG_DYLIB: NO
+    Release:
+      SWIFT_COMPILATION_MODE: wholemodule
+
+packages:
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    exactVersion: 3.1.0
+  FuzzyMatch:
+    url: https://github.com/ordo-one/FuzzyMatch
+    exactVersion: 1.4.0
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    exactVersion: 0.9.20
+  SwiftCSV:
+    url: https://github.com/swiftcsv/SwiftCSV
+    exactVersion: 0.10.0
+  # Production wiring: NO SoftwareKeys trait, so the software key store is not compiled in (SPEC §4/§8).
+  # Debug runs on an unsigned build use project.dev.yml (-> BiselDev.xcodeproj), which enables the trait.
+  BiselCore:
+    path: Packages/BiselCore
+
+targets:
+  Bisel:
+    type: application
+    platform: macOS
+    sources:
+      - path: Bisel
+        excludes:
+          - "FillHarness/**"
+          - "UITests/**"
+          - "Resources/FigmaIcons/**"  # source SVGs; the asset catalog holds the compiled copies
+    dependencies:
+      - package: KeyboardShortcuts
+      - package: FuzzyMatch
+      - package: ZIPFoundation
+      - package: SwiftCSV
+      - package: BiselCore
+        product: BiselCore
+    entitlements:
+      path: Bisel/Bisel.entitlements
+      # Deliberately NO com.apple.security.app-sandbox: Accessibility fill needs an
+      # unsandboxed process (SPEC.md §8). Hardened runtime is on; no exceptions needed.
+      properties: {}
+    info:
+      path: Bisel/Info.plist
+      properties:
+        CFBundleDisplayName: Bisel
+        CFBundleName: Bisel
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "26.0"
+        LSUIElement: true
+        LSApplicationCategoryType: public.app-category.utilities
+        NSHumanReadableCopyright: "Personal use."
+        NSAppleEventsUsageDescription: "Bisel does not script other apps."
+        NSFaceIDUsageDescription: "Bisel uses Touch ID to unlock your vault."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.bisel.mac
+        PRODUCT_NAME: Bisel
+        GENERATE_INFOPLIST_FILE: NO
+        COMBINE_HIDPI_IMAGES: YES
+
+  # Tiny native SwiftUI app with username / password / code fields: the "native SwiftUI app"
+  # row of the fill matrix and the target for the XCUITest flow. Never shipped.
+  BiselFillHarness:
+    type: application
+    platform: macOS
+    sources:
+      - path: Bisel/FillHarness
+    entitlements:
+      path: Bisel/FillHarness/FillHarness.entitlements
+      properties: {}
+    info:
+      path: Bisel/FillHarness/Info.plist
+      properties:
+        CFBundleDisplayName: Bisel Fill Harness
+        CFBundleName: BiselFillHarness
+        LSMinimumSystemVersion: "26.0"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.bisel.mac.fillharness
+        PRODUCT_NAME: BiselFillHarness
+        GENERATE_INFOPLIST_FILE: NO
+        ENABLE_HARDENED_RUNTIME: YES
+
+  BiselUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: Bisel/UITests
+    dependencies:
+      - target: Bisel
+      - target: BiselFillHarness
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.bisel.mac.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Bisel
+
+schemes:
+  Bisel:
+    build:
+      targets:
+        Bisel: all
+        BiselFillHarness: [run]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - BiselUITests
+    archive:
+      config: Release

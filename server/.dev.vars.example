@@ -1,0 +1,2 @@
+# Local-only. Copied to .dev.vars by `pnpm dev` if missing. Never commit .dev.vars.
+BOOTSTRAP_TOKEN=dev-bootstrap-token
