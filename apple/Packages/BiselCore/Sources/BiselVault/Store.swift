@@ -392,6 +392,11 @@ public final class LocalStore: Sendable {
         }
     }
 
+    /// Replaces the sealed blob of a trash entry (key rotation re-wraps the item key so the version stays readable).
+    public func replaceTrashBlob(key: Int, with blob: Data) throws {
+        try pool.write { try $0.execute(sql: "UPDATE trash SET blob = ? WHERE key = ?", arguments: [blob, key]) }
+    }
+
     public func removeFromTrash(key: Int) throws { try pool.write { try $0.execute(sql: "DELETE FROM trash WHERE key = ?", arguments: [key]) } }
 
     /// Tombstones that came from the server and have not been checked against their sealed marker yet.

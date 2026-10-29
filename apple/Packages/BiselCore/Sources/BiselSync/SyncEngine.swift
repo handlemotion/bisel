@@ -66,7 +66,9 @@ public struct SyncEngine: Sendable {
     private func adoptRotation(_ report: inout SyncReport) async throws {
         let (envelope, epoch) = try await client.envelope()
         guard var identity = try store.identity() else { return }
-        if identity.previousEnvelope == nil, try store.pendingRecords().contains(where: { $0.pending == .put }) {
+        // The old key is needed at the next unlock for edits sealed under it and for the trash (versions this device kept).
+        if identity.previousEnvelope == nil,
+           try store.pendingRecords().contains(where: { $0.pending == .put }) || !store.trashedRecords().isEmpty {
             identity.previousEnvelope = identity.envelope
         }
         identity.envelope = envelope

@@ -200,6 +200,7 @@ public actor Vault {
     /// Local edits sealed under a rotated-away key get their wrapped item key re-wrapped under the current one.
     private func rewrapPendingEdits(from old: Data, to new: Data) throws {
         let oldKey = SymmetricKey(data: old), newKey = SymmetricKey(data: new)
+        rewrapTrash(from: oldKey, to: newKey)
         var unresolved = false
         for rec in try store.pendingRecords() where rec.pending == .delete {
             // A pending delete carries a marker sealed under the old key: seal a fresh one under the new key.
@@ -217,6 +218,17 @@ public actor Vault {
         guard !unresolved, var id = try store.identity() else { return }
         id.previousEnvelope = nil
         try store.setIdentity(id)
+    }
+
+    /// Versions in the local trash keep their own item key, wrapped under the vault key of their time: re-wrap them so they
+    /// stay restorable after a rotation. Entries that do not open under `old` (already re-wrapped, or damaged) are left alone.
+    private func rewrapTrash(from old: SymmetricKey, to new: SymmetricKey) {
+        guard let entries = try? store.trashedRecords() else { return }
+        for entry in entries where !entry.record.deleted {
+            let r = entry.record
+            guard let wrapped = try? ItemSealer.rewrapKey(blob: r.blob, id: r.id, rev: r.rev, from: old, to: new) else { continue }
+            try? store.replaceTrashBlob(key: entry.key, with: wrapped + r.blob.dropFirst(ItemSealer.wrappedKeyLength))
+        }
     }
 
     /// Zeroes VK. Call on sleep, screen lock, idle timeout.
@@ -890,6 +902,7 @@ public actor Vault {
             return r
         }
         try store.applyRotation(rotated + retombed, cursor: headSeq)
+        oldKey.withKeyOrFalse { old in rewrapTrash(from: old, to: newKey); return true }
         for rec in try store.pendingRecords() where rec.pending == .delete {
             try store.replacePendingBlob(id: rec.id, expectedRev: rec.rev, with: try ItemSealer.sealTombstone(id: rec.id, rev: rec.rev, vaultKey: newKey))
         }

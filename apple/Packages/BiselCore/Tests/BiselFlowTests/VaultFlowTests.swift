@@ -821,6 +821,37 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("versions in the local trash stay restorable across a key rotation, on the rotating device and on the one that adopts it")
+    func trashSurvivesRotation() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a"), b = try Device("b")
+            try await a.bootstrap(server)
+            var item = try await a.vault.save(login("Doc", password: "v1"))
+            try await a.vault.sync()
+            try await b.enroll(through: a, server: server)
+            item.password = "v2"
+            _ = try await a.vault.save(item)
+            try await a.vault.sync()
+            try await b.vault.sync()                       // B keeps v1 in its trash
+            var edited = try await b.vault.item(id: item.id)
+            edited.password = "v3"
+            _ = try await b.vault.save(edited)
+            try await b.vault.sync()
+            try await a.vault.sync()                       // A keeps v2 in its trash
+            func passwords(_ d: Device) async throws -> [String] { try await d.vault.trash().filter { $0.itemID == item.id }.compactMap(\.item.password).sorted() }
+            #expect(try await passwords(a) == ["v2"])
+            #expect(try await passwords(b) == ["v1"])
+
+            _ = try await a.vault.rotateVaultKey()
+            #expect(try await passwords(a) == ["v2"], "the rotating device still reads what it kept")
+
+            let report = try await b.vault.sync()
+            #expect(report.rotationAdopted)
+            try await b.vault.unlock()
+            #expect(try await passwords(b) == ["v1"], "the adopting device reads it after unlocking with the new key")
+        }
+    }
+
     @Test("a record nobody can decrypt blocks rotation until it is deleted; rotating without a revoke keeps every device working")
     func rotationNeedsCleanRecords() async throws {
         try await TestServer.with { server in
