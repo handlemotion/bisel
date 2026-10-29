@@ -102,6 +102,9 @@ const adminAuth = requireAdmin();
  * The vault manifest (roster + recovery pins) is an ordinary item row to the server, so a stolen device-signing key could
  * overwrite it with garbage and lock every device out of the vault. Writes to it need the vault-admin signature too.
  */
+const MIN_BLOB_BYTES = 88;
+const MAX_PENDING_RECOVERY_DEVICES = 3;
+const MAX_ACTIVE_DEVICES = 16;
 const MANIFEST_ID = "bisel-manifest-v1-reserved";
 const manifestAdmin = createMiddleware<AppEnv>(async (c, next) => {
   if (c.req.param("id") === MANIFEST_ID) return adminAuth(c, next);
@@ -419,6 +422,8 @@ app.put("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
   if (!parsed.ok) return parsed.res;
   const { base_rev, blob, epoch } = parsed.data;
   if (b64urlByteLength(blob) > MAX_BLOB_BYTES) return c.json({ error: "too_large", max_bytes: MAX_BLOB_BYTES }, 413);
+  // wrapped item key (60) + the body's nonce and tag (28): anything shorter is not a sealed item (it would also stall rotation).
+  if (b64urlByteLength(blob) < MIN_BLOB_BYTES) return bad(c, "invalid_blob");
 
   const db = c.env.DB;
   const now = c.get("now");
@@ -763,6 +768,14 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
   const activatesAt = delay > 0 ? now + delay : null;
   if (device) {
     if (!(await validDeviceKeys(device))) return bad(c, "invalid_key");
+    // A leaked phrase must not be able to bury the owner under planted devices (each one has to be revoked by hand).
+    const load = await db
+      .prepare(
+        "SELECT COUNT(*) AS active, COALESCE(SUM(activates_at IS NOT NULL AND activates_at > ?1), 0) AS pending FROM devices WHERE box_id = ?2 AND revoked_at IS NULL",
+      )
+      .bind(now, boxId)
+      .first<{ active: number; pending: number }>();
+    if (load!.pending >= MAX_PENDING_RECOVERY_DEVICES || load!.active >= MAX_ACTIVE_DEVICES) return c.json({ error: "too_many_devices" }, 409);
     try {
       await db.batch([
         assertThat(db, "EXISTS (SELECT 1 FROM boxes WHERE id = ?2 AND epoch = ?1)", epoch, boxId),
@@ -776,7 +789,14 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
       throw err;
     }
   } else {
-    await insertEvent(db, boxId, now, null, "recovery", null).run();
+    // Reading the envelope is an alarm for the owner, but repeating it must not flood the event log (one per 5 minutes).
+    await db
+      .prepare(
+        `INSERT INTO events (box_id, ts, device_id, type, subject_id) SELECT ?1, ?2, NULL, 'recovery', NULL
+         WHERE NOT EXISTS (SELECT 1 FROM events WHERE box_id = ?1 AND type = 'recovery' AND subject_id IS NULL AND ts > ?2 - 300)`,
+      )
+      .bind(boxId, now)
+      .run();
   }
   const meta = await db
     .prepare("SELECT recovery_envelope, head_seq, epoch FROM boxes WHERE id = ?1")

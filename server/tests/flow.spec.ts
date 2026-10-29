@@ -772,6 +772,44 @@ test("a device registered through the recovery key is held back, visible, and ca
   expect((await api.call(thief, "GET", "/v1/sync")).status(), "still refused after the delay: it was revoked").toBe(404);
 });
 
+test("a leaked recovery phrase cannot bury the owner: pending devices are capped and reading the envelope logs once", async ({ request }) => {
+  const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.5" });
+  const planted: TestDevice[] = [];
+  for (let i = 0; i < 3; i++) {
+    const d = await newDevice(`planted-${i}`);
+    expect((await api.call(recovery, "POST", "/v1/recovery/session", { json: { device: d.registration(), epoch } })).status()).toBe(200);
+    planted.push(d);
+  }
+  const extra = await newDevice("planted-extra");
+  const refused = await api.call(recovery, "POST", "/v1/recovery/session", { json: { device: extra.registration(), epoch } });
+  expect(refused.status()).toBe(409);
+  expect(await json(refused)).toEqual({ error: "too_many_devices" });
+
+  // Reading the envelope several times in a row leaves one event, not one per call.
+  const countEvents = async () => (await json(await api.call(a, "GET", "/v1/sync"))).events.filter((e: any) => e.type === "recovery" && e.subject_id === null).length;
+  const before = await countEvents();
+  for (let i = 0; i < 3; i++) expect((await api.call(recovery, "POST", "/v1/recovery/session")).status()).toBe(200);
+  expect((await countEvents()) - before).toBeLessThanOrEqual(1);
+
+  // The owner clears them (admin-signed), after which registration works again.
+  for (const d of planted) expect((await api.call(a, "DELETE", `/v1/devices/${d.id}`)).status()).toBe(200);
+  const again = await newDevice("planted-after");
+  expect((await api.call(recovery, "POST", "/v1/recovery/session", { json: { device: again.registration(), epoch } })).status()).toBe(200);
+  expect((await api.call(a, "DELETE", `/v1/devices/${again.id}`)).status()).toBe(200);
+});
+
+test("a blob too short to be a sealed item is refused (it would stall every rotation)", async ({ request }) => {
+  const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.6" });
+  const id = randomId();
+  const short = await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(0, b64u(randomBytes(87))) });
+  expect(short.status()).toBe(400);
+  expect(await json(short)).toMatchObject({ error: "invalid_blob" });
+  const ok = await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(0, b64u(randomBytes(88))) });
+  expect(ok.status()).toBe(200);
+  expect((await api.call(a, "DELETE", `/v1/items/${id}`, { query: { base_rev: 1 }, json: del() })).status()).toBe(200);
+  headSeq = (await snapshot(api, a)).headSeq;
+});
+
 test("device names cannot carry control or bidi characters", async ({ request }) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.4" });
   for (const name of ["evil\u0000name", "mac\u202Ebook", "line\nbreak", "para\u2029sep", "\u200Bzero-width"]) {
