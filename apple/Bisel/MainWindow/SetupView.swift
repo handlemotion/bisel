@@ -112,14 +112,14 @@ struct SetupView: View {
     }
 
     private func field(_ title: String, _ prompt: String, _ text: Binding<String>, id: String) -> some View {
-        VStack(alignment: .leading, spacing: theme.spacing.xs) {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
             Caption(title)
             TextField("", text: text, prompt: Text(prompt).foregroundStyle(theme.colors.placeholder.color)).onboardingField(theme).accessibilityIdentifier(id)
         }
     }
 
     private func secureField(_ title: String, _ prompt: String, _ text: Binding<String>, id: String) -> some View {
-        VStack(alignment: .leading, spacing: theme.spacing.xs) {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
             Caption(title)
             SecureField("", text: text, prompt: Text(prompt).foregroundStyle(theme.colors.placeholder.color)).onboardingField(theme).accessibilityIdentifier(id)
         }

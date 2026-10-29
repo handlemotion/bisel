@@ -150,15 +150,26 @@ struct PillGlyph: View {
     }
 }
 
-extension View {
-    /// Text field chrome that matches the card: field fill, hairline border, field radius.
-    func onboardingField(_ theme: Theme) -> some View {
-        self.textFieldStyle(.plain)
+/// Text field chrome: field fill and a hairline that lightens while the field has focus.
+private struct OnboardingField: ViewModifier {
+    let theme: Theme
+    @FocusState private var focused: Bool
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: theme.radii.field + 2, style: .continuous)
+        content
+            .textFieldStyle(.plain)
             .font(theme.font(theme.fonts.detail))
+            .focused($focused)
             .padding(.horizontal, theme.spacing.m)
             .frame(height: 38)
-            .background(RoundedRectangle(cornerRadius: theme.radii.field + 2, style: .continuous).fill(theme.colors.field.color))
-            .overlay(RoundedRectangle(cornerRadius: theme.radii.field + 2, style: .continuous)
-                .strokeBorder(theme.colors.border.color, lineWidth: theme.card.hairline))
+            .background(shape.fill(theme.colors.field.color))
+            .overlay(shape.strokeBorder(focused ? theme.colors.text.color.opacity(0.35) : theme.colors.border.color,
+                                        lineWidth: theme.card.hairline))
+            .animation(.easeOut(duration: 0.12), value: focused)
     }
+}
+
+extension View {
+    func onboardingField(_ theme: Theme) -> some View { modifier(OnboardingField(theme: theme)) }
 }
