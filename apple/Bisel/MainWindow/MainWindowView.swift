@@ -34,14 +34,64 @@ struct MainWindowView: View {
                 unlocked
             }
         }
-        .frame(minWidth: 820, minHeight: 540)
-        .themedPage(theme)
+        .frame(minWidth: cardSize == nil ? 820 : 0, minHeight: cardSize == nil ? 540 : 0)
+        .themedPage(theme, opaque: cardSize == nil)
+        .panelMaterial()
         .background(WindowAccessor { w in
-            // Always hidden while a recovery phrase can be on screen (set-up entry, the one-time display).
-            w.sharingType = (PanelCapture.hidden || service.pendingPhrase != nil || service.phase == .needsSetup) ? .none : .readOnly
+            // Only the recovery phrase is hidden from screenshots and screen sharing; set-up itself can be captured.
+            var hide = PanelCapture.hidden || service.pendingPhrase != nil
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["BISEL_DEV_CAPTURE"] != nil { hide = service.pendingPhrase != nil }
+            #endif
+            w.sharingType = hide ? .none : .readOnly
             w.isRestorable = false
+            DockPresence.windowAppeared(w)
+            style(w)
         })
+        .toolbarBackgroundVisibility(cardSize == nil ? .automatic : .hidden, for: .windowToolbar)
         .navigationTitle(service.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel")
+    }
+
+    /// Set-up, the recovery phrase and the lock screen are the glass island itself: the window is small, borderless-looking
+    /// and shows the command panel's material. Everything else is the normal window.
+    private var cardSize: NSSize? {
+        guard service.startupError == nil, !usesFixture else { return nil }
+        if service.pendingPhrase != nil { return OnboardingLayout.phrase }
+        switch service.phase {
+        case .needsSetup: return OnboardingLayout.setup
+        case .locked: return OnboardingLayout.locked
+        default: return nil
+        }
+    }
+
+    private func style(_ w: NSWindow) {
+        if let size = cardSize {
+            w.isOpaque = false
+            w.backgroundColor = .clear
+            w.titlebarAppearsTransparent = true
+            w.titlebarSeparatorStyle = .none
+            w.titleVisibility = .hidden
+            w.styleMask.insert(.fullSizeContentView)
+            w.styleMask.remove(.resizable)
+            w.standardWindowButton(.zoomButton)?.isHidden = true
+            w.isMovableByWindowBackground = true
+            w.hasShadow = true
+            if abs(w.contentLayoutRect.width - size.width) > 1 || abs(w.contentLayoutRect.height - size.height) > 1 {
+                w.setContentSize(size)
+            }
+        } else {
+            w.isOpaque = true
+            w.backgroundColor = .windowBackgroundColor
+            w.titlebarAppearsTransparent = false
+            w.titlebarSeparatorStyle = .automatic
+            w.titleVisibility = .visible
+            w.styleMask.insert(.resizable)
+            w.standardWindowButton(.zoomButton)?.isHidden = false
+            w.isMovableByWindowBackground = false
+            if w.contentLayoutRect.width < 820 || w.contentLayoutRect.height < 540 {
+                w.setContentSize(NSSize(width: max(820, w.contentLayoutRect.width), height: max(540, w.contentLayoutRect.height)))
+            }
+        }
     }
 
     private var usesFixture: Bool {

@@ -22,12 +22,51 @@ extension View {
     }
 
     /// Themed page background + text color for main-window screens.
-    func themedPage(_ theme: Theme) -> some View {
+    /// `opaque: false` leaves the background to the content (the onboarding screens draw the glass themselves).
+    func themedPage(_ theme: Theme, opaque: Bool = true) -> some View {
         self.foregroundStyle(theme.colors.text.color)
-            .background(theme.colors.background.color)
+            .background(opaque ? theme.colors.background.color : .clear)
             .tint(theme.colors.accent.color)
             .preferredColorScheme(theme.colorScheme)
     }
+}
+
+/// Bisel is a menu-bar app (no Dock icon) until one of its windows is on screen; then it gets a Dock icon with the mark,
+/// and goes back to the menu bar when the last window closes.
+@MainActor
+enum DockPresence {
+    private static var observer: NSObjectProtocol?
+
+    static func windowAppeared(_ window: NSWindow) {
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.applicationIconImage = BrandIcon.image
+            NSApp.activate()
+        }
+        guard observer == nil else { return }
+        observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { note in
+            let closing = note.object as? NSWindow
+            MainActor.assumeIsolated {
+                guard let closing, !(closing is NSPanel) else { return }
+                let others = NSApp.windows.contains { $0 !== closing && $0.isVisible && !($0 is NSPanel) && $0.styleMask.contains(.titled) }
+                if !others { NSApp.setActivationPolicy(.accessory) }
+            }
+        }
+    }
+}
+
+/// The Dock icon: the mark on a macOS-style tile with the usual margin.
+@MainActor
+enum BrandIcon {
+    static let image: NSImage = {
+        let theme = ThemeStore.shared.current
+        let view = ZStack { BrandMark(size: 820) }
+            .frame(width: 1024, height: 1024)
+            .environment(\.theme, theme)
+        let r = ImageRenderer(content: view)
+        r.scale = 1
+        return r.nsImage ?? NSImage()
+    }()
 }
 
 /// Section header / caption styles from Theme tokens.

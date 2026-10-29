@@ -8,16 +8,24 @@ enum DebugTools {
     /// contents rendered in-process (works with the screen locked or the window behind others). Never compiled into Release.
     @MainActor
     static func installSnapshotListener() {
-        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("app.bisel.dev.snapshot"), object: nil, queue: .main) { note in
-            guard let path = note.userInfo?["path"] as? String else { return }
-            MainActor.assumeIsolated {
-                guard let w = NSApp.windows.first(where: { $0.title.hasPrefix("Bisel") && $0.isVisible && !($0 is NSPanel) }),
-                      let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else {
-                    Log.app.notice("snapshot: no main window"); return
+        // `app.bisel.dev.snapshot.<pid>` reaches one process when several debug builds run at once.
+        for name in ["app.bisel.dev.snapshot", "app.bisel.dev.snapshot.\(getpid())"] {
+            DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: .main) { note in
+                guard let path = note.userInfo?["path"] as? String else { return }
+                MainActor.assumeIsolated {
+                    guard let w = NSApp.windows.first(where: { $0.title.hasPrefix("Bisel") && $0.isVisible && !($0 is NSPanel) }),
+                          let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else {
+                        Log.app.notice("snapshot: no main window"); return
+                    }
+                    // Set-up and the recovery phrase hide the window from capture; lift that for the in-process bitmap only.
+                    let sharing = w.sharingType
+                    w.sharingType = .readOnly
+                    v.displayIfNeeded()
+                    v.cacheDisplay(in: v.bounds, to: rep)
+                    w.sharingType = sharing
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                    Log.app.notice("snapshot written")
                 }
-                v.cacheDisplay(in: v.bounds, to: rep)
-                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-                Log.app.notice("snapshot written")
             }
         }
     }
