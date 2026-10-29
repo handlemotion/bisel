@@ -35,10 +35,10 @@ struct MainWindowView: View {
             } else if service.phase == .needsSetup {
                 SetupView(service: service).transition(Self.swap)
             } else if let phrase = service.pendingPhrase {
-                PhraseGateView(service: service, phrase: phrase) { service.confirmPhraseStored(); showImport = true }
+                PhraseGateView(service: service, phrase: phrase) { showImport = true; service.confirmPhraseStored() }
                     .transition(Self.swap)
             } else if showImport {
-                OnboardingImportView(service: service) { showImport = false; dismissWindow(id: "main") }
+                OnboardingImportView(service: service) { dismissWindow(id: "main") }   // state dies with the window: no settings flash
                     .transition(Self.swap)
             } else if service.phase == .locked {
                 LockedView(service: service).transition(Self.swap)
@@ -63,6 +63,11 @@ struct MainWindowView: View {
             let inset = w.frame.height - w.contentLayoutRect.height
             if cardSize != nil, abs(inset - titlebarInset) > 0.5, inset >= 0 { DispatchQueue.main.async { titlebarInset = inset } }
         })
+        .onReceive(NotificationCenter.default.publisher(for: .init("app.bisel.dev.tour.continue"))) { _ in
+            #if DEBUG
+            showImport = true; service.confirmPhraseStored()   // what the Continue button does
+            #endif
+        }
         .toolbarBackgroundVisibility(cardSize == nil ? .automatic : .hidden, for: .windowToolbar)
         .navigationTitle(service.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel")
     }

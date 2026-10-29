@@ -15,6 +15,10 @@ enum DebugTools {
             try? await Task.sleep(for: .seconds(4))
             try? await service.bootstrapLocal(deviceName: "tour")
             try? await Task.sleep(for: .seconds(4))
+            if ProcessInfo.processInfo.environment["BISEL_DEV_TOUR"] == "continue" {
+                NotificationCenter.default.post(name: .init("app.bisel.dev.tour.continue"), object: nil)   // MainWindowView presses Continue
+                return
+            }
             await service.discardNewBox()
         }
     }
