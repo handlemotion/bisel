@@ -4,7 +4,7 @@ import Foundation
 /// Local only (never synced), `~/Library/Application Support/bisel/usage.json`.
 @MainActor
 final class UsageStore {
-    struct Entry: Codable { var last: Date; var count: Int }
+    struct Entry: Codable, Sendable { var last: Date; var count: Int }
     private(set) var entries: [String: Entry] = [:]
     private let url: URL
     private var saveTask: Task<Void, Never>?

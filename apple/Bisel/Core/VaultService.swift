@@ -67,6 +67,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     @ObservationIgnored private let usage: UsageStore
     @ObservationIgnored private let index = FuzzySearchIndex()
     @ObservationIgnored private var rowsByID: [String: ItemRow] = [:]
+    @ObservationIgnored private var reloadGeneration = 0
+    @ObservationIgnored private var installedGeneration = 0
     @ObservationIgnored private var pollTimer: Timer?
     @ObservationIgnored private var syncing = false
     @ObservationIgnored private var syncChain: Task<Void, Never>?
@@ -272,13 +274,21 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     // MARK: items
 
     /// Rebuilds rows and the search index from the encrypted store. Requires the vault to be unlocked.
+    /// Decrypting happens in the `Vault` actor and sorting + tokenising on a background task; the main actor only
+    /// swaps the results in (it used to do the sort and the tokenising itself: ~90 ms at 5,000 items).
     func reload() async {
         guard let vault, phase == .unlocked else { return }
+        reloadGeneration += 1
+        let generation = reloadGeneration
         do {
             let listing = try await vault.items()
             guard phase == .unlocked else { return }   // locked while decrypting: discard
-            let all = listing.items.map(ItemRow.init)
-            apply(rows: all)
+            let usage = usage.entries
+            let built = await Task.detached(priority: .userInitiated) { Self.build(listing.items, usage: usage) }.value
+            // Locked meanwhile, or a reload that started later already installed a newer snapshot.
+            guard phase == .unlocked, generation >= installedGeneration else { return }
+            installedGeneration = generation
+            apply(built)
             undecryptable = listing.undecryptable.count
         } catch {
             Log.app.error("reload failed: \(describe(error))")
@@ -286,14 +296,27 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         }
     }
 
-    private func apply(rows all: [ItemRow]) {
-        rows = all.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        rowsByID = Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) })
-        index.replace(all.filter { $0.type == .login || $0.type == .secret }.map { r in
-            let u = usage.entries[r.id]
+    private struct Built: Sendable {
+        let rows: [ItemRow]
+        let byID: [String: ItemRow]
+        let index: FuzzySearchIndex.Built
+    }
+
+    private nonisolated static func build(_ items: [Item], usage: [String: UsageStore.Entry]) -> Built {
+        let all = items.map(ItemRow.init)
+        let sorted = all.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        let records = all.filter { $0.type == .login || $0.type == .secret }.map { r in
+            let u = usage[r.id]
             return SearchRecord(id: r.id, title: r.title, username: r.username, urls: r.urls, tags: r.tags,
                                 lastUsed: u?.last ?? r.updatedAt, useCount: u?.count ?? 0)
-        })
+        }
+        return Built(rows: sorted, byID: Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) }), index: FuzzySearchIndex.build(records))
+    }
+
+    private func apply(_ built: Built) {
+        rows = built.rows
+        rowsByID = built.byID
+        index.install(built.index)
     }
 
     func item(id: String) async throws -> Item {
