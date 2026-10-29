@@ -135,7 +135,7 @@ public actor Vault {
     public func identity() throws -> LocalIdentity? { try store.identity() }
     public var isConfigured: Bool { ((try? store.identity()) ?? nil)?.envelope != nil }
     public var isUnlocked: Bool { liveKey() != nil }
-    public func pendingChanges() throws -> Int { try store.pendingRecords().count }
+    public func pendingChanges() throws -> Int { try store.pendingCount() }
 
     private func liveKey() -> LockedKey? {
         guard let key, let until = unlockedUntil, until > Date(), key.isLive else {
