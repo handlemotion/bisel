@@ -614,6 +614,63 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("edits made on the rotating device while its own rotation is in flight are kept")
+    func ownEditsDuringOwnRotation() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a"), b = try Device("b")
+            try await a.bootstrap(server)
+            var ids: [String] = []
+            for n in 0..<12 { ids.append(try await a.vault.save(login("Seed \(n)", password: "seed-\(n)")).id) }
+            try await a.vault.sync()
+            try await b.enroll(through: a, server: server)
+
+            // A writer keeps editing on A the whole time; the rotation is retried until it gets past its "nothing pending"
+            // check, after which every edit lands while the rotate request is in flight.
+            final class Writer: @unchecked Sendable {
+                private let lock = NSLock()
+                private var stopped = false, written: [String: String] = [:]
+                var isStopped: Bool { lock.withLock { stopped } }
+                func stop() { lock.withLock { stopped = true } }
+                func record(_ id: String, _ password: String) { lock.withLock { written[id] = password } }
+                var edits: [String: String] { lock.withLock { written } }
+            }
+            let writer = Writer()
+            let writing = Task {
+                var n = 0
+                // Capped: the server's flood limit counts every push of these edits.
+                while !writer.isStopped && n < 60 {
+                    var item = try await a.vault.item(id: ids[n % ids.count])
+                    item.password = "edit-\(n)"
+                    _ = try await a.vault.save(item)
+                    writer.record(item.id, "edit-\(n)")
+                    n += 1
+                    try await Task.sleep(for: .milliseconds(25))
+                }
+            }
+            var rotated = false
+            for _ in 0..<100 where !rotated {
+                do { _ = try await a.vault.rotateVaultKey(); rotated = true }
+                catch RotationError.pendingChanges { try await Task.sleep(for: .milliseconds(300)) }
+                catch RotationError.tooManyConflicts { try await Task.sleep(for: .milliseconds(300)) }
+            }
+            writer.stop()
+            try await writing.value
+            #expect(rotated)
+            let edited = writer.edits
+
+            for d in [a, b] {
+                for _ in 0..<3 {
+                    if await !d.vault.isUnlocked { try await d.vault.unlock() }
+                    try await d.vault.sync()
+                }
+                let listing = try await d.vault.items()
+                #expect(listing.undecryptable.isEmpty)
+                #expect(try await d.vault.pendingChanges() == 0)
+                for (id, password) in edited { #expect(try await d.vault.revealPassword(id: id) == password, "\(d.name) lost an edit") }
+            }
+        }
+    }
+
     @Test("a record nobody can decrypt blocks rotation until it is deleted; rotating without a revoke keeps every device working")
     func rotationNeedsCleanRecords() async throws {
         try await TestServer.with { server in

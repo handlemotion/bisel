@@ -402,9 +402,15 @@ public final class LocalStore: Sendable {
     }
 
     /// Applies a rotation this device performed itself: new blobs and seqs for the rotated records, and the new cursor.
+    /// `records` are snapshots from before the request: one that was edited (or replaced by a pull) while the request was in
+    /// flight no longer matches its row and is left alone; the caller re-wraps pending edits afterwards.
     public func applyRotation(_ records: [StoredRecord], cursor: Int) throws {
         try pool.write { db in
-            for r in records { try write(r, db) }
+            for r in records {
+                guard let cur = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [r.id]).map(StoredRecord.init(row:)),
+                      cur.rev == r.rev, cur.pending == .none else { continue }
+                try write(r, db)
+            }
             try db.execute(sql: "INSERT OR REPLACE INTO meta(key, value) VALUES ('cursor', ?)", arguments: [Data(String(cursor).utf8)])
         }
     }
