@@ -253,6 +253,8 @@ public actor Vault {
     /// Same, with a device code the person approved (`startConnect` / `pollConnect`) instead of a typed token.
     public func bootstrap(server: URL, credential: SyncClient.BootstrapCredential, deviceName: String) async throws -> RecoveryPhrase {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
+        // A box made through an account registers this Mac's keys on the person's say-so: Touch ID first, before any key exists.
+        if case .connect = credential { try await config.gate.authenticate(reason: "Create your box and connect \(deviceName)") }
         var vk = BiselRandom.bytes(32)
         defer { vk.zeroize() }
         let bundle = try RecoveryService.makeBundle(vaultKey: vk, epoch: 1)
