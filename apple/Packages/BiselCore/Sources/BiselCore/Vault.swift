@@ -250,6 +250,12 @@ public actor Vault {
         var vk = BiselRandom.bytes(32)
         defer { vk.zeroize() }
         let bundle = try RecoveryService.makeBundle(vaultKey: vk, epoch: 1)
+        try installLocalIdentity(vaultKey: vk, bundle: bundle, deviceName: deviceName, recoveryUnconfirmed: true)
+        return bundle.phrase
+    }
+
+    /// Creates this device's keys and a local-only identity for `vk`, and unlocks the vault.
+    private func installLocalIdentity(vaultKey vk: Data, bundle: RecoveryBundle, deviceName: String, recoveryUnconfirmed: Bool) throws {
         let pub = try config.keyStore.createKeys()
         let deviceID = BiselRandom.identifier()
         let envelope = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: pub.enc)
@@ -260,11 +266,10 @@ public actor Vault {
         identity.roster = [RosterEntry(deviceID: deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: pub.sig,
                                        encPubkey: pub.enc, via: "bootstrap")]
         identity.recoveryPinned = true
-        identity.recoveryUnconfirmed = true
+        identity.recoveryUnconfirmed = recoveryUnconfirmed
         try store.setIdentity(identity)
         setKey(vk)
         try writeManifest()
-        return bundle.phrase
     }
 
     /// Registers this device and the recovery keys of an existing local-only vault with a fresh server. The next
@@ -897,6 +902,30 @@ public actor Vault {
         let bundle = RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
                                     envelope: try keys.seal(vaultKey: vkData, epoch: 1))
         try await register(server: server, bootstrapToken: bootstrapToken, deviceName: deviceName, vaultKey: vkData, recovery: bundle)
+        let skipped = try restore(file, vaultKey: vk)
+        if skipped > 0 { throw VaultError.badBackup("\(skipped) item(s) in the backup failed authentication and were skipped") }
+        _ = try await sync()
+    }
+
+    /// Disaster recovery without any server (for example after the Secure Enclave key was invalidated by a fingerprint
+    /// change): rebuilds a local-only vault from a backup and its phrase. A server can be connected afterwards with
+    /// `connectServer`, which uploads every restored item. Returns how many items failed authentication and were skipped.
+    @discardableResult
+    public func importBackupLocal(from url: URL, phrase: RecoveryPhrase, deviceName: String) throws -> Int {
+        guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
+        let file = try BackupFile.decode(try Data(contentsOf: url))
+        var (vkData, _) = try file.vaultKey(phrase: phrase)
+        defer { vkData.zeroize() }
+        let keys = try RecoveryKeys(phrase: phrase)
+        let bundle = RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
+                                    envelope: try keys.seal(vaultKey: vkData, epoch: 1))
+        // The owner just proved they hold this phrase.
+        try installLocalIdentity(vaultKey: vkData, bundle: bundle, deviceName: deviceName, recoveryUnconfirmed: false)
+        return try restore(file, vaultKey: SymmetricKey(data: vkData))
+    }
+
+    /// Re-seals every live item of a backup as a new local edit; returns how many failed authentication.
+    private func restore(_ file: BackupFile, vaultKey vk: SymmetricKey) throws -> Int {
         var skipped = 0
         for rec in file.records where !rec.deleted {
             guard let payload = try? ItemSealer.open(blob: rec.blob, id: rec.id, rev: rec.rev, vaultKey: vk) else { skipped += 1; continue }
@@ -904,7 +933,6 @@ public actor Vault {
                 try ItemSealer.seal(payload: payload, id: rec.id, rev: rev, vaultKey: vk)
             }
         }
-        if skipped > 0 { throw VaultError.badBackup("\(skipped) item(s) in the backup failed authentication and were skipped") }
-        _ = try await sync()
+        return skipped
     }
 }

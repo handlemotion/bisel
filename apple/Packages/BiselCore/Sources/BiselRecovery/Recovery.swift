@@ -72,7 +72,8 @@ public struct BackupFile: Codable, Sendable {
         recoveryPubkey = recoveryPublicKey.base64URLEncoded()
         recoveryEncPubkey = recoveryEncryptionPublicKey.base64URLEncoded()
         self.recoveryEnvelope = recoveryEnvelope.base64URLEncoded()
-        items = records.filter { $0.pending == .none || $0.baseRev > 0 }.map {
+        // Everything this device holds, including edits the server has never seen (a local-only vault has nothing else).
+        items = records.map {
             Record(id: $0.id, rev: $0.rev, seq: $0.seq, deleted: $0.deleted, blob: $0.blob.base64URLEncoded(), updatedAt: $0.updatedAt)
         }
     }

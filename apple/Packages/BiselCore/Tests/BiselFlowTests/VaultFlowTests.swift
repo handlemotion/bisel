@@ -224,6 +224,38 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("a local-only vault exports a full backup and restores from it offline, as after the device key was lost")
+    func localOnlyBackupAndOfflineRestore() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            let phrase = try await a.vault.bootstrapLocal(deviceName: "a")
+            let kept = try await a.vault.save(Item(title: "Never pushed", username: "me", password: "p-kept"))
+            let gone = try await a.vault.save(Item(title: "Deleted", username: "me", password: "p-gone"))
+            try await a.vault.delete(id: gone.id)
+            let backup = FileManager.default.temporaryDirectory.appendingPathComponent("local-\(UUID().uuidString).bisel-backup")
+            defer { try? FileManager.default.removeItem(at: backup) }
+            try await a.vault.exportBackup(to: backup)
+
+            // The Mac's fingerprint set changed: a fresh store, no server anywhere.
+            let b = try Device("b")
+            await #expect(throws: VaultError.self) { try await b.vault.importBackupLocal(from: backup, phrase: try RecoveryPhrase.generate(), deviceName: "b") }
+            let skipped = try await b.vault.importBackupLocal(from: backup, phrase: phrase, deviceName: "b")
+            #expect(skipped == 0)
+            #expect(try await b.vault.identity()?.serverURL == nil)
+            let listing = try await b.vault.items()
+            #expect(listing.items.map(\.id) == [kept.id], "the unsynced item survives, the deleted one stays deleted")
+            #expect(try await b.vault.revealPassword(id: kept.id) == "p-kept")
+
+            // And the restored vault can still be connected to a server and recovered with the same phrase.
+            try await b.vault.connectServer(server.url, bootstrapToken: TestServer.bootstrapToken)
+            try await b.vault.sync()
+            let c = try Device("c")
+            try await c.vault.recover(server: server.url, phrase: phrase, deviceName: "c")
+            try await c.vault.sync()
+            #expect(try await c.vault.revealPassword(id: kept.id) == "p-kept")
+        }
+    }
+
     @Test("recover from the 24 words on a fresh store; wrong or rotated-away phrases do not work")
     func recoveryFromPhrase() async throws {
         try await TestServer.with { server in
