@@ -58,7 +58,6 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
         .padding(inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.colors.background.color)
-        .overlay(glassRim.allowsHitTesting(false))
         .foregroundStyle(theme.colors.text.color)
         .environment(\.theme, theme)
         .preferredColorScheme(.dark)
@@ -66,7 +65,7 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
     }
 }
 
-/// One line of the welcome list: a 15 pt icon and a line of copy.
+/// One line of the welcome list: a 20 pt icon centred on a line of copy.
 struct OnboardingRow: View {
     var icon: String
     var text: String
@@ -74,26 +73,11 @@ struct OnboardingRow: View {
 
     var body: some View {
         HStack(spacing: theme.spacing.l) {
-            Image(icon).renderingMode(.template).frame(width: 15, height: 15)
-            Text(text).font(theme.font(theme.fonts.search)).lineSpacing(3)
+            Image(icon).renderingMode(.template).resizable().scaledToFit().frame(width: 20, height: 20)
+            Text(text).font(theme.font(theme.fonts.search))
             Spacer(minLength: 0)
         }
         .foregroundStyle(theme.colors.secondaryText.color)
-    }
-}
-
-extension OnboardingFrame {
-    /// Pitch black stays pitch black; the glass is only a thin rim on the edge that catches a little light from the
-    /// top-left. The radius is the window's own (measured, about 20 pt), so the rim sits on the window's edge.
-    var glassRim: some View {
-        RoundedRectangle(cornerRadius: 20, style: .continuous)
-            .strokeBorder(
-                LinearGradient(stops: [.init(color: .white.opacity(0.26), location: 0),
-                                       .init(color: .white.opacity(0.07), location: 0.35),
-                                       .init(color: .white.opacity(0.02), location: 0.65),
-                                       .init(color: .white.opacity(0.12), location: 1)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing),
-                lineWidth: 1)
     }
 }
 
@@ -146,6 +130,7 @@ struct PillButtonStyle: ButtonStyle {
             configuration.label
                 .font(theme.font(theme.fonts.row))
                 .foregroundStyle(label)
+                .padding(.bottom, 2)   // the line box carries descender space, so cap-height text reads low; lifts it 1 pt
                 .padding(.horizontal, primary ? 12 : 14)
                 .frame(height: 36)
                 .background(Capsule().fill(fill))
