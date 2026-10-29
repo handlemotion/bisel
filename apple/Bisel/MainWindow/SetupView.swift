@@ -145,7 +145,15 @@ struct PhraseGateView: View {
     var title = "Your recovery phrase"
     var onDone: () -> Void
     private let theme = Theme.biselDark
+    /// Decided once, when the screen appears: while it fades out after Back the box is already gone, and the buttons must not
+    /// re-flow (the Save pill would slide left into Back's place).
+    @State private var canGoBack: Bool
     @State private var saved: String?
+
+    init(service: VaultService, phrase: RecoveryPhrase, title: String = "Your recovery phrase", onDone: @escaping () -> Void) {
+        self.service = service; self.phrase = phrase; self.title = title; self.onDone = onDone
+        _canGoBack = State(initialValue: service.freshBox)
+    }
     @State private var copied = false
 
     var body: some View {
@@ -164,7 +172,7 @@ struct PhraseGateView: View {
                 if let saved { Caption("Saved as \(saved)") }
             }
         } actions: {
-            if service.freshBox {
+            if canGoBack {
                 Button("Back") { Task { await service.discardNewBox() } }
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("phrase-back")
             }
