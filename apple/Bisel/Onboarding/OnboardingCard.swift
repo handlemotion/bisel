@@ -69,7 +69,6 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
         }
         .padding(inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(theme.colors.background.color)
         .overlay(rim)
         .foregroundStyle(theme.colors.text.color)
         .environment(\.theme, theme)
@@ -110,20 +109,29 @@ struct OnboardingRow: View {
 struct ProgressTrack: View {
     var value: Double
     @Environment(\.theme) private var theme
+    /// Each screen is a new view, so the bar starts from where the previous screen left it and then moves on.
+    @State private var shown = ProgressTrack.last
+    @MainActor private static var last = 0.0
 
     var body: some View {
         GeometryReader { g in
             ZStack(alignment: .leading) {
                 Capsule().fill(theme.colors.pillSecondary.color)
                 Capsule().fill((theme.colors.progress ?? theme.colors.accent).color)
-                    .frame(width: g.size.width * max(0, min(1, value)))
+                    .frame(width: g.size.width * max(0, min(1, shown)))
             }
         }
         .frame(height: 8)
-        .animation(.easeInOut(duration: 0.25), value: value)
+        .onAppear { move() }
+        .onChange(of: value) { move() }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Set-up progress")
         .accessibilityValue("\(Int(value * 100)) percent")
+    }
+
+    private func move() {
+        Self.last = value
+        withAnimation(.easeInOut(duration: 0.45)) { shown = value }
     }
 }
 
@@ -160,6 +168,7 @@ struct PillButtonStyle: ButtonStyle {
                 .background(Capsule().fill(fill))
                 .overlay(Capsule().fill((primary ? Color.black : Color.white).opacity(hovering && enabled ? (primary ? 0.10 : 0.12) : 0)))
                 .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.4)
+                .animation(.easeOut(duration: 0.15), value: enabled)
                 .contentShape(Capsule())
                 .onHover { hovering = $0 }
                 .animation(.easeOut(duration: 0.12), value: hovering)

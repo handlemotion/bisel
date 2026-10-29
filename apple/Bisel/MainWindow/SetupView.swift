@@ -64,7 +64,7 @@ struct SetupView: View {
             switch step {
             case .welcome:
                 Button(action: create) {
-                    if service.isBusy { ProgressView().controlSize(.small) } else { HStack(spacing: 8) { PillGlyph(); Text("Create a box") } }
+                    HStack(spacing: 8) { PillGlyph(); Text("Create a box") }
                 }
                 .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
                 .disabled(service.isBusy).accessibilityIdentifier("setup-go")
@@ -77,7 +77,7 @@ struct SetupView: View {
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-upload")
                 Spacer(minLength: 0)
                 Button(action: recover) {
-                    if service.isBusy { ProgressView().controlSize(.small) } else { Text("Connect") }
+                    Text("Connect")
                 }
                 .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
                 .disabled(service.isBusy || words.contains(where: \.isEmpty))
