@@ -256,9 +256,26 @@ public struct SyncClient: Sendable {
         return (data, http)
     }
 
-    /// Builds, signs and sends the request; returns whatever the server answered, whatever the status.
+    /// `performOnce`, waiting out the server's per-address flood limit (an empty 429 with `Retry-After`): a bulk push or
+    /// import runs at the limiter's pace instead of aborting the sync. Every attempt is signed afresh (new nonce, new
+    /// timestamp). After `maxRateLimitWaits` waits the 429 is returned as it is and `check` reports it.
     private func perform(_ method: String, _ path: String, query: [(String, String)] = [], body: Data = Data(),
                          headers: [String: String] = [:], admin: AdminSigner? = nil) async throws -> (Data, HTTPURLResponse) {
+        var waits = 0
+        while true {
+            let (data, http) = try await performOnce(method, path, query: query, body: body, headers: headers, admin: admin)
+            guard http.statusCode == 429, waits < Self.maxRateLimitWaits else { return (data, http) }
+            waits += 1
+            let advised = http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init) ?? 10
+            try await Task.sleep(for: .seconds(min(max(advised, 1), 30)))
+        }
+    }
+
+    private static let maxRateLimitWaits = 6
+
+    /// Builds, signs and sends the request; returns whatever the server answered, whatever the status.
+    private func performOnce(_ method: String, _ path: String, query: [(String, String)] = [], body: Data = Data(),
+                             headers: [String: String] = [:], admin: AdminSigner? = nil) async throws -> (Data, HTTPURLResponse) {
         guard Self.isAcceptable(baseURL) else { throw SyncError.network("the server address must be https") }
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false) else { throw SyncError.malformedResponse }
         let basePath = components.path.hasSuffix("/") ? String(components.path.dropLast()) : components.path
