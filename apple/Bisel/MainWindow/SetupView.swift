@@ -28,10 +28,6 @@ struct SetupView: View {
                     Text("Set up Bisel").font(theme.font(theme.fonts.title, weight: .semibold))
                     Text(blurb).font(theme.font(theme.fonts.subtitle)).foregroundStyle(theme.colors.secondaryText.color)
                 }
-                Picker("", selection: $mode) { ForEach(Mode.allCases) { Text($0.rawValue).tag($0) } }
-                    .pickerStyle(.segmented).labelsHidden().accessibilityIdentifier("setup-mode")
-                    .onChange(of: mode) { _, _ in error = nil }
-
                 VStack(alignment: .leading, spacing: theme.spacing.m) {
                     field("Server URL", "https://your-server.example", $server, id: "setup-server")
                     if mode != .recover { secureField("Bootstrap token", "Set with wrangler secret BOOTSTRAP_TOKEN", $token, id: "setup-token") }
@@ -69,6 +65,13 @@ struct SetupView: View {
                     .accessibilityIdentifier("setup-go")
                 }
                 Caption(footer)
+                // New vault is the normal path; the other two are for a Mac that is joining or rebuilding one.
+                HStack(spacing: theme.spacing.m) {
+                    if mode != .create { Button("Back to new vault") { mode = .create; error = nil }.accessibilityIdentifier("setup-mode-create") }
+                    if mode != .recover { Button("I have a recovery phrase") { mode = .recover; error = nil }.accessibilityIdentifier("setup-mode-recover") }
+                    if mode != .restore { Button("Restore from a backup file") { mode = .restore; error = nil }.accessibilityIdentifier("setup-mode-restore") }
+                }
+                .buttonStyle(.link).font(theme.font(theme.fonts.caption))
             }
             .padding(theme.spacing.l * 2)
             .frame(maxWidth: 560, alignment: .leading)

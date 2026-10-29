@@ -18,6 +18,8 @@ final class CommandPanelController {
     /// Verification drivers run the panel invisibly: fully transparent and click-through, so a run never flashes on the
     /// user's screen. (Window server still treats it as shown, so layout, timing and monitors are the real ones.)
     var debugStealth = false
+    /// True while the Touch ID sheet is up: it takes key from the panel, which must not read as "click away".
+    var authenticating = false
     #endif
     private let host: NSHostingView<AnyView>
     private var keyMonitor: Any?
@@ -47,7 +49,7 @@ final class CommandPanelController {
             // Defer one turn: a spurious resign while the panel is still becoming key must not close it.
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, self.state == .shown, !self.panel.isKeyWindow, !self.menuTracking,
+                    guard let self, self.state == .shown, !self.panel.isKeyWindow, !self.menuTracking, !self.authenticating,
                           ContinuousClock.now - self.shownAt > .milliseconds(150) else { return }
                     self.hide("resignKey")
                 }
@@ -131,6 +133,8 @@ final class CommandPanelController {
         installMonitors()
         startPointerTracking()
         panel.makeKeyAndOrderFront(nil)
+        // Locked: ask for Touch ID right away (no set-up yet: go straight to set-up). Return stays as the retry.
+        if !model.isUnlocked, !debugStealth { model.runUnlock?() }
         Log.panel.notice("STATE shown (visible=\(self.panel.isVisible) key=\(self.panel.isKeyWindow))")
         // Next runloop turn: animate to presented (ease in from the anchor).
         DispatchQueue.main.async { [weak self] in

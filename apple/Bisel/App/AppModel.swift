@@ -151,7 +151,10 @@ final class AppModel {
             showMainWindow()
             return
         }
+        guard !panelController.authenticating else { return }
+        panelController.authenticating = true
         Task {
+            defer { panelController.authenticating = false }
             do { try await service.unlock(reason: "Unlock bisel to use the command panel") }
             catch KeyStoreError.userCancelled {}
             catch BiometricGate.Failure.denied {}
