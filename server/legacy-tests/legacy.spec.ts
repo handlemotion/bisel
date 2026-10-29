@@ -61,10 +61,10 @@ test("the legacy device keeps working with no change to its requests", async ({ 
   expect(sync.recovery.pubkey).toBe("yveNSL4xKJXKeM46BhJz7ugfaOE_wG0qtI9diFRHO3M");
 
   // Writes continue the same gapless log, and the history table keeps filling.
-  const edit = await api.call(dev, "PUT", "/v1/items/legacy-item-00000000001", { json: { base_rev: 2, epoch: 2, blob: b64u(Buffer.from("new blob content")) } });
+  const edit = await api.call(dev, "PUT", "/v1/items/legacy-item-00000000001", { json: { base_rev: 2, epoch: 2, blob: b64u(Buffer.alloc(100, 7))   /* sealed items are at least 88 bytes */ } });
   expect(edit.status()).toBe(200);
   expect((await json(edit)).item).toMatchObject({ rev: 3, seq: 4 });
-  const fresh = await api.call(dev, "PUT", "/v1/items/legacy-item-00000000003", { json: { base_rev: 0, epoch: 2, blob: b64u(Buffer.from("another one")) } });
+  const fresh = await api.call(dev, "PUT", "/v1/items/legacy-item-00000000003", { json: { base_rev: 0, epoch: 2, blob: b64u(Buffer.alloc(100, 8)) } });
   expect((await json(fresh)).item).toMatchObject({ rev: 1, seq: 5 });
   // The edit's previous state is in history; the seeded 2023 row was older than the retention window and got pruned.
   expect((await json(await api.call(dev, "GET", "/v1/history"))).entries.map((e: any) => [e.item_id, e.rev])).toEqual([
