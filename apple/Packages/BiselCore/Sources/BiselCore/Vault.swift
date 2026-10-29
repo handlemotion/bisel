@@ -119,8 +119,8 @@ public actor Vault {
         #endif
     }
 
-    private let config: Configuration
-    private let store: LocalStore
+    let config: Configuration
+    let store: LocalStore
     private var key: LockedKey?
     private var unlockedUntil: Date?
     private var rotationInProgress = false
@@ -145,7 +145,7 @@ public actor Vault {
         return key
     }
 
-    private func requireKey() throws -> LockedKey {
+    func requireKey() throws -> LockedKey {
         guard let k = liveKey() else { throw VaultError.locked }
         return k
     }
@@ -233,7 +233,7 @@ public actor Vault {
 
     /// A box without a server has no server-side history: every version an edit or delete replaces goes to the local trash
     /// (30 days), so an overwritten password can still be taken back.
-    private func keepsLocalHistory() -> Bool { ((try? store.identity()) ?? nil)?.serverURL == nil }
+    func keepsLocalHistory() -> Bool { ((try? store.identity()) ?? nil)?.serverURL == nil }
 
     /// Zeroes VK. Call on sleep, screen lock, idle timeout.
     public func lock() {
@@ -659,7 +659,7 @@ public actor Vault {
 
     // MARK: items
 
-    private func decrypt(_ rec: StoredRecord, _ k: LockedKey) throws -> Item {
+    func decrypt(_ rec: StoredRecord, _ k: LockedKey) throws -> Item {
         let payload = try k.withKey { try ItemSealer.open(blob: rec.blob, id: rec.id, rev: rec.rev, vaultKey: $0) }
         return try ItemCodec.decode(payload, id: rec.id)
     }
