@@ -363,6 +363,8 @@ enum DebugFlow {
         check(FillOrigin.refusal(pageHost: nil, isBrowser: true, itemHosts: bank) != nil, "fill origin: a browser page whose address cannot be read is refused")
         check(FillOrigin.refusal(pageHost: nil, isBrowser: false, itemHosts: bank) == nil, "fill origin: native apps have no page address to check")
         check(FillOrigin.refusal(pageHost: "anything.example", isBrowser: true, itemHosts: []) == nil, "fill origin: a login without an address is the user's call")
+        check(FillEngine.hasControlCharacters("pa\tss") && FillEngine.hasControlCharacters("a\nb") && !FillEngine.hasControlCharacters("pässw0rd! €"),
+              "fill: a secret with Tab/Return is pasted, never typed as key presses")
         check(IconStore.shared.enabled == false, "site icons are off by default")
         // images: header-declared huge PNG rejected before decoding, non-allow-listed type rejected, small PNG accepted
         func crc(_ d: Data) -> UInt32 { var c: UInt32 = 0xFFFFFFFF; for b in d { c ^= UInt32(b); for _ in 0..<8 { c = (c & 1) != 0 ? (c >> 1) ^ 0xEDB88320 : c >> 1 } }; return ~c }

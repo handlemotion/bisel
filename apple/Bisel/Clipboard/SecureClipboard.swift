@@ -36,7 +36,7 @@ final class SecureClipboard {
         pb.setString("", forType: Self.transientType)
         let count = pb.changeCount
         ownedChangeCount = count
-        Log.clipboard.notice("secret copied (concealed, current-host-only), changeCount=\(count)")
+        Log.clipboard.debug("secret copied (concealed, current-host-only)")   // not persisted: a log of secret use is a timeline
         if autoClear { scheduleClear(expecting: count) }
         return count
     }

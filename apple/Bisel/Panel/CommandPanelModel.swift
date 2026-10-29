@@ -385,7 +385,7 @@ final class CommandPanelModel {
     func click(at p: CGPoint) -> Bool {
         guard isUnlocked else { return false }
         if selectedResult != nil, let v = valueFrames.first(where: { $0.value.contains(p) })?.key {
-            Log.panel.notice("click value \(v.rawValue, privacy: .public)")
+            Log.panel.debug("click value")
             activateValue(v)
             return true
         }

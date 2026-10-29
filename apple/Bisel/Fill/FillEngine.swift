@@ -125,10 +125,15 @@ final class FillEngine {
         }
     }
 
+    /// A Tab or Return inside a secret would be typed as a key press (moving focus or submitting mid-secret): those are pasted.
+    nonisolated static func hasControlCharacters(_ text: String) -> Bool {
+        text.unicodeScalars.contains { $0.properties.generalCategory == .control }
+    }
+
     /// Delivers one value; returns the method that actually carried it, or nil if it was stopped because focus moved.
     @concurrent
     private static func deliver(_ text: String, field: FocusedField, target: NSRunningApplication, method: DeliveryMethod) async -> DeliveryMethod? {
-        if method == .paste {
+        if method == .paste || hasControlCharacters(text) {
             guard stillThere(field, target) else { return nil }
             await pasteTemporarily(text)
             return .paste

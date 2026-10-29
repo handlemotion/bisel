@@ -23,3 +23,11 @@ xcuserdata/
 .env.*
 *.bisel-backup
 *.log
+software-keys.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+usage.json
+*.pem
+*.p12
+*.mobileprovision
