@@ -1,25 +1,59 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "bisel-server",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "workers_dev": false,
   "preview_urls": false,
+
+  // ---- default environment = local development ---------------------------------------------
+  // `pnpm dev`, `pnpm test` and everything under apple/ use this one, with a local D1 only.
+  // Nothing in this block can reach a real Cloudflare resource; the database_id is a placeholder.
+  "name": "bisel-server-dev",
   "observability": { "enabled": false },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "bisel",
-      // Placeholder: only used by `wrangler dev` / `--local`, never touches Cloudflare.
-      // Replace with the real id only when a deployed instance is created (see README).
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
   ],
   "vars": {
-    // Worker-side failed-auth backoff: after AUTH_FAIL_LIMIT failures from one IP
-    // inside AUTH_FAIL_WINDOW_SECONDS, that IP gets the uniform 404 for everything.
+    // Failed-auth budget per client IP (CF-Connecting-IP): after AUTH_FAIL_LIMIT failures inside
+    // AUTH_FAIL_WINDOW_SECONDS the IP's *failing* requests stop costing D1 writes and are answered
+    // AUTH_BACKOFF_MS late. Valid signatures are never refused because of this counter.
     "AUTH_FAIL_LIMIT": "20",
-    "AUTH_FAIL_WINDOW_SECONDS": "600"
+    "AUTH_FAIL_WINDOW_SECONDS": "600",
+    "AUTH_BACKOFF_MS": "1000"
+  },
+
+  // ---- production --------------------------------------------------------------------------
+  // Deploy only by following DEPLOY.md: `wrangler deploy --env prod`.
+  // Every REPLACE_… value below must be filled in by the owner; wrangler refuses to deploy while
+  // the D1 id is a placeholder. No secret lives in this file: BOOTSTRAP_TOKEN is set with
+  // `wrangler secret put BOOTSTRAP_TOKEN --env prod`.
+  "env": {
+    "prod": {
+      "name": "bisel-server",
+      "workers_dev": false,
+      "preview_urls": false,
+      // The Worker answers only on this hostname: a random, unguessable label under bisel.app,
+      // covered by a wildcard certificate so the name never appears in Certificate Transparency logs.
+      "routes": [{ "pattern": "REPLACE_WITH_RANDOM_LABEL.bisel.app/*", "zone_name": "bisel.app" }],
+      "observability": { "enabled": true },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "bisel",
+          "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "vars": {
+        "AUTH_FAIL_LIMIT": "20",
+        "AUTH_FAIL_WINDOW_SECONDS": "600",
+        "AUTH_BACKOFF_MS": "1000"
+      }
+    }
   }
 }

@@ -46,29 +46,57 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
     }
 
     public func sign(_ message: Data) throws -> Data {
-        guard let key = try loadKey(.sig, context: nil) else { throw KeyStoreError.noKeys }
+        // DK-sig has no biometric requirement; the context makes that explicit: if the system ever wanted to
+        // prompt, the call fails instead of putting a Touch ID sheet in front of a background sync.
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        guard let key = try loadKey(.sig, context: context) else { throw KeyStoreError.noKeys }
         var err: Unmanaged<CFError>?
         guard let der = SecKeyCreateSignature(key, .ecdsaSignatureMessageX962SHA256, message as CFData, &err) else {
-            throw KeyStoreError.failed(err?.takeRetainedValue().localizedDescription ?? "sign failed")
+            throw Self.map(err?.takeRetainedValue(), fallback: "sign failed")
         }
         return try P256.Signing.ECDSASignature(derRepresentation: der as Data).rawRepresentation
     }
 
     public func openEnvelope(_ envelope: Data, reason: String) async throws -> Data {
+        guard let first = try await openEnvelopes([envelope], reason: reason).first else { throw KeyStoreError.failed("no result") }
+        return first
+    }
+
+    public func openEnvelopes(_ envelopes: [Data], reason: String) async throws -> [Data] {
         // The key operation blocks while the biometric sheet is up: keep it off the caller's executor.
         try await Task.detached(priority: .userInitiated) { [self] in
-            let context = LAContext()
+            let context = LAContext()                 // one context: the first decrypt authenticates, the rest reuse it
             context.localizedReason = reason
             context.localizedFallbackTitle = ""
             guard let key = try loadKey(.enc, context: context) else { throw KeyStoreError.noKeys }
-            var err: Unmanaged<CFError>?
-            guard let out = SecKeyCreateDecryptedData(key, DeviceEnvelope.algorithm, envelope as CFData, &err) else {
-                let e = err?.takeRetainedValue()
-                if let e, (e as Error as NSError).code == LAError.userCancel.rawValue { throw KeyStoreError.userCancelled }
-                throw KeyStoreError.failed(e?.localizedDescription ?? "decrypt failed")
+            return try envelopes.map { envelope in
+                var err: Unmanaged<CFError>?
+                guard let out = SecKeyCreateDecryptedData(key, DeviceEnvelope.algorithm, envelope as CFData, &err) else {
+                    throw Self.map(err?.takeRetainedValue(), fallback: "decrypt failed")
+                }
+                return out as Data
             }
-            return out as Data
         }.value
+    }
+
+    /// Typed mapping of Security / LocalAuthentication failures. Messages carry codes, never key material.
+    static func map(_ error: CFError?, fallback: String) -> KeyStoreError {
+        guard let error else { return .failed(fallback) }
+        let ns = error as Error as NSError
+        switch (ns.domain, ns.code) {
+        case (LAError.errorDomain, LAError.userCancel.rawValue), (LAError.errorDomain, LAError.appCancel.rawValue),
+             (LAError.errorDomain, LAError.systemCancel.rawValue), (NSOSStatusErrorDomain, Int(errSecUserCanceled)):
+            return .userCancelled
+        case (LAError.errorDomain, LAError.biometryLockout.rawValue):
+            return .unavailable("Touch ID is locked out; unlock the Mac with its password first")
+        case (LAError.errorDomain, LAError.biometryNotEnrolled.rawValue), (LAError.errorDomain, LAError.biometryNotAvailable.rawValue):
+            return .unavailable("Touch ID is not available or not enrolled")
+        case (LAError.errorDomain, LAError.authenticationFailed.rawValue), (NSOSStatusErrorDomain, Int(errSecAuthFailed)):
+            return .failed("authentication failed")
+        default:
+            return .failed("\(fallback) (\(ns.domain) \(ns.code))")
+        }
     }
 
     public func deleteKeys() throws {
@@ -87,7 +115,7 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
     private func makeKey(_ role: Role, flags: SecAccessControlCreateFlags, accessible: CFString) throws -> SecKey {
         var err: Unmanaged<CFError>?
         guard let access = SecAccessControlCreateWithFlags(nil, accessible, flags, &err) else {
-            throw KeyStoreError.failed(err?.takeRetainedValue().localizedDescription ?? "access control")
+            throw KeyStoreError.failed("access control: \(err.map { ($0.takeRetainedValue() as Error as NSError).code } ?? 0)")
         }
         var priv: [CFString: Any] = [
             kSecAttrIsPermanent: persistent,
@@ -133,7 +161,9 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
         var item: CFTypeRef?
         let status = SecItemCopyMatching(q as CFDictionary, &item)
         switch status {
-        case errSecSuccess: return (item as! SecKey)
+        case errSecSuccess:
+            guard let item, CFGetTypeID(item) == SecKeyGetTypeID() else { throw KeyStoreError.failed("keychain returned an unexpected item") }
+            return (item as! SecKey)   // type checked above
         case errSecItemNotFound: return nil
         default: throw KeyStoreError.failed("SecItemCopyMatching \(status)")
         }

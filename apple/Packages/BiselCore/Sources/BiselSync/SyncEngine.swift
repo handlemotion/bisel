@@ -13,6 +13,9 @@ public struct SyncReport: Sendable, Equatable {
     /// Items with local edits that conflict with remote changes but could not be resolved because the vault is locked.
     public var deferredConflicts: [String] = []
     public var headSeq = 0
+    /// Another device rotated the vault key. This device fetched its new envelope and must be unlocked again
+    /// (the vault facade has already locked itself). Local edits made under the old key are re-wrapped at unlock.
+    public var rotationAdopted = false
     public init() {}
 }
 
@@ -29,14 +32,33 @@ public struct SyncEngine: Sendable {
 
     public func run() async throws -> SyncReport {
         var report = SyncReport()
-        try await push(&report)
-        try await pull(&report)
+        let epoch = try store.identity()?.epoch ?? 1
+        var staleEpoch = false
+        try await push(&report, epoch: epoch, staleEpoch: &staleEpoch)
+        let serverEpoch = try await pull(&report)
+        if staleEpoch || serverEpoch > epoch {
+            try await adoptRotation(&report)
+        }
         return report
+    }
+
+    /// Another device rotated VK: take this device's new envelope. If edits sealed under the old key are still
+    /// pending, remember the old envelope so the next unlock can re-wrap them.
+    private func adoptRotation(_ report: inout SyncReport) async throws {
+        let (envelope, epoch) = try await client.envelope()
+        guard var identity = try store.identity() else { return }
+        if identity.previousEnvelope == nil, try store.pendingRecords().contains(where: { $0.pending == .put }) {
+            identity.previousEnvelope = identity.envelope
+        }
+        identity.envelope = envelope
+        identity.epoch = epoch
+        try store.setIdentity(identity)
+        report.rotationAdopted = true
     }
 
     // MARK: push
 
-    private func push(_ report: inout SyncReport) async throws {
+    private func push(_ report: inout SyncReport, epoch: Int, staleEpoch: inout Bool) async throws {
         var skipped = Set<String>()
         // Resolving a conflict creates a new pending item, so loop until nothing new is pending.
         for _ in 0..<8 {
@@ -45,13 +67,18 @@ public struct SyncEngine: Sendable {
             for rec in pending {
                 let outcome = rec.pending == .delete
                     ? try await client.delete(id: rec.id, baseRev: rec.baseRev)
-                    : try await client.put(id: rec.id, baseRev: rec.baseRev, blob: rec.blob)
+                    : try await client.put(id: rec.id, baseRev: rec.baseRev, blob: rec.blob, epoch: epoch)
                 switch outcome {
                 case .accepted(let server):
                     try store.confirmPushed(pushed: rec, server: server)
                     report.pushed += 1
                 case .conflict(let current):
                     if !(try resolveConflict(local: rec, current: current, &report)) { skipped.insert(rec.id) }
+                case .staleEpoch:
+                    // The edit is sealed under a rotated-away key. Keep it pending; pull, adopt the new envelope,
+                    // and let the next unlock re-wrap it.
+                    staleEpoch = true
+                    return
                 }
             }
         }
@@ -87,7 +114,8 @@ public struct SyncEngine: Sendable {
 
     // MARK: pull
 
-    private func pull(_ report: inout SyncReport) async throws {
+    /// Returns the server's epoch as of the last page.
+    private func pull(_ report: inout SyncReport) async throws -> Int {
         var since = try store.cursor()
         while true {
             let page = try await client.pull(since: since)
@@ -96,8 +124,14 @@ public struct SyncEngine: Sendable {
             try store.setCursor(since)
             report.headSeq = page.headSeq
             if let devices = try? JSONEncoder().encode(page.devices) { try store.setDeviceListJSON(devices) }
-            if let recovery = page.recovery { try store.updateRecovery(recovery.pubkey, recovery.envelope) }
-            if !page.hasMore { return }
+            if !page.hasMore {
+                // Recovery material is only recorded from a complete pull, so a backup never pairs a rotated
+                // recovery envelope with half-rotated items.
+                if let recovery = page.recovery {
+                    try store.updateRecovery(pubkey: recovery.pubkey, encryptionPubkey: recovery.encPubkey, envelope: recovery.envelope)
+                }
+                return page.epoch
+            }
         }
     }
 }

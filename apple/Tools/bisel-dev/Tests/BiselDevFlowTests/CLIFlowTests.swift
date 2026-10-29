@@ -81,6 +81,17 @@ struct CLIFlowTests {
             #expect(after.status != 0)
             #expect(after.err.contains("notAuthorized"))
 
+            // A third device, then a plain key rotation: it re-keys on its next sync and keeps working.
+            let req3 = root.appendingPathComponent("h.json").path
+            try Self.run(["enroll", "request"] + home("h") + ["--server", srv, "--name", "Mac H", "-o", req3])
+            try Self.run(["enroll", "approve"] + home("a") + [req3])
+            try Self.run(["enroll", "complete"] + home("h"))
+            #expect(try Self.run(["rotate-key"] + home("a")).out.contains("epoch 3"), "revoke was epoch 2, this is 3")
+            let adopted = try Self.run(["sync"] + home("h"))
+            #expect(adopted.out.contains("rotated on another device"))
+            #expect(try Self.run(["status"] + home("h")).out.contains("epoch 3"))
+            #expect(try Self.run(["get"] + home("h") + [itemID, "--reveal"]).out.contains("A2"))
+
             // Recovery on an empty home
             try Self.run(["recover"] + home("c") + ["--server", srv, "--phrase", phrase])
             #expect(try Self.run(["list"] + home("c")).out.contains("GitHub (conflict)"))

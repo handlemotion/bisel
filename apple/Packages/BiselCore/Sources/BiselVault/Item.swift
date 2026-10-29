@@ -68,6 +68,13 @@ public struct Item: Sendable, Equatable, Identifiable {
     }
 }
 
+// Items carry passwords, TOTP secrets and notes: their textual and reflected forms show only id and type.
+extension Item: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "Item(id: \(id), type: \(type.rawValue), contents redacted)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: []) }
+}
+
 /// Item without secrets, for list / search UIs.
 public struct ItemSummary: Sendable, Equatable, Identifiable {
     public let id: String

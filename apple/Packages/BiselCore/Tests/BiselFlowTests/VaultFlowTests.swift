@@ -3,6 +3,7 @@ import Foundation
 import Testing
 import BiselCore
 import BiselTestSupport
+import CryptoKit
 
 // Flow tests: real server (wrangler dev, local D1), real crypto, software key store.
 // Run with: swift test --traits SoftwareKeys
@@ -281,10 +282,10 @@ struct VaultFlowTests {
             let page = try await client.pull(since: 0)
             let bankBlob = try #require(page.records.first { $0.id == bank.id }).blob
             let swapped = BiselRandom.identifier()
-            guard case .accepted = try await client.put(id: swapped, baseRev: 0, blob: bankBlob) else { Issue.record("put refused"); return }
+            guard case .accepted = try await client.put(id: swapped, baseRev: 0, blob: bankBlob, epoch: 1) else { Issue.record("put refused"); return }
             // …and also over Mail itself.
             let mailRecord = try #require(page.records.first { $0.id == mail.id })
-            guard case .accepted = try await client.put(id: mail.id, baseRev: mailRecord.rev, blob: bankBlob) else { Issue.record("put refused"); return }
+            guard case .accepted = try await client.put(id: mail.id, baseRev: mailRecord.rev, blob: bankBlob, epoch: 1) else { Issue.record("put refused"); return }
 
             try await b.vault.sync()
             let listing = try await b.vault.items()
@@ -298,9 +299,217 @@ struct VaultFlowTests {
             try await a.vault.save(edit)
             try await a.vault.sync()
             let current = try #require(try await client.pull(since: 0).records.first { $0.id == bank.id })
-            guard case .accepted = try await client.put(id: bank.id, baseRev: current.rev, blob: bankBlob) else { Issue.record("put refused"); return }
+            guard case .accepted = try await client.put(id: bank.id, baseRev: current.rev, blob: bankBlob, epoch: 1) else { Issue.record("put refused"); return }
             try await b.vault.sync()
             #expect(try await b.vault.items().undecryptable.contains(bank.id), "revision is bound into the AAD")
+        }
+    }
+
+    // MARK: vault-key rotation
+
+    /// What a hostile or breached server holds: every live record exactly as stored.
+    private func serverRecords(_ server: TestServer, as device: Device) async throws -> [StoredRecord] {
+        let id = try #require(try await device.vault.identity())
+        return try await device.signedClientFactory(server.url, id.deviceID).pull(since: 0).records
+    }
+
+    /// Tries to open a stored record with a raw vault key; nil when it does not authenticate.
+    private func open(_ record: StoredRecord, with vk: Data) -> Item? {
+        guard let payload = try? ItemSealer.open(blob: record.blob, id: record.id, rev: record.rev, vaultKey: SymmetricKey(data: vk)) else { return nil }
+        return try? ItemCodec.decode(payload, id: record.id)
+    }
+
+    @Test("revoking a device rotates the vault key: the revoked device keeps nothing it can use against the server's data")
+    func revokeRotatesTheVaultKey() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a"), b = try Device("b"), c = try Device("c")
+            let phrase = try await a.bootstrap(server)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            let mail = try await a.vault.save(login("Mail", password: "mail-pw"))
+            try await a.vault.sync()
+            try await b.enroll(through: a, server: server)
+            try await c.enroll(through: a, server: server)
+
+            // What device B walks away with: its envelope, and so the old vault key, plus everything it synced.
+            let bIdentity = try #require(try await b.vault.identity())
+            let oldVK = try await b.keyStore.openEnvelope(try #require(bIdentity.envelope), reason: "test")
+            let before = try await serverRecords(server, as: a)
+            #expect(before.allSatisfy { open($0, with: oldVK) != nil }, "sanity: the old key opens the pre-revoke ciphertext")
+
+            try await a.vault.revoke(deviceID: bIdentity.deviceID)
+
+            // Cut off at once.
+            await #expect(throws: SyncError.notAuthorized) { try await b.vault.sync() }
+            await #expect(throws: SyncError.notAuthorized) { try await b.vault.completeEnrollment() }   // its server-side envelope is gone too
+            #expect(try await a.vault.devices().first { $0.id == bIdentity.deviceID }?.isRevoked == true)
+
+            // Everything now on the server (rotated and untouched items alike) is closed to the old key,
+            // and so is everything written afterwards.
+            var edit = try await a.vault.item(id: bank.id); edit.password = "bank-pw-2"
+            try await a.vault.save(edit)
+            let fresh = try await a.vault.save(login("Created after revoke", password: "new-pw"))
+            try await a.vault.sync()
+            let after = try await serverRecords(server, as: a)
+            #expect(after.count == 3)
+            #expect(after.allSatisfy { open($0, with: oldVK) == nil }, "the revoked device's key opens nothing the server holds now")
+            // Item payloads and revisions are not rewritten by a rotation: Mail only had its key re-wrapped.
+            let mailBefore = try #require(before.first { $0.id == mail.id }), mailAfter = try #require(after.first { $0.id == mail.id })
+            #expect(mailAfter.rev == mailBefore.rev)
+            #expect(mailAfter.blob.dropFirst(ItemSealer.wrappedKeyLength) == mailBefore.blob.dropFirst(ItemSealer.wrappedKeyLength))
+            #expect(mailAfter.blob.prefix(ItemSealer.wrappedKeyLength) != mailBefore.blob.prefix(ItemSealer.wrappedKeyLength))
+            // (What B already copied stays readable to B: that data left the vault before the revoke.)
+            #expect(before.allSatisfy { open($0, with: oldVK) != nil })
+
+            // The remaining devices carry on. C learns of the rotation on its next sync, locks, and unlocks into the new key.
+            #expect(try await a.vault.revealPassword(id: mail.id) == "mail-pw")
+            #expect(await c.vault.isUnlocked)
+            let report = try await c.vault.sync()
+            #expect(report.rotationAdopted)
+            #expect(await !c.vault.isUnlocked, "a device holding a rotated-away key locks itself")
+            await #expect(throws: VaultError.locked) { _ = try await c.vault.items() }
+            try await c.vault.unlock()
+            let onC = try await c.vault.items()
+            #expect(onC.undecryptable.isEmpty)
+            #expect(onC.items.map(\.title).sorted() == ["Bank", "Created after revoke", "Mail"])
+            #expect(try await c.vault.revealPassword(id: bank.id) == "bank-pw-2")
+            var fromC = try await c.vault.item(id: fresh.id); fromC.password = "edited-on-c"
+            try await c.vault.save(fromC)
+            try await c.vault.sync()
+            try await a.vault.sync()
+            #expect(try await a.vault.revealPassword(id: fresh.id) == "edited-on-c")
+
+            // The same 24 words still recover everything, including what was written after the rotation.
+            let fresh2 = try Device("reinstall")
+            try await fresh2.vault.recover(server: server.url, phrase: phrase, deviceName: "reinstall")
+            try await fresh2.vault.sync()
+            let recovered = try await fresh2.vault.items()
+            #expect(recovered.undecryptable.isEmpty)
+            #expect(try await fresh2.vault.revealPassword(id: fresh.id) == "edited-on-c")
+            #expect(recovered.items.count == 3)
+
+            // And a backup taken after the rotation restores onto a new server with the same phrase.
+            let backup = FileManager.default.temporaryDirectory.appendingPathComponent("rot-\(UUID().uuidString).bisel-backup")
+            defer { try? FileManager.default.removeItem(at: backup) }
+            try await a.vault.exportBackup(to: backup)
+            try await TestServer.with { other in
+                let restored = try Device("restored")
+                try await restored.vault.importBackup(from: backup, phrase: phrase, server: other.url,
+                                                      bootstrapToken: TestServer.bootstrapToken, deviceName: "restored")
+                #expect(try await restored.vault.revealPassword(id: bank.id) == "bank-pw-2")
+            }
+        }
+    }
+
+    @Test("an edit made offline under the old key survives a rotation by another device")
+    func offlineEditAcrossRotation() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a"), b = try Device("b")
+            try await a.bootstrap(server)
+            let router = try await a.vault.save(login("Router", password: "r1"))
+            try await a.vault.sync()
+            try await b.enroll(through: a, server: server)
+
+            // B edits and creates while "offline" (never syncs); both are sealed under the old vault key.
+            var edit = try await b.vault.item(id: router.id); edit.password = "r2-from-b"
+            try await b.vault.save(edit)
+            let created = try await b.vault.save(login("Made on B", password: "b-pw"))
+            #expect(try await b.vault.pendingChanges() == 2)
+
+            try await a.vault.rotateVaultKey()          // meanwhile A rotates the key (no device removed)
+
+            // B syncs: the server refuses the stale-key edits, B adopts the new envelope and locks, the edits stay pending.
+            let first = try await b.vault.sync()
+            #expect(first.rotationAdopted)
+            #expect(first.pushed == 0)
+            #expect(try await b.vault.pendingChanges() == 2)
+            #expect(await !b.vault.isUnlocked)
+            // Unlocking re-wraps the pending edits under the new key; the next sync pushes them.
+            try await b.vault.unlock()
+            let second = try await b.vault.sync()
+            #expect(second.pushed == 2)
+            #expect(second.conflicts.isEmpty)
+
+            try await a.vault.sync()
+            #expect(try await a.vault.revealPassword(id: router.id) == "r2-from-b")
+            #expect(try await a.vault.revealPassword(id: created.id) == "b-pw")
+            #expect(try await a.vault.items().undecryptable.isEmpty)
+            #expect(try await b.vault.items().undecryptable.isEmpty)
+        }
+    }
+
+    @Test("edits racing a rotation are never lost, never undecryptable")
+    func editsRaceRotation() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a"), b = try Device("b")
+            try await a.bootstrap(server)
+            for n in 0..<12 { try await a.vault.save(login("Seed \(n)", password: "s\(n)")) }
+            try await a.vault.sync()
+            try await b.enroll(through: a, server: server)
+
+            // B keeps editing and syncing while A rotates the key and revokes nobody.
+            async let rotation: Void = a.vault.rotateVaultKey()
+            var written: [String: String] = [:]
+            for n in 0..<8 {
+                let item = try await b.vault.save(login("Race \(n)", password: "race-\(n)"))
+                written[item.id] = "race-\(n)"
+                do { try await b.vault.sync() } catch is VaultError { try await b.vault.unlock() }
+                if await !b.vault.isUnlocked { try await b.vault.unlock() }
+            }
+            try await rotation
+            // Informational: how often the server turned a rotation away because B's writes landed in between.
+            print("race flow: server rotate conflicts = \(server.log.components(separatedBy: "rotate_conflict").count - 1)")
+
+            // Converge: everybody syncs (unlocking where the rotation locked them) until nothing is pending.
+            for _ in 0..<4 {
+                for d in [a, b] {
+                    if await !d.vault.isUnlocked { try await d.vault.unlock() }
+                    try await d.vault.sync()
+                }
+            }
+            for d in [a, b] {
+                if await !d.vault.isUnlocked { try await d.vault.unlock() }
+                let listing = try await d.vault.items()
+                #expect(listing.undecryptable.isEmpty)
+                #expect(listing.items.count == 20, "\(d.name) sees all 12 seeds and all 8 racing items")
+                #expect(try await d.vault.pendingChanges() == 0)
+                for (id, password) in written { #expect(try await d.vault.revealPassword(id: id) == password) }
+            }
+        }
+    }
+
+    @Test("a record nobody can decrypt blocks rotation until it is deleted; rotating without a revoke keeps every device working")
+    func rotationNeedsCleanRecords() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a"), b = try Device("b")
+            try await a.bootstrap(server)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await b.enroll(through: a, server: server)
+
+            // Somebody with write access plants Bank's ciphertext under a new id.
+            let aID = try #require(try await a.vault.identity()?.deviceID)
+            let client = a.signedClientFactory(server.url, aID)
+            let blob = try #require(try await client.pull(since: 0).records.first { $0.id == bank.id }).blob
+            let planted = BiselRandom.identifier()
+            guard case .accepted = try await client.put(id: planted, baseRev: 0, blob: blob, epoch: 1) else { Issue.record("put refused"); return }
+            try await a.vault.sync()
+
+            do { try await a.vault.rotateVaultKey(); Issue.record("rotation should have been refused") }
+            catch RotationError.undecryptableItems(let ids) { #expect(ids == [planted]) }
+            #expect(try await a.vault.devices().count == 2, "nothing changed on the server")
+
+            try await a.vault.delete(id: planted)
+            try await a.vault.sync()
+            try await a.vault.rotateVaultKey()
+            #expect(try await a.vault.revealPassword(id: bank.id) == "bank-pw")
+            #expect(try await b.vault.sync().rotationAdopted)
+            try await b.vault.unlock()
+            #expect(try await b.vault.revealPassword(id: bank.id) == "bank-pw")
+
+            // A device cannot revoke itself (it would be rotating the key out from under its own revocation).
+            let bID = try #require(try await b.vault.identity()?.deviceID)
+            await #expect(throws: RotationError.cannotRevokeThisDevice) { try await b.vault.revoke(deviceID: bID) }
+            await #expect(throws: RotationError.deviceNotFound("nope")) { try await a.vault.revoke(deviceID: "nope") }
         }
     }
 }

@@ -63,6 +63,12 @@ export async function recoveryKeyFromSeed(seed: Uint8Array): Promise<RecoveryKey
   };
 }
 
+/** Raw 32-byte X25519 public key (the server only checks that it imports). */
+export async function randomX25519Pub(): Promise<string> {
+  const k = (await subtle.generateKey({ name: "X25519" }, true, ["deriveBits"])) as unknown as { publicKey: webcrypto.CryptoKey };
+  return b64u(await subtle.exportKey("raw", k.publicKey));
+}
+
 export function pct(s: string): string {
   return encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
 }

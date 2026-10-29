@@ -13,7 +13,7 @@ struct BiselDev: AsyncParsableCommand {
         Use different homes for device A, device B, a fresh install, and so on.
         """,
         subcommands: [Bootstrap.self, Status.self, Add.self, Edit.self, Remove.self, List.self, Get.self, TOTPCommand.self,
-                      SyncCommand.self, Devices.self, Enroll.self, Revoke.self, Recover.self, RotateRecovery.self,
+                      SyncCommand.self, Devices.self, Enroll.self, Revoke.self, RotateKey.self, Recover.self, RotateRecovery.self,
                       Backup.self, SEProbe.self]
     )
 }
@@ -75,7 +75,7 @@ struct Status: AsyncParsableCommand {
         let vault = try await global.vault(unlock: false)
         guard let id = try await vault.identity() else { say("not configured"); return }
         say("device \(id.deviceID) '\(id.deviceName)' keystore=\(id.keyStore) server=\(id.serverURL)")
-        say(id.envelope == nil ? "state: enrollment pending approval" : "state: enrolled")
+        say(id.envelope == nil ? "state: enrollment pending approval" : "state: enrolled, vault key epoch \(id.epoch)")
         say("pending local changes: \(try await vault.pendingChanges())")
     }
 }
@@ -205,7 +205,9 @@ struct SyncCommand: AsyncParsableCommand {
     @Flag(help: "Do not unlock first: conflicts that need decrypting are deferred.") var locked = false
     func run() async throws {
         let vault = try await global.vault(unlock: !locked)
-        say(describe(try await vault.sync()))
+        let report = try await vault.sync()
+        say(describe(report))
+        if report.rotationAdopted { say("the vault key was rotated on another device: this device locked itself; run any command to unlock into the new key") }
     }
 }
 
@@ -264,12 +266,30 @@ struct Enroll: AsyncParsableCommand {
 }
 
 struct Revoke: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Revoke a device (effective immediately on the server).")
+    static let configuration = CommandConfiguration(abstract: "Revoke a device and rotate the vault key (one atomic server transaction).")
     @OptionGroup var global: Global
     @Argument var deviceID: String
+    @Flag(help: "Emergency: cut the device off WITHOUT rotating the vault key (it keeps VK). Follow with rotate-key.") var noRotate = false
     func run() async throws {
-        try await global.vault().revoke(deviceID: deviceID)
-        say("revoked \(deviceID)")
+        let vault = try await global.vault()
+        if noRotate {
+            try await vault.revokeWithoutRotation(deviceID: deviceID)
+            say("revoked \(deviceID); vault key NOT rotated, run `rotate-key`")
+        } else {
+            try await vault.revoke(deviceID: deviceID)
+            say("revoked \(deviceID) and rotated the vault key; other devices re-key on their next sync")
+        }
+    }
+}
+
+struct RotateKey: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "rotate-key", abstract: "Rotate the vault key without removing a device.")
+    @OptionGroup var global: Global
+    func run() async throws {
+        let vault = try await global.vault()
+        try await vault.rotateVaultKey()
+        let id = try await vault.identity()
+        say("vault key rotated; now at epoch \(id?.epoch ?? 0)")
     }
 }
 

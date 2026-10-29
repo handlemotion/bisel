@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Security
 
 public extension Data {
     /// RFC 4648 base64url without padding.
@@ -32,13 +33,34 @@ public extension Data {
     }
 
     func sha256Hex() -> String { Data(SHA256.hash(data: self)).hexEncoded() }
+
+    /// Best-effort wipe of this buffer in place (`memset_s`, not optimised away). Swift value semantics
+    /// can leave other copies behind, so this narrows the exposure window; it is not a guarantee.
+    mutating func zeroize() {
+        withUnsafeMutableBytes { buffer in
+            if let base = buffer.baseAddress, buffer.count > 0 { _ = memset_s(base, buffer.count, 0, buffer.count) }
+        }
+    }
+
+    /// Comparison whose duration does not depend on where the first difference is. Use it for anything
+    /// secret-derived (MACs, tokens, keys); ordinary `==` is fine for public keys and ciphertext.
+    func constantTimeEquals(_ other: Data) -> Bool {
+        guard count == other.count else { return false }
+        var diff: UInt8 = 0
+        for (a, b) in zip(self, other) { diff |= a ^ b }
+        return diff == 0
+    }
 }
 
 public enum BiselRandom {
     public static func bytes(_ count: Int) -> Data {
         var d = Data(count: count)
-        let status = d.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!) }
-        precondition(status == errSecSuccess, "SecRandomCopyBytes failed")
+        let status = d.withUnsafeMutableBytes { buffer -> Int32 in
+            guard let base = buffer.baseAddress else { return errSecSuccess }   // count == 0
+            return SecRandomCopyBytes(kSecRandomDefault, count, base)
+        }
+        // A CSPRNG failure is unrecoverable: continuing would mean weak keys.
+        precondition(status == errSecSuccess, "SecRandomCopyBytes failed (\(status))")
         return d
     }
 

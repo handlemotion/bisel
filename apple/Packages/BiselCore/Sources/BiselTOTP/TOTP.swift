@@ -16,6 +16,13 @@ public struct TOTPParameters: Codable, Sendable, Equatable {
     }
 }
 
+// A TOTP secret must not reach logs, `print`, `dump` or crash-time descriptions.
+extension TOTPParameters: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "TOTPParameters(\(algo.rawValue), \(digits) digits, \(period) s, secret redacted)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: []) }
+}
+
 public struct TOTPCode: Sendable, Equatable {
     public let code: String
     public let secondsRemaining: Int

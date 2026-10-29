@@ -35,7 +35,18 @@ public protocol DeviceKeyStore: Sendable {
     func sign(_ message: Data) throws -> Data
     /// ECIES-opens a device envelope with DK-enc. May show a biometric prompt (`reason`).
     func openEnvelope(_ envelope: Data, reason: String) async throws -> Data
+    /// Opens several envelopes with one authentication (the Secure Enclave store shares one `LAContext`, so the user
+    /// sees a single Touch ID sheet). Results are in the order of `envelopes`.
+    func openEnvelopes(_ envelopes: [Data], reason: String) async throws -> [Data]
     func deleteKeys() throws
+}
+
+public extension DeviceKeyStore {
+    func openEnvelopes(_ envelopes: [Data], reason: String) async throws -> [Data] {
+        var out: [Data] = []
+        for e in envelopes { out.append(try await openEnvelope(e, reason: reason)) }
+        return out
+    }
 }
 
 /// Fresh user-presence check for sensitive actions (§4 unlock model, point 3).

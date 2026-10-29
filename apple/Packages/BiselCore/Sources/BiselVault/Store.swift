@@ -52,12 +52,39 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
     public var keyStore: String
     /// nil while an enrollment is waiting for approval.
     public var envelope: Data?
+    /// Recovery material as last reported by the server (needed for backup files and for re-sealing VK on rotation).
     public var recoveryPublicKey: Data?
     public var recoveryEnvelope: Data?
+    /// X25519 key the recovery envelope is sealed to (derived from the phrase; public).
+    public var recoveryEncryptionPublicKey: Data?
+    /// Epoch of the vault key `envelope` holds. Moves when any device rotates VK.
+    public var epoch: Int
+    /// The envelope that held the previous vault key, kept only while local edits made under it still await
+    /// re-wrapping (it needs the same biometric unlock as `envelope`, so it protects nothing extra).
+    public var previousEnvelope: Data?
+
     public init(deviceID: String, deviceName: String, serverURL: URL, keyStore: String, envelope: Data? = nil,
-                recoveryPublicKey: Data? = nil, recoveryEnvelope: Data? = nil) {
+                recoveryPublicKey: Data? = nil, recoveryEnvelope: Data? = nil,
+                recoveryEncryptionPublicKey: Data? = nil, epoch: Int = 1, previousEnvelope: Data? = nil) {
         self.deviceID = deviceID; self.deviceName = deviceName; self.serverURL = serverURL; self.keyStore = keyStore
         self.envelope = envelope; self.recoveryPublicKey = recoveryPublicKey; self.recoveryEnvelope = recoveryEnvelope
+        self.recoveryEncryptionPublicKey = recoveryEncryptionPublicKey; self.epoch = epoch
+        self.previousEnvelope = previousEnvelope
+    }
+
+    // Identities written before rotation existed lack the new keys: decode them with defaults.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        deviceID = try c.decode(String.self, forKey: .deviceID)
+        deviceName = try c.decode(String.self, forKey: .deviceName)
+        serverURL = try c.decode(URL.self, forKey: .serverURL)
+        keyStore = try c.decode(String.self, forKey: .keyStore)
+        envelope = try c.decodeIfPresent(Data.self, forKey: .envelope)
+        recoveryPublicKey = try c.decodeIfPresent(Data.self, forKey: .recoveryPublicKey)
+        recoveryEnvelope = try c.decodeIfPresent(Data.self, forKey: .recoveryEnvelope)
+        recoveryEncryptionPublicKey = try c.decodeIfPresent(Data.self, forKey: .recoveryEncryptionPublicKey)
+        epoch = try c.decodeIfPresent(Int.self, forKey: .epoch) ?? 1
+        previousEnvelope = try c.decodeIfPresent(Data.self, forKey: .previousEnvelope)
     }
 }
 
@@ -187,14 +214,33 @@ public final class LocalStore: Sendable {
         try pool.write { try $0.execute(sql: "DELETE FROM records WHERE id = ?", arguments: [id]) }
     }
 
-    /// Keeps the latest recovery public key / envelope the server reported (needed for backup files).
-    public func updateRecovery(_ pubkeyB64: String, _ envelopeB64: String) throws {
+    /// Keeps the latest recovery public keys / envelope the server reported (needed for backup files and rotation).
+    public func updateRecovery(pubkey pubkeyB64: String, encryptionPubkey encB64: String?, envelope envelopeB64: String) throws {
         guard var identity = try identity(),
               let pub = Data(base64URLEncoded: pubkeyB64), let env = Data(base64URLEncoded: envelopeB64) else { return }
-        if identity.recoveryPublicKey == pub && identity.recoveryEnvelope == env { return }
+        let enc = encB64.flatMap { $0.isEmpty ? nil : Data(base64URLEncoded: $0) }
+        if identity.recoveryPublicKey == pub && identity.recoveryEnvelope == env
+            && (enc == nil || identity.recoveryEncryptionPublicKey == enc) { return }
         identity.recoveryPublicKey = pub
         identity.recoveryEnvelope = env
+        if let enc { identity.recoveryEncryptionPublicKey = enc }
         try setIdentity(identity)
+    }
+
+    /// Replaces the sealed blob of a record that is still pending (used to re-wrap local edits after a key rotation).
+    public func replacePendingBlob(id: String, expectedRev: Int, with blob: Data) throws {
+        try pool.write { db in
+            try db.execute(sql: "UPDATE records SET blob = ? WHERE id = ? AND rev = ? AND pending = ?",
+                           arguments: [blob, id, expectedRev, StoredRecord.Pending.put.rawValue])
+        }
+    }
+
+    /// Applies a rotation this device performed itself: new blobs and seqs for the rotated records, and the new cursor.
+    public func applyRotation(_ records: [StoredRecord], cursor: Int) throws {
+        try pool.write { db in
+            for r in records { try write(r, db) }
+            try db.execute(sql: "INSERT OR REPLACE INTO meta(key, value) VALUES ('cursor', ?)", arguments: [Data(String(cursor).utf8)])
+        }
     }
 
     public func removeAll() throws {

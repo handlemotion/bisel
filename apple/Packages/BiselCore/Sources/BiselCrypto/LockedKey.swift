@@ -2,8 +2,13 @@ import Foundation
 import CryptoKit
 
 /// Holds key bytes in a page-locked (`mlock`) allocation that is zeroed on `zero()` / deinit.
-/// CryptoKit's `SymmetricKey` copies are transient, created only inside `withKey`.
-public final class LockedKey: @unchecked Sendable {
+/// CryptoKit's `SymmetricKey` copies are transient, created only inside `withKey`. `rawBytes()` hands out a
+/// `Data` copy that the caller must `zeroize()`.
+public final class LockedKey: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String { "LockedKey(redacted)" }
+    public var debugDescription: String { description }
+    public var customMirror: Mirror { Mirror(self, children: []) }
+
     private let pointer: UnsafeMutableRawPointer
     private let count: Int
     private let lock = NSLock()
@@ -13,7 +18,9 @@ public final class LockedKey: @unchecked Sendable {
         count = key.count
         pointer = UnsafeMutableRawPointer.allocate(byteCount: max(key.count, 1), alignment: 16)
         _ = mlock(pointer, count)          // best effort; failure only means the page may be swappable
-        key.withUnsafeBytes { pointer.copyMemory(from: $0.baseAddress!, byteCount: count) }
+        key.withUnsafeBytes { source in
+            if let base = source.baseAddress, count > 0 { pointer.copyMemory(from: base, byteCount: count) }
+        }
     }
 
     public var isLive: Bool { lock.withLock { live } }

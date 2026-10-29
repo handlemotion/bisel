@@ -16,7 +16,7 @@ pnpm install            # first time
 pnpm dev                # creates .dev.vars if missing, applies local D1 migrations, serves http://localhost:8787
 pnpm migrate            # apply migrations to the local D1 only (pnpm dev already does this)
 pnpm reset              # stop `pnpm dev` first, then wipe local D1 state (.wrangler/state): the next `pnpm dev` is a fresh, un-bootstrapped server
-pnpm test               # Playwright flow tests; starts its own wrangler dev on :8788 with a throwaway D1
+pnpm test               # Playwright flow tests; starts its own wrangler dev on :8788 with a throwaway D1 (AUTH_BACKOFF_MS=400)
 pnpm typecheck
 node scripts/smoke.ts   # manual walk through bootstrap/put/conflict/delete/approve/revoke/recovery against :8787
 ```
@@ -44,9 +44,18 @@ A test client can send its own value to get an isolated rate-limit bucket.
     = CryptoKit `P256.Signing.PublicKey.x963Representation`.
   - Device encryption public key: P-256, same X9.63 65-byte form. The server only checks it is a valid point.
   - Recovery key: Ed25519, public key **raw 32 bytes** = CryptoKit `Curve25519.Signing.PublicKey.rawRepresentation`.
+  - Recovery encryption key: X25519, public key **raw 32 bytes** (`recovery_enc_pubkey`). The server only checks it imports.
 - **Envelopes** (`envelope`, `recovery_envelope`) are opaque byte strings to the server (max 4 KiB each).
-- **Limits.** Item `blob` max **262144 bytes decoded** (256 KiB). Total request body hard cap 1 MiB
-  (above that you get the uniform 404). `GET /v1/sync` `limit` 1..500, default 200.
+- **Epoch.** An integer starting at 1 that moves by one on every vault-key rotation. A client states, in every request that carries
+  material built from the vault key (PUT item, approve device, recovery register, recovery rotate), the epoch of the key it used.
+  A stale epoch is `409 {"error":"stale_epoch","epoch":<current>}` and nothing is written. Learn the current one from `GET /v1/sync`.
+- **Blob layout** (client-defined, but the rotation endpoint relies on it): the first **60 bytes** of a blob are the wrapped item key
+  (`nonce(12) || key(32) || tag(16)`) = exactly **80 base64url characters**; the rest is the payload ciphertext.
+- **Strictness.** Every JSON body is a strict schema: an unknown field, a missing field, a wrong type, a repeated query
+  parameter or a body on GET/DELETE is `400`.
+- **Limits.** Item `blob` max **262144 bytes decoded** (256 KiB). Hard cap on any request body **4 MiB** (above that you get the
+  uniform 404); after authentication each route has its own cap and answers `413 too_large` (item PUT 400 KiB, device/recovery
+  routes 32 KiB, rotate 4 MiB, bootstrap 64 KiB). Rotation takes up to 20 000 items and 64 devices. `GET /v1/sync` `limit` 1..500, default 200.
 
 ## How a client signs requests
 
@@ -85,11 +94,12 @@ Algorithms:
 CryptoKit: `try key.signature(for: Data(signedString.utf8)).rawRepresentation` for P-256 (it hashes with
 SHA-256 itself; Secure Enclave keys work the same way). Do not pre-hash.
 
-Server checks, in order: unknown / revoked device, `|now - ts| > 60 s`, bad signature, reused nonce
-(nonces are remembered for 5 minutes and are only recorded after the signature verified).
+Server checks: unknown / revoked device, `|now - ts| > 60 s`, bad signature, reused nonce (nonces are remembered for 5 minutes,
+pruned 100 rows per write, and only recorded after the signature verified). All checks are evaluated after one signature
+verification (against a decoy key for an unknown principal), so every failure costs the same.
 
-**Every authentication failure, and every unknown route/method, returns the same empty `404`** (no body,
-no content-type). The reason is only in the server log. If your client gets a bare 404 check, in this order:
+**Every authentication failure, and every unknown route/method (`HEAD` and `OPTIONS` included), returns the same empty `404`**
+(no body, no content-type, the same headers). The reason is only in the server log. If your client gets a bare 404 check, in this order:
 clock skew (> 60 s), signed string differs from what you sent (query order, body bytes), signature format
 (raw r||s, not DER), device revoked, nonce reused, or the device id is wrong.
 
@@ -115,17 +125,21 @@ Once a request is authenticated, failures carry a JSON body `{"error": "<code>",
 |--------|---------|------|
 | 400 | `invalid_request` / `invalid_json` / `invalid_query` / `invalid_id` / `invalid_key` | bad body, query, id, or public key |
 | 404 | `not_found` | item or device id unknown (has a JSON body; auth failures have none) |
-| 409 | `conflict` | stale `base_rev`; body `{"error":"conflict","current": <item record or null>}` |
+| 409 | `conflict` | stale `base_rev`; body `{"error":"conflict","current": <item record or null>}`. For `/v1/rotate`: `{"error":"conflict","epoch","head_seq"}`, nothing was changed |
+| 409 | `stale_epoch` | key material built for an older vault-key epoch; body has the current `epoch` |
 | 409 | `exists` | device id already registered |
-| 413 | `too_large` | blob over 256 KiB |
+| 413 | `too_large` | blob over 256 KiB, or a body over the route's cap |
 | 500 | `internal` | server bug |
 
 ### Failed-auth backoff
 
-After `AUTH_FAIL_LIMIT` (20) failed auth attempts from one IP inside `AUTH_FAIL_WINDOW_SECONDS` (600), that
-IP gets the uniform 404 for **everything, including valid signatures**, until the window expires. There is
-no 429, because that would reveal the server. (Production adds a Cloudflare zone rate-limit rule on top;
-not configured here.)
+A valid signature is **never refused because of failures**, so the owner cannot be locked out by anyone sharing an address.
+After `AUTH_FAIL_LIMIT` (20) failed attempts from one `CF-Connecting-IP` inside `AUTH_FAIL_WINDOW_SECONDS` (600), further
+*failing* requests from that address are answered `AUTH_BACKOFF_MS` (1000 ms, plus up to 25 % jitter) late and cause no more D1
+writes (the counter stops at the limit; at most 20 000 addresses are tracked). Unknown routes, bad signatures, unknown devices and bad
+bootstrap tokens are all treated alike. There is no 429, because that would reveal the server. Flood protection is the
+Cloudflare zone rate-limit rule described in `DEPLOY.md`. Local test hook: `CF-Connecting-IP` is client-settable under `wrangler dev`
+(Cloudflare overwrites it in production).
 
 ## Endpoints
 
@@ -143,10 +157,11 @@ an already-bootstrapped server all return the uniform 404.
     "sig_pubkey": "<P-256 X9.63 65B>", "enc_pubkey": "<P-256 X9.63 65B>", "envelope": "<device envelope>"
   },
   "recovery_pubkey": "<Ed25519 raw 32B>",
+  "recovery_enc_pubkey": "<X25519 raw 32B>",
   "recovery_envelope": "<recovery envelope>"
 }
 ```
-`kind` is a free tag `^[a-z0-9_-]{1,32}$` (`mac`, `iphone`, ...). Response `201 {"device_id","head_seq":0}`.
+`kind` is a free tag `^[a-z0-9_-]{1,32}$` (`mac`, `iphone`, ...). Response `201 {"device_id","head_seq":0,"epoch":1}`.
 The server imports both public keys, so a malformed key gives `400 invalid_key` (only after the token matched).
 
 ### GET /v1/sync?since=\<seq\>&limit=\<n\>
@@ -157,8 +172,9 @@ The server imports both public keys, so a malformed key gives `400 invalid_key` 
   "has_more": false,
   "next_since": 42,               // seq of the last returned item (or `since` if none): pass it as the next `since`
   "head_seq": 42,                 // current head, consistent with this snapshot
+  "epoch": 1,                     // current vault-key epoch
   "devices": [ { "id","name","kind","sig_pubkey","enc_pubkey","created_at","last_seen_at","revoked_at" } ],
-  "recovery": { "alg": "ed25519", "pubkey": "...", "envelope": "..." }   // for building .bisel-backup files
+  "recovery": { "alg": "ed25519", "pubkey": "...", "enc_pubkey": "...", "envelope": "..." }   // for .bisel-backup files and rotation
 }
 ```
 `seq` is gapless: every successful write takes exactly `head_seq + 1`. A rejected write consumes no seq.
@@ -166,11 +182,12 @@ Page until `has_more` is false.
 
 ### PUT /v1/items/:id
 
-Body `{"base_rev": <int>, "blob": "<b64url, 1..262144 bytes decoded>"}`. `base_rev` is 0 for a new item.
+Body `{"base_rev": <int>, "epoch": <int>, "blob": "<b64url, 1..262144 bytes decoded>"}`. `base_rev` is 0 for a new item.
 - `200 {"item": record}` with `rev = base_rev + 1` and a fresh `seq`.
 - `409 {"error":"conflict","current": record|null}` when the stored `rev != base_rev` (e.g. creating an id that
   exists, or editing a stale revision). Nothing is written. Writing over a tombstone with its current `rev`
   resurrects the item.
+- `409 stale_epoch` when `epoch` is not the current one (the blob's item key is wrapped under a rotated-away vault key).
 - `413` over 256 KiB.
 
 ### DELETE /v1/items/:id?base_rev=\<n\>
@@ -185,40 +202,70 @@ Tombstones the item (`deleted: true`, empty blob, new `rev` and `seq`). `200 {"i
 ### POST /v1/devices (approve a new device)
 
 Called by an already-registered device. Body is the device object (same shape as `device` in bootstrap,
-including `envelope` = VK encrypted to the new device's `enc_pubkey`). `201 {"device": {...}}`; the new
-device can sign requests immediately. `409 exists` if the id is taken.
+including `envelope` = VK encrypted to the new device's `enc_pubkey`) plus `"epoch"`, the epoch of that VK.
+`201 {"device": {...}}`; the new device can sign requests immediately. `409 exists` if the id is taken,
+`409 stale_epoch` if a rotation happened since the approver last synced.
 
 ### DELETE /v1/devices/:id
 
-Revokes the device (any device may revoke any device, including itself). Effective immediately: every later
-request signed by it gets the uniform 404, and its stored envelope is wiped. `200 {"id","revoked_at"}`; repeating is a no-op.
+**Emergency only.** Revokes the device without rotating the vault key (any device may revoke any device, including itself).
+Effective immediately: every later request signed by it gets the uniform 404, and its stored envelope is wiped.
+`200 {"id","revoked_at","rotated":false}`; repeating is a no-op. The revoked device still holds VK, so clients revoke through
+`POST /v1/rotate` instead.
+
+### POST /v1/rotate
+
+Vault-key rotation (SPEC §4), optionally revoking a device, in one atomic D1 batch.
+
+```json
+{
+  "base_epoch": 1,                 // epoch the client's snapshot is at
+  "base_seq": 42,                  // head_seq the client's item snapshot is at
+  "revoke": "<device id>" ,        // or null to rotate only; not the caller, not also listed in `devices`
+  "items": [ { "id": "...", "rev": 3, "key": "<80 b64url chars = new 60-byte wrapped item key>" } ],
+  "devices": [ { "id": "...", "envelope": "<VK_new sealed to that device>" } ],   // every device that stays, the caller included
+  "recovery_envelope": "<VK_new sealed to the recovery encryption key>"
+}
+```
+
+Applied only if **all** of this holds at the moment of the transaction, otherwise `409 conflict` and nothing changes:
+`epoch == base_epoch`; `head_seq == base_seq` (no item was written since the snapshot); `items` is exactly the set of live
+(not deleted) items, each at exactly the stated `rev`; `devices` is exactly the set of active devices minus `revoke`; `revoke`,
+if given, is an active device.
+
+Effects: each item's blob gets its first 80 characters replaced by `key` (payload, `rev` and AAD are untouched) and a fresh
+`seq` (`base_seq + 1 … base_seq + n` in request order); each listed device gets its new envelope; `recovery_envelope` is replaced;
+`revoke` is revoked and its envelope wiped; `epoch += 1`; `head_seq += n`.
+`200 {"epoch","head_seq","rotated_items","revoked"}`. Validation errors (shape, duplicates, caller missing from `devices`,
+`revoke` equal to the caller) are `400` and never reach the database.
 
 ### GET /v1/envelope
 
-`200 {"device_id", "envelope"}`: the calling device's own envelope.
+`200 {"device_id", "envelope", "epoch"}`: the calling device's own envelope and the epoch of the key inside it.
 
 ### POST /v1/recovery/session
 
 Signed with the **Ed25519 recovery key** (`X-Bisel-Device: recovery`), no device id.
-- Empty body: `200 {"recovery_envelope","head_seq"}`. Use it to fetch the envelope and derive VK.
-- Body `{"device": {id,name,kind,sig_pubkey,enc_pubkey,envelope}}`: additionally registers that replacement
-  device (its `envelope` is VK encrypted to its own `enc_pubkey`, which the client can build after step one).
-  `200 {"recovery_envelope","head_seq","device":{...}}`; `409 exists` if the id is taken. From then on the
-  new device authenticates normally.
+- Empty body: `200 {"recovery_envelope","head_seq","epoch"}`. Use it to fetch the envelope and derive VK.
+- Body `{"device": {id,name,kind,sig_pubkey,enc_pubkey,envelope}, "epoch": <from step 1>}`: additionally registers that
+  replacement device (its `envelope` is VK encrypted to its own `enc_pubkey`, which the client can build after step one).
+  `200 {"recovery_envelope","head_seq","epoch","device":{...}}`; `409 exists` if the id is taken, `409 stale_epoch` if the
+  key was rotated between the two calls (repeat from step 1). From then on the new device authenticates normally.
 
 A fresh-install recovery is therefore: (1) session with empty body, (2) decrypt VK, (3) session with `device`,
 (4) normal signed `GET /v1/sync`, (5) `POST /v1/recovery/rotate`.
 
 ### POST /v1/recovery/rotate
 
-Signed by a normal device. Body `{"recovery_pubkey": "<Ed25519 raw 32B>", "recovery_envelope": "..."}`.
-Replaces both; the old recovery key stops working at once. `200 {"ok":true}`.
+Signed by a normal device. Body `{"recovery_pubkey": "<Ed25519 raw 32B>", "recovery_enc_pubkey": "<X25519 raw 32B>", "recovery_envelope": "...", "epoch": <int>}`.
+Replaces all three (this is a **new phrase**; vault-key rotation keeps the phrase); the old recovery key stops working at once.
+`200 {"ok":true}`; `409 stale_epoch` if the envelope was built from a rotated-away key.
 
 ## Layout
 
 ```
-src/index.ts       routes (Hono), bootstrap, item/device/recovery handlers
-src/auth.ts        signed-request middleware, canonical query, failed-auth counter
+src/index.ts       routes (Hono), bootstrap, item/device/rotate/recovery handlers
+src/auth.ts        signed-request middleware, canonical query, failed-auth backoff
 src/schemas.ts     Zod schemas
 src/encoding.ts    base64url / hex
 migrations/        D1 migrations (wrangler d1 migrations)
@@ -228,6 +275,5 @@ scripts/smoke.ts   manual end-to-end script
 
 ## Deploying (not done; only on the user's say-so)
 
-1. `wrangler d1 create bisel`, put the real `database_id` in `wrangler.jsonc`, `wrangler d1 migrations apply bisel --remote`.
-2. `wrangler secret put BOOTSTRAP_TOKEN`.
-3. Bind a random subdomain of `bisel.app` as a route, add the zone rate-limit rule.
+See [`DEPLOY.md`](DEPLOY.md): exact steps, verification, and what the owner has to provide. `wrangler.jsonc` has a local default
+environment and an `env.prod` with placeholders (`wrangler deploy --env prod`).

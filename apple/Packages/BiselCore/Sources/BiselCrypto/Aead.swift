@@ -7,7 +7,8 @@ public enum Aead {
 
     public static func seal(_ plaintext: Data, key: SymmetricKey, aad: Data) throws -> Data {
         let box = try AES.GCM.seal(plaintext, using: key, authenticating: aad)
-        return box.combined!
+        guard let combined = box.combined else { throw BiselCryptoError.malformedCiphertext }   // only nil for non-12-byte nonces
+        return combined
     }
 
     public static func open(_ combined: Data, key: SymmetricKey, aad: Data) throws -> Data {

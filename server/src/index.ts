@@ -1,33 +1,63 @@
 import { Hono, type Context } from "hono";
+import { secureHeaders } from "hono/secure-headers";
 import type { ZodType } from "zod";
 import {
   authenticate,
   clientIp,
+  decoyVerify,
   deny,
-  isBlocked,
-  isBlockedStmt,
   readBodyCapped,
   recordFailure,
   type AppEnv,
 } from "./auth";
 import { b64urlByteLength, b64urlDecode } from "./encoding";
 import {
+  BODY_LIMITS,
   BootstrapSchema,
   DeleteQuerySchema,
-  DeviceRegistrationSchema,
+  DeviceApprovalSchema,
+  EmptyQuerySchema,
   IdSchema,
   MAX_BLOB_BYTES,
   PutItemSchema,
   RecoveryRotateSchema,
   RecoverySessionSchema,
+  RotateSchema,
   SyncQuerySchema,
+  WRAPPED_KEY_CHARS,
   type DeviceRegistration,
 } from "./schemas";
 
 const app = new Hono<AppEnv>();
 
-// Anything not matched (unknown path, wrong method, HEAD/OPTIONS) is indistinguishable from an auth failure.
-app.notFound(() => deny());
+// Every response, including the bare 404s, carries exactly the same hardening headers, so they
+// cannot be used to tell an authentication failure from an unknown route.
+app.use(
+  "*",
+  secureHeaders({
+    contentSecurityPolicy: { defaultSrc: ["'none'"], frameAncestors: ["'none'"] },
+    crossOriginResourcePolicy: "same-origin",
+    crossOriginOpenerPolicy: "same-origin",
+    crossOriginEmbedderPolicy: false,
+    referrerPolicy: "no-referrer",
+    strictTransportSecurity: "max-age=63072000; includeSubDomains",
+    xContentTypeOptions: "nosniff",
+    xFrameOptions: "DENY",
+    xDnsPrefetchControl: "off",
+    xDownloadOptions: false,
+    xPermittedCrossDomainPolicies: "none",
+    xXssProtection: false,
+    originAgentCluster: false,
+    permissionsPolicy: {},
+  }),
+);
+app.use("*", async (c, next) => {
+  await next();
+  c.header("Cache-Control", "no-store");
+});
+
+const deviceAuth = authenticate("device");
+const recoveryAuth = authenticate("recovery");
 
 app.onError((err, c) => {
   // Auth and bootstrap catch their own errors and answer 404; anything reaching here happened
@@ -35,9 +65,6 @@ app.onError((err, c) => {
   console.log(JSON.stringify({ evt: "error", path: c.req.path, message: String(err), stack: (err as Error).stack }));
   return c.json({ error: "internal" }, 500);
 });
-
-const deviceAuth = authenticate("device");
-const recoveryAuth = authenticate("recovery");
 
 // ---------------------------------------------------------------------------------------------
 // helpers
@@ -47,9 +74,12 @@ type Ctx = Context<AppEnv>;
 const bad = (c: Ctx, error = "invalid_request", detail?: unknown) =>
   c.json({ error, ...(detail ? { detail } : {}) }, 400);
 
-/** Parse the already-read (and already-authenticated) body as JSON against a schema. */
-function parseJson<T>(c: Ctx, schema: ZodType<T>): { ok: true; data: T } | { ok: false; res: Response } {
+type Parsed<T> = { ok: true; data: T } | { ok: false; res: Response };
+
+/** Parse the already-read (and already-authenticated) body as JSON against a strict schema. */
+function parseJson<T>(c: Ctx, schema: ZodType<T>, maxBytes: number): Parsed<T> {
   const raw = c.get("body");
+  if (raw.length > maxBytes) return { ok: false, res: c.json({ error: "too_large", max_bytes: maxBytes }, 413) };
   let json: unknown;
   try {
     json = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
@@ -63,6 +93,21 @@ function parseJson<T>(c: Ctx, schema: ZodType<T>): { ok: true; data: T } | { ok:
   return { ok: true, data: r.data };
 }
 
+/** Query string against a strict schema; a repeated parameter is invalid (the signature covers both, the meaning would not be). */
+function parseQuery<T>(c: Ctx, schema: ZodType<T>): Parsed<T> {
+  const params = new URL(c.req.url).searchParams;
+  const obj: Record<string, string> = {};
+  for (const [k, v] of params) {
+    if (Object.hasOwn(obj, k)) return { ok: false, res: bad(c, "invalid_query") };
+    obj[k] = v;
+  }
+  const r = schema.safeParse(obj);
+  return r.success ? { ok: true, data: r.data } : { ok: false, res: bad(c, "invalid_query") };
+}
+
+/** Requests that take no body: GET and DELETE with a body are malformed (400, after authentication). */
+const noBody = (c: Ctx) => (c.get("body").length === 0 ? null : bad(c, "unexpected_body"));
+
 /** Importing the key is what validates it: it must be a real point on the curve / valid Ed25519 key. */
 async function validDeviceKeys(d: DeviceRegistration): Promise<boolean> {
   try {
@@ -75,23 +120,26 @@ async function validDeviceKeys(d: DeviceRegistration): Promise<boolean> {
   }
 }
 
-async function validRecoveryKey(pub: string): Promise<boolean> {
+async function validRecoveryKeys(sigPub: string, encPub: string): Promise<boolean> {
   try {
-    if (b64urlDecode(pub).length !== 32) return false;
-    await crypto.subtle.importKey("raw", b64urlDecode(pub), { name: "Ed25519" }, false, ["verify"]);
+    const sig = b64urlDecode(sigPub);
+    const enc = b64urlDecode(encPub);
+    if (sig.length !== 32 || enc.length !== 32) return false;
+    await crypto.subtle.importKey("raw", sig, { name: "Ed25519" }, false, ["verify"]);
+    await crypto.subtle.importKey("raw", enc, { name: "X25519" }, false, []);
     return true;
   } catch {
     return false;
   }
 }
 
-function insertDevice(db: D1Database, d: DeviceRegistration, now: number) {
+function insertDevice(db: D1Database, d: DeviceRegistration, now: number, epoch: number) {
   return db
     .prepare(
-      `INSERT INTO devices (id, name, kind, sig_alg, sig_pubkey, enc_pubkey, envelope, created_at)
-       VALUES (?1, ?2, ?3, 'p256', ?4, ?5, ?6, ?7)`,
+      `INSERT INTO devices (id, name, kind, sig_alg, sig_pubkey, enc_pubkey, envelope, envelope_epoch, created_at)
+       VALUES (?1, ?2, ?3, 'p256', ?4, ?5, ?6, ?7, ?8)`,
     )
-    .bind(d.id, d.name, d.kind, d.sig_pubkey, d.enc_pubkey, d.envelope, now);
+    .bind(d.id, d.name, d.kind, d.sig_pubkey, d.enc_pubkey, d.envelope, epoch, now);
 }
 
 function insertEvent(db: D1Database, now: number, deviceId: string | null, type: string, subject: string | null) {
@@ -100,7 +148,20 @@ function insertEvent(db: D1Database, now: number, deviceId: string | null, type:
     .bind(now, deviceId, type, subject);
 }
 
-const isUnique = (err: unknown) => /UNIQUE|constraint/i.test(String(err));
+/**
+ * A batch statement that aborts the whole D1 batch (a transaction) when `condition` is false, via the
+ * CHECK on `assertions`. The condition is evaluated inside the transaction, so it cannot race.
+ */
+function assertThat(db: D1Database, condition: string, ...binds: unknown[]) {
+  return db.prepare(`INSERT INTO assertions SELECT CASE WHEN ${condition} THEN 1 ELSE 0 END`).bind(...binds);
+}
+const clearAssertions = (db: D1Database) => db.prepare("DELETE FROM assertions");
+const isAssertionFailure = (err: unknown) => /CHECK constraint/i.test(String(err));
+const isUnique = (err: unknown) => /UNIQUE/i.test(String(err));
+
+async function metaState(db: D1Database) {
+  return (await db.prepare("SELECT epoch, head_seq FROM meta WHERE id = 1").first<{ epoch: number; head_seq: number }>())!;
+}
 
 interface ItemRow {
   id: string;
@@ -117,6 +178,11 @@ const DEVICE_PUBLIC_COLS = "id, name, kind, sig_pubkey, enc_pubkey, created_at, 
 
 // ---------------------------------------------------------------------------------------------
 // POST /v1/bootstrap  (one time; shared-secret auth, not signed)
+//
+// A request that fails here does the same work as one that fails in `authenticate` (one read, the
+// digests, one signature verification against a decoy key, one counter write), and the secret is
+// compared as two SHA-256 digests with timingSafeEqual, so neither the answer nor its timing says
+// whether the route exists, whether the token was close, or whether the vault is already set up.
 
 app.post("/v1/bootstrap", async (c) => {
   const req = c.req.raw;
@@ -124,29 +190,22 @@ app.post("/v1/bootstrap", async (c) => {
   const now = Math.floor(Date.now() / 1000);
   let body: Uint8Array<ArrayBuffer> | null;
   try {
-    const [blocked] = await env.DB.batch([isBlockedStmt(env, clientIp(req), now)]);
-    if (isBlocked(env, blocked!.results[0] as { count: number } | undefined)) return deny();
-
     const supplied = req.headers.get("x-bisel-bootstrap") ?? "";
     const expected = env.BOOTSTRAP_TOKEN ?? "";
     const enc = new TextEncoder();
-    // Hash both sides so the comparison is fixed-length, then compare in constant time.
-    const [a, b] = await Promise.all([
+    const [a, b, done] = await Promise.all([
       crypto.subtle.digest("SHA-256", enc.encode(supplied)),
       crypto.subtle.digest("SHA-256", enc.encode(expected)),
+      env.DB.prepare("SELECT 1 AS x FROM meta WHERE id = 1").first(),
     ]);
     const tokenOk = expected.length > 0 && crypto.subtle.timingSafeEqual(a, b);
-    if (!tokenOk) {
-      await recordFailure(env, req, now, "bad_bootstrap_token");
+    if (!tokenOk || done) {
+      await decoyVerify("device", new Uint8Array(64), new Uint8Array(32));
+      if (!tokenOk) await recordFailure(env, req, now, "bad_bootstrap_token");
+      else console.log(JSON.stringify({ evt: "auth_fail", reason: "already_bootstrapped", ip: clientIp(req) }));
       return deny();
     }
-
-    const done = await env.DB.prepare("SELECT 1 AS x FROM meta WHERE id = 1").first();
-    if (done) {
-      console.log(JSON.stringify({ evt: "auth_fail", reason: "already_bootstrapped", ip: clientIp(req) }));
-      return deny();
-    }
-    body = await readBodyCapped(req, 64 * 1024);
+    body = await readBodyCapped(req, BODY_LIMITS.bootstrap);
     if (!body) return deny();
   } catch (err) {
     console.log(JSON.stringify({ evt: "error", where: "bootstrap", message: String(err) }));
@@ -155,18 +214,20 @@ app.post("/v1/bootstrap", async (c) => {
 
   // The caller proved knowledge of the bootstrap secret, so informative errors are fine from here.
   c.set("body", body);
-  const parsed = parseJson(c, BootstrapSchema);
+  const parsed = parseJson(c, BootstrapSchema, BODY_LIMITS.bootstrap);
   if (!parsed.ok) return parsed.res;
-  const { device, recovery_pubkey, recovery_envelope } = parsed.data;
-  if (!(await validDeviceKeys(device)) || !(await validRecoveryKey(recovery_pubkey))) return bad(c, "invalid_key");
+  const { device, recovery_pubkey, recovery_enc_pubkey, recovery_envelope } = parsed.data;
+  if (!(await validDeviceKeys(device)) || !(await validRecoveryKeys(recovery_pubkey, recovery_enc_pubkey))) {
+    return bad(c, "invalid_key");
+  }
 
   try {
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO meta (id, recovery_alg, recovery_pubkey, recovery_envelope, head_seq, created_at)
-         VALUES (1, 'ed25519', ?1, ?2, 0, ?3)`,
-      ).bind(recovery_pubkey, recovery_envelope, now),
-      insertDevice(env.DB, device, now),
+        `INSERT INTO meta (id, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, head_seq, epoch, created_at)
+         VALUES (1, 'ed25519', ?1, ?2, ?3, 0, 1, ?4)`,
+      ).bind(recovery_pubkey, recovery_enc_pubkey, recovery_envelope, now),
+      insertDevice(env.DB, device, now, 1),
       insertEvent(env.DB, now, device.id, "bootstrap", device.id),
     ]);
   } catch (err) {
@@ -175,29 +236,33 @@ app.post("/v1/bootstrap", async (c) => {
     return deny();
   }
   console.log(JSON.stringify({ evt: "bootstrap", device: device.id }));
-  return c.json({ device_id: device.id, head_seq: 0 }, 201);
+  return c.json({ device_id: device.id, head_seq: 0, epoch: 1 }, 201);
 });
 
 // ---------------------------------------------------------------------------------------------
 // GET /v1/sync
 
 app.get("/v1/sync", deviceAuth, async (c) => {
-  const q = SyncQuerySchema.safeParse(Object.fromEntries(new URL(c.req.url).searchParams));
-  if (!q.success) return bad(c, "invalid_query");
+  const nb = noBody(c);
+  if (nb) return nb;
+  const q = parseQuery(c, SyncQuerySchema);
+  if (!q.ok) return q.res;
   const { since, limit } = q.data;
   const db = c.env.DB;
 
-  // One batch = one transaction: items, head_seq and the device list are a consistent snapshot.
+  // One batch = one transaction: items, head_seq, epoch and the device list are a consistent snapshot.
   const [itemsRes, metaRes, devicesRes] = await db.batch([
     db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2`).bind(since, limit + 1),
-    db.prepare("SELECT head_seq, recovery_alg, recovery_pubkey, recovery_envelope FROM meta WHERE id = 1"),
+    db.prepare("SELECT head_seq, epoch, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope FROM meta WHERE id = 1"),
     db.prepare(`SELECT ${DEVICE_PUBLIC_COLS} FROM devices ORDER BY created_at ASC, id ASC`),
   ]);
   const rows = itemsRes!.results as unknown as ItemRow[];
   const meta = metaRes!.results[0] as {
     head_seq: number;
+    epoch: number;
     recovery_alg: string;
     recovery_pubkey: string;
+    recovery_enc_pubkey: string;
     recovery_envelope: string;
   };
   const hasMore = rows.length > limit;
@@ -207,44 +272,56 @@ app.get("/v1/sync", deviceAuth, async (c) => {
     has_more: hasMore,
     next_since: page.length ? page[page.length - 1]!.seq : since,
     head_seq: meta.head_seq,
+    epoch: meta.epoch,
     devices: devicesRes!.results,
-    recovery: { alg: meta.recovery_alg, pubkey: meta.recovery_pubkey, envelope: meta.recovery_envelope },
+    recovery: {
+      alg: meta.recovery_alg,
+      pubkey: meta.recovery_pubkey,
+      enc_pubkey: meta.recovery_enc_pubkey,
+      envelope: meta.recovery_envelope,
+    },
   });
 });
 
 // ---------------------------------------------------------------------------------------------
 // PUT /v1/items/:id   DELETE /v1/items/:id?base_rev=
 //
-// Gapless seq: the head_seq bump and the item write carry the *same* guard (current rev == base_rev).
-// If the guard fails, neither statement does anything, so a rejected write never consumes a seq.
-// D1 runs a batch as a single transaction and serialises writers, so nothing can slip between them.
-
-const REV_GUARD = "COALESCE((SELECT rev FROM items WHERE id = ?1), 0) = ?2";
+// Gapless seq: the head_seq bump and the item write carry the *same* guard (current rev == base_rev,
+// and the caller's epoch is the current one). If the guard fails, neither statement does anything, so
+// a rejected write never consumes a seq. D1 runs a batch as a single transaction and serialises
+// writers, so nothing can slip between the statements.
 
 app.put("/v1/items/:id", deviceAuth, async (c) => {
   const id = c.req.param("id");
   if (!IdSchema.safeParse(id).success) return bad(c, "invalid_id");
-  const parsed = parseJson(c, PutItemSchema);
+  const nq = parseQuery(c, EmptyQuerySchema);
+  if (!nq.ok) return nq.res;
+  const parsed = parseJson(c, PutItemSchema, BODY_LIMITS.item);
   if (!parsed.ok) return parsed.res;
-  const { base_rev, blob } = parsed.data;
+  const { base_rev, blob, epoch } = parsed.data;
   if (b64urlByteLength(blob) > MAX_BLOB_BYTES) return c.json({ error: "too_large", max_bytes: MAX_BLOB_BYTES }, 413);
 
   const db = c.env.DB;
   const now = c.get("now");
-  const [bump, , current] = await db.batch([
-    db.prepare(`UPDATE meta SET head_seq = head_seq + 1 WHERE id = 1 AND ${REV_GUARD}`).bind(id, base_rev),
+  const REV_GUARD = "COALESCE((SELECT rev FROM items WHERE id = ?1), 0) = ?2";
+  const [bump, , current, state] = await db.batch([
+    db.prepare(`UPDATE meta SET head_seq = head_seq + 1 WHERE id = 1 AND epoch = ?3 AND ${REV_GUARD}`).bind(id, base_rev, epoch),
     db
       .prepare(
         `INSERT INTO items (id, rev, seq, deleted, blob, updated_at)
-         SELECT ?1, ?2 + 1, head_seq, 0, ?3, ?4 FROM meta WHERE id = 1 AND ${REV_GUARD}
+         SELECT ?1, ?2 + 1, head_seq, 0, ?3, ?4 FROM meta WHERE id = 1 AND epoch = ?5 AND ${REV_GUARD}
          ON CONFLICT(id) DO UPDATE SET
            rev = excluded.rev, seq = excluded.seq, deleted = 0, blob = excluded.blob, updated_at = excluded.updated_at`,
       )
-      .bind(id, base_rev, blob, now),
+      .bind(id, base_rev, blob, now, epoch),
     db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ?1`).bind(id),
+    db.prepare("SELECT epoch FROM meta WHERE id = 1"),
   ]);
   const row = current!.results[0] as ItemRow | undefined;
   if (bump!.meta.changes !== 1) {
+    const serverEpoch = (state!.results[0] as { epoch: number }).epoch;
+    // The blob's item key is wrapped under a vault key that has since been rotated: refuse, the client re-wraps.
+    if (serverEpoch !== epoch) return c.json({ error: "stale_epoch", epoch: serverEpoch }, 409);
     return c.json({ error: "conflict", current: row ? itemJson(row) : null }, 409);
   }
   return c.json({ item: itemJson(row!) });
@@ -253,8 +330,10 @@ app.put("/v1/items/:id", deviceAuth, async (c) => {
 app.delete("/v1/items/:id", deviceAuth, async (c) => {
   const id = c.req.param("id");
   if (!IdSchema.safeParse(id).success) return bad(c, "invalid_id");
-  const q = DeleteQuerySchema.safeParse(Object.fromEntries(new URL(c.req.url).searchParams));
-  if (!q.success) return bad(c, "invalid_query");
+  const nb = noBody(c);
+  if (nb) return nb;
+  const q = parseQuery(c, DeleteQuerySchema);
+  if (!q.ok) return q.res;
   const { base_rev } = q.data;
 
   const db = c.env.DB;
@@ -280,6 +359,10 @@ app.delete("/v1/items/:id", deviceAuth, async (c) => {
 // devices
 
 app.get("/v1/devices", deviceAuth, async (c) => {
+  const nb = noBody(c);
+  if (nb) return nb;
+  const nq = parseQuery(c, EmptyQuerySchema);
+  if (!nq.ok) return nq.res;
   const { results } = await c.env.DB.prepare(
     `SELECT ${DEVICE_PUBLIC_COLS} FROM devices ORDER BY created_at ASC, id ASC`,
   ).all();
@@ -287,27 +370,40 @@ app.get("/v1/devices", deviceAuth, async (c) => {
 });
 
 app.post("/v1/devices", deviceAuth, async (c) => {
-  const parsed = parseJson(c, DeviceRegistrationSchema);
+  const parsed = parseJson(c, DeviceApprovalSchema, BODY_LIMITS.small);
   if (!parsed.ok) return parsed.res;
-  const d = parsed.data;
+  const { epoch, ...d } = parsed.data;
   if (!(await validDeviceKeys(d))) return bad(c, "invalid_key");
   const p = c.get("principal");
   const now = c.get("now");
+  const db = c.env.DB;
   try {
-    await c.env.DB.batch([
-      insertDevice(c.env.DB, d, now),
-      insertEvent(c.env.DB, now, p.kind === "device" ? p.id : null, "approve", d.id),
+    await db.batch([
+      assertThat(db, "EXISTS (SELECT 1 FROM meta WHERE id = 1 AND epoch = ?1)", epoch),
+      insertDevice(db, d, now, epoch),
+      insertEvent(db, now, p.kind === "device" ? p.id : null, "approve", d.id),
+      clearAssertions(db),
     ]);
   } catch (err) {
+    if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db)).epoch }, 409);
     if (isUnique(err)) return c.json({ error: "exists" }, 409);
     throw err;
   }
   return c.json({ device: { id: d.id, name: d.name, kind: d.kind, created_at: now } }, 201);
 });
 
+/**
+ * Revokes without rotating the vault key. Emergency use only: the revoked device is cut off from the
+ * server at once, but it still holds VK, which stays valid for everything it already copied and for
+ * anything it can obtain from the server's storage. Clients revoke through POST /v1/rotate.
+ */
 app.delete("/v1/devices/:id", deviceAuth, async (c) => {
   const id = c.req.param("id");
   if (!IdSchema.safeParse(id).success) return bad(c, "invalid_id");
+  const nb = noBody(c);
+  if (nb) return nb;
+  const nq = parseQuery(c, EmptyQuerySchema);
+  if (!nq.ok) return nq.res;
   const db = c.env.DB;
   const target = await db.prepare("SELECT id, revoked_at FROM devices WHERE id = ?1").bind(id).first<{
     id: string;
@@ -322,15 +418,104 @@ app.delete("/v1/devices/:id", deviceAuth, async (c) => {
     db.prepare("UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND revoked_at IS NULL").bind(now, id),
     insertEvent(db, now, p.kind === "device" ? p.id : null, "revoke", id),
   ]);
-  return c.json({ id, revoked_at: now });
+  return c.json({ id, revoked_at: now, rotated: false });
 });
 
 app.get("/v1/envelope", deviceAuth, async (c) => {
+  const nb = noBody(c);
+  if (nb) return nb;
+  const nq = parseQuery(c, EmptyQuerySchema);
+  if (!nq.ok) return nq.res;
   const p = c.get("principal");
-  const row = await c.env.DB.prepare("SELECT envelope FROM devices WHERE id = ?1")
+  const row = await c.env.DB.prepare(
+    "SELECT d.envelope AS envelope, d.envelope_epoch AS epoch FROM devices d WHERE d.id = ?1",
+  )
     .bind(p.kind === "device" ? p.id : "")
-    .first<{ envelope: string }>();
-  return c.json({ device_id: p.kind === "device" ? p.id : null, envelope: row?.envelope ?? "" });
+    .first<{ envelope: string; epoch: number }>();
+  return c.json({ device_id: p.kind === "device" ? p.id : null, envelope: row?.envelope ?? "", epoch: row?.epoch ?? 0 });
+});
+
+// ---------------------------------------------------------------------------------------------
+// POST /v1/rotate  (vault-key rotation, optionally revoking a device in the same transaction)
+//
+// The client has already built everything under the new VK; the server swaps it in atomically:
+//   * the first 60 bytes (80 base64url chars) of every live item's blob, i.e. its wrapped item key.
+//     The item payload, rev and AAD are untouched; the item gets a fresh seq so other devices re-pull it.
+//   * the envelope of every active device (the set must match exactly), and the recovery envelope.
+// It is applied only if nothing changed since the snapshot it was built from: same epoch, same
+// head_seq (so no item was written), same live-item set at the same revs, same active-device set.
+// Otherwise the whole D1 batch rolls back and the client gets 409 and retries from a fresh sync.
+
+app.post("/v1/rotate", deviceAuth, async (c) => {
+  const parsed = parseJson(c, RotateSchema, BODY_LIMITS.rotate);
+  if (!parsed.ok) return parsed.res;
+  const r = parsed.data;
+  const p = c.get("principal");
+  const callerId = p.kind === "device" ? p.id : "";
+  if (r.revoke === callerId) return bad(c, "cannot_revoke_self");
+  if (!r.devices.some((d) => d.id === callerId)) return bad(c, "caller_not_in_devices");
+  if (r.revoke && r.devices.some((d) => d.id === r.revoke)) return bad(c, "revoked_device_in_devices");
+
+  const db = c.env.DB;
+  const now = c.get("now");
+  const n = r.items.length;
+  const m = r.devices.length;
+  const newEpoch = r.base_epoch + 1;
+  const keys = JSON.stringify(r.items.map((i) => ({ id: i.id, rev: i.rev, k: i.key })));
+  const envelopes = JSON.stringify(r.devices);
+
+  try {
+    await db.batch([
+      assertThat(db, "EXISTS (SELECT 1 FROM meta WHERE id = 1 AND epoch = ?1 AND head_seq = ?2)", r.base_epoch, r.base_seq),
+      ...(r.revoke
+        ? [
+            assertThat(db, "EXISTS (SELECT 1 FROM devices WHERE id = ?1 AND revoked_at IS NULL)", r.revoke),
+            db.prepare("UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND revoked_at IS NULL").bind(now, r.revoke),
+          ]
+        : []),
+      // New wrapped item keys. `seq` is assigned in request order, base_seq + 1 .. base_seq + n, all above every existing seq.
+      db
+        .prepare(
+          `WITH r AS (SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.rev') AS rev,
+                             json_extract(value, '$.k') AS k, key AS pos FROM json_each(?1))
+           UPDATE items SET blob = r.k || substr(items.blob, ${WRAPPED_KEY_CHARS + 1}), seq = ?2 + 1 + r.pos, updated_at = ?3
+           FROM r
+           WHERE items.id = r.id AND items.rev = r.rev AND items.deleted = 0 AND length(items.blob) > ${WRAPPED_KEY_CHARS}`,
+        )
+        .bind(keys, r.base_seq, now),
+      db
+        .prepare(
+          `WITH r AS (SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.envelope') AS envelope FROM json_each(?1))
+           UPDATE devices SET envelope = r.envelope, envelope_epoch = ?2 FROM r WHERE devices.id = r.id AND devices.revoked_at IS NULL`,
+        )
+        .bind(envelopes, newEpoch),
+      db
+        .prepare("UPDATE meta SET epoch = ?1, head_seq = head_seq + ?2, recovery_envelope = ?3 WHERE id = 1")
+        .bind(newEpoch, n, r.recovery_envelope),
+      // Every live item was rotated (none omitted, none at another rev, none appeared) and every active device got its envelope.
+      assertThat(
+        db,
+        `(SELECT COUNT(*) FROM items WHERE deleted = 0) = ?1 AND (SELECT COUNT(*) FROM items WHERE deleted = 0 AND seq > ?2) = ?1`,
+        n,
+        r.base_seq,
+      ),
+      assertThat(
+        db,
+        `(SELECT COUNT(*) FROM devices WHERE revoked_at IS NULL) = ?1 AND (SELECT COUNT(*) FROM devices WHERE revoked_at IS NULL AND envelope_epoch = ?2) = ?1`,
+        m,
+        newEpoch,
+      ),
+      insertEvent(db, now, callerId, "rotate", r.revoke),
+      clearAssertions(db),
+    ]);
+  } catch (err) {
+    if (!isAssertionFailure(err)) throw err;
+    const state = await metaState(db);
+    console.log(JSON.stringify({ evt: "rotate_conflict", device: callerId, base_epoch: r.base_epoch, epoch: state.epoch }));
+    return c.json({ error: "conflict", epoch: state.epoch, head_seq: state.head_seq }, 409);
+  }
+  console.log(JSON.stringify({ evt: "rotate", device: callerId, epoch: newEpoch, items: n, devices: m, revoked: r.revoke }));
+  return c.json({ epoch: newEpoch, head_seq: r.base_seq + n, rotated_items: n, revoked: r.revoke });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -341,16 +526,26 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
   const now = c.get("now");
   const raw = c.get("body");
   let device: DeviceRegistration | undefined;
+  let epoch = 0;
   if (raw.length > 0) {
-    const parsed = parseJson(c, RecoverySessionSchema);
+    const parsed = parseJson(c, RecoverySessionSchema, BODY_LIMITS.small);
     if (!parsed.ok) return parsed.res;
-    device = parsed.data.device;
+    ({ device, epoch } = parsed.data);
+  } else {
+    const nq = parseQuery(c, EmptyQuerySchema);
+    if (!nq.ok) return nq.res;
   }
   if (device) {
     if (!(await validDeviceKeys(device))) return bad(c, "invalid_key");
     try {
-      await db.batch([insertDevice(db, device, now), insertEvent(db, now, null, "recovery", device.id)]);
+      await db.batch([
+        assertThat(db, "EXISTS (SELECT 1 FROM meta WHERE id = 1 AND epoch = ?1)", epoch),
+        insertDevice(db, device, now, epoch),
+        insertEvent(db, now, null, "recovery", device.id),
+        clearAssertions(db),
+      ]);
     } catch (err) {
+      if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db)).epoch }, 409);
       if (isUnique(err)) return c.json({ error: "exists" }, 409);
       throw err;
     }
@@ -358,30 +553,45 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
     await insertEvent(db, now, null, "recovery", null).run();
   }
   const meta = await db
-    .prepare("SELECT recovery_envelope, head_seq FROM meta WHERE id = 1")
-    .first<{ recovery_envelope: string; head_seq: number }>();
+    .prepare("SELECT recovery_envelope, head_seq, epoch FROM meta WHERE id = 1")
+    .first<{ recovery_envelope: string; head_seq: number; epoch: number }>();
   return c.json({
     recovery_envelope: meta!.recovery_envelope,
     head_seq: meta!.head_seq,
+    epoch: meta!.epoch,
     ...(device ? { device: { id: device.id, name: device.name, kind: device.kind, created_at: now } } : {}),
   });
 });
 
 app.post("/v1/recovery/rotate", deviceAuth, async (c) => {
-  const parsed = parseJson(c, RecoveryRotateSchema);
+  const parsed = parseJson(c, RecoveryRotateSchema, BODY_LIMITS.small);
   if (!parsed.ok) return parsed.res;
-  const { recovery_pubkey, recovery_envelope } = parsed.data;
-  if (!(await validRecoveryKey(recovery_pubkey))) return bad(c, "invalid_key");
+  const { recovery_pubkey, recovery_enc_pubkey, recovery_envelope, epoch } = parsed.data;
+  if (!(await validRecoveryKeys(recovery_pubkey, recovery_enc_pubkey))) return bad(c, "invalid_key");
   const p = c.get("principal");
   const now = c.get("now");
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE meta SET recovery_pubkey = ?1, recovery_envelope = ?2 WHERE id = 1").bind(
-      recovery_pubkey,
-      recovery_envelope,
-    ),
-    insertEvent(c.env.DB, now, p.kind === "device" ? p.id : null, "recovery_rotate", null),
-  ]);
+  const db = c.env.DB;
+  try {
+    await db.batch([
+      assertThat(db, "EXISTS (SELECT 1 FROM meta WHERE id = 1 AND epoch = ?1)", epoch),
+      db
+        .prepare("UPDATE meta SET recovery_pubkey = ?1, recovery_enc_pubkey = ?2, recovery_envelope = ?3 WHERE id = 1")
+        .bind(recovery_pubkey, recovery_enc_pubkey, recovery_envelope),
+      insertEvent(db, now, p.kind === "device" ? p.id : null, "recovery_rotate", null),
+      clearAssertions(db),
+    ]);
+  } catch (err) {
+    if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db)).epoch }, 409);
+    throw err;
+  }
   return c.json({ ok: true });
 });
+
+// ---------------------------------------------------------------------------------------------
+// Everything else (unknown path, wrong method, HEAD/OPTIONS on a POST route…) goes through the very
+// same authentication as a real route and is then refused. A bad caller therefore cannot distinguish
+// "this route exists" from "this route does not" by response or by cost.
+app.all("*", deviceAuth, () => deny());
+app.notFound(() => deny());
 
 export default app;
