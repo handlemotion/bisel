@@ -40,7 +40,13 @@ final class IconStore {
     @ObservationIgnored private let gate = FetchGate(limit: 3)
 
     static var directory: URL {
-        URL.applicationSupportDirectory.appending(path: "bisel/icons", directoryHint: .isDirectory)
+        #if DEBUG
+        // A throwaway store (BISEL_DATA_DIR) must not read or fill the real icon cache.
+        if let dir = ProcessInfo.processInfo.environment["BISEL_DATA_DIR"], !dir.isEmpty {
+            return URL(fileURLWithPath: dir, isDirectory: true).appending(path: "icons", directoryHint: .isDirectory)
+        }
+        #endif
+        return URL.applicationSupportDirectory.appending(path: "bisel/icons", directoryHint: .isDirectory)
     }
 
     private init() {
