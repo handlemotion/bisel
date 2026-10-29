@@ -169,22 +169,22 @@ test("a box holds at most MAX_ITEMS_PER_BOX items; another box is unaffected", a
   const D = await createBox(api, "dave");
   const ids = Array.from({ length: 40 }, () => randomId());
   for (let i = 0; i < ids.length; i += 10) {
-    const res = await Promise.all(ids.slice(i, i + 10).map((id) => api.call(C.device, "PUT", `/v1/items/${id}`, { json: { base_rev: 0, epoch: 1, blob: blob(50) } })));
+    const res = await Promise.all(ids.slice(i, i + 10).map((id) => api.call(C.device, "PUT", `/v1/items/${id}`, { json: { base_rev: 0, epoch: 1, blob: blob(100) } })));
     expect(res.map((r) => r.status())).toEqual(Array(res.length).fill(200));
   }
-  const over = await api.call(C.device, "PUT", `/v1/items/${randomId()}`, { json: { base_rev: 0, epoch: 1, blob: blob(50) } });
+  const over = await api.call(C.device, "PUT", `/v1/items/${randomId()}`, { json: { base_rev: 0, epoch: 1, blob: blob(100) } });
   expect(over.status()).toBe(409);
   expect(await json(over)).toMatchObject({ error: "box_full", max_items: 40 });
   // The refusal consumed no seq, existing items can still be edited, and a tombstone still counts as an item.
   const state = await json(await api.call(C.device, "GET", "/v1/sync", { query: { limit: 200 } }));
   expect(state.head_seq).toBe(40);
-  const edit = await api.call(C.device, "PUT", `/v1/items/${ids[0]}`, { json: { base_rev: 1, epoch: 1, blob: blob(50) } });
+  const edit = await api.call(C.device, "PUT", `/v1/items/${ids[0]}`, { json: { base_rev: 1, epoch: 1, blob: blob(100) } });
   expect(edit.status()).toBe(200);
   const del = await api.call(C.device, "DELETE", `/v1/items/${ids[1]}`, { query: { base_rev: 1 }, json: { epoch: 1, marker: blob(32) } });
   expect(del.status()).toBe(200);
-  expect((await api.call(C.device, "PUT", `/v1/items/${randomId()}`, { json: { base_rev: 0, epoch: 1, blob: blob(50) } })).status()).toBe(409);
+  expect((await api.call(C.device, "PUT", `/v1/items/${randomId()}`, { json: { base_rev: 0, epoch: 1, blob: blob(100) } })).status()).toBe(409);
   // Dave is untouched by carol being full.
-  expect((await api.call(D.device, "PUT", `/v1/items/${randomId()}`, { json: { base_rev: 0, epoch: 1, blob: blob(50) } })).status()).toBe(200);
+  expect((await api.call(D.device, "PUT", `/v1/items/${randomId()}`, { json: { base_rev: 0, epoch: 1, blob: blob(100) } })).status()).toBe(200);
 });
 
 test("a disabled box answers like a revoked device, and only that box", async ({ request }) => {
