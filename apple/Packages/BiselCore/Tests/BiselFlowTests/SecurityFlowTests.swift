@@ -224,6 +224,17 @@ struct SecurityFlowTests {
             _ = try await b.vault.sync()
             #expect(try await b.vault.identity()?.recoveryPublicKey == (try RecoveryKeys(phrase: second)).publicKey)
 
+            // A device whose recovery keys are not pinned (they only came from the server) must not seal a new vault key to them.
+            let store = try LocalStore(location: b.location)
+            var unpinned = try #require(try store.identity())
+            unpinned.recoveryPinned = false
+            try store.setIdentity(unpinned)
+            let reopened = try b.relaunched()
+            try await reopened.unlock()
+            await #expect(throws: IntegrityError.recoveryNotPinned) { _ = try await reopened.rotateVaultKey() }
+            _ = try await reopened.sync()   // the sealed manifest pins them again
+            #expect(try await reopened.identity()?.recoveryPinned == true)
+
             // A hostile server swaps the recovery key: reported, never adopted, and no backup is written.
             let other = try RecoveryKeys(phrase: try RecoveryPhrase.generate())
             try server.sql("UPDATE meta SET recovery_pubkey = '\(other.publicKey.base64URLEncoded())'")

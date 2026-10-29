@@ -732,6 +732,9 @@ public actor Vault {
         guard pending.isEmpty else { throw RotationError.pendingChanges(pending.count) }
         guard try store.cursor() == report.headSeq else { return nil }
         let identity = try requireIdentity()
+        // The new vault key is also sealed to the recovery key. Keys that only the server reported (not yet pinned from the phrase
+        // or the sealed manifest) could be the server's own: sync first, which pins them, or refuse.
+        guard identity.recoveryPinned else { throw IntegrityError.recoveryNotPinned }
         guard let recoveryEncryptionKey = identity.recoveryEncryptionPublicKey, !recoveryEncryptionKey.isEmpty else {
             throw RotationError.recoveryNeedsUpgrade
         }
