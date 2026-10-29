@@ -47,9 +47,11 @@ public final class TestServer: @unchecked Sendable {
         FileManager.default.createFile(atPath: log.path, contents: nil)
 
         let varArguments = vars.map { "--var '\($0.key):\($0.value)'" }.joined(separator: " ")
-        // A login shell so pnpm/node from mise/nvm/homebrew are on PATH.
+        // A login shell so pnpm/node from mise/nvm/homebrew are on PATH. `.dev.vars` is untracked (it holds the dev bootstrap token the
+        // tests use), so a fresh clone gets it from the example, as `pnpm dev` does.
         let script = """
-        cd '\(dir)' && pnpm exec wrangler d1 migrations apply bisel --local --persist-to '\(state.path)' >/dev/null 2>&1 \
+        cd '\(dir)' && { [ -f .dev.vars ] || cp .dev.vars.example .dev.vars; } \
+        && pnpm exec wrangler d1 migrations apply bisel --local --persist-to '\(state.path)' >/dev/null 2>&1 \
         && exec pnpm exec wrangler dev --port \(port) --inspector-port \(inspector) --persist-to '\(state.path)' \(varArguments)
         """
         let p = Process()
