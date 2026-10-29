@@ -97,9 +97,9 @@ struct SetupView: View {
     /// Fades the current step out, then swaps in the next one, whose texts and cells fade in one after another.
     private func go(_ next: Step) {
         error = nil
-        withAnimation(.easeIn(duration: 0.15)) { leaving = true }
+        withAnimation(.easeInOut(duration: 0.3)) { leaving = true }
         Task {
-            try? await Task.sleep(for: .milliseconds(170))
+            try? await Task.sleep(for: .milliseconds(330))
             // Nothing is visible now: swap without animating, so old and new views never cross-fade or move.
             var t = Transaction(); t.disablesAnimations = true
             withTransaction(t) { step = next; leaving = false }

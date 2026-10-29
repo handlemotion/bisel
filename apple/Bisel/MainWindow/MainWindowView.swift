@@ -47,8 +47,8 @@ struct MainWindowView: View {
             }
         }
         .background(cardSize == nil ? Color.clear : Theme.biselDark.colors.background.color)
-        .animation(.easeOut(duration: 0.2), value: screenKey)
-        .environment(\.cascadeLead, 0.2)   // a new screen waits for the old one to fade out
+        .animation(.easeInOut(duration: 0.3), value: screenKey)
+        .environment(\.cascadeLead, 0.3)   // a new screen waits for the old one to fade out
         // SwiftUI owns the window size (the scene is .contentSize): the island is exactly its fixed frame, the settings window
         // grows from a 820x540 minimum. No AppKit resizing, so the hosting view can never lag behind the window.
         .frame(minWidth: cardSize?.width ?? 820, maxWidth: cardSize?.width ?? .infinity,

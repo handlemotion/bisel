@@ -25,17 +25,18 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
                     Text(title)
                         .font(theme.font(theme.fonts.detailTitle - 4))
                         .accessibilityAddTraits(.isHeader)
-                        .id(title).cascade(0)
+                        .cascade(0).id(title)   // the id wraps the cascade, so a new title starts its fade-in from zero
                     if let message {
                         Text(message)
                             .font(theme.font(theme.fonts.search))
                             .lineSpacing(4)
                             .foregroundStyle(theme.colors.secondaryText.color)
                             .fixedSize(horizontal: false, vertical: true)
-                            .id(message).cascade(0.05)
+                            .cascade(0.05).id(message)
                     }
                 }
                 .opacity(dim ? 0 : 1)
+                .animation(.easeInOut(duration: 0.3), value: dim)
             }
             .layoutPriority(1)
             if centered {
@@ -48,6 +49,7 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
                 .frame(maxHeight: .infinity)
                 .id(title)
                 .opacity(dim ? 0 : 1)
+                .animation(.easeInOut(duration: 0.3), value: dim)
             } else {
                 VStack(spacing: 0) {
                     content.frame(maxWidth: .infinity, alignment: .leading).padding(.top, theme.spacing.l)
@@ -56,13 +58,14 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
                 .frame(maxHeight: .infinity)
                 .id(title)
                 .opacity(dim ? 0 : 1)
+                .animation(.easeInOut(duration: 0.3), value: dim)
             }
             HStack(spacing: theme.spacing.m) { actions }
                 .padding(.top, theme.spacing.l)
                 .layoutPriority(1)
-                .id(title)
-                .cascade(0.28, rise: 0)
+                .cascade(0.28, rise: 0).id(title)
                 .opacity(dim ? 0 : 1)
+                .animation(.easeInOut(duration: 0.3), value: dim)
         }
         .padding(inset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
