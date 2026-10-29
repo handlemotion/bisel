@@ -82,6 +82,9 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
     public var recoveryUnconfirmed: Bool = false
     /// This device was enrolled through another device and the verification code has not been confirmed yet.
     public var enrollmentUnconfirmed: Bool = false
+    /// The vault key this device holds came through the server (recovery phrase, or another device's rotation) and has not yet been
+    /// checked against the box's own manifest. Until it is, nothing is uploaded under it.
+    public var keyUnconfirmed: Bool = false
     /// Recovery-registered device: unix time before which the server refuses its requests.
     public var activatesAt: Int?
     /// The box on the server this device belongs to (`/v1/bootstrap` returns it). nil for identities from before accounts
@@ -117,6 +120,7 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
         recoveryMismatch = try c.decodeIfPresent(Bool.self, forKey: .recoveryMismatch) ?? false
         recoveryUnconfirmed = try c.decodeIfPresent(Bool.self, forKey: .recoveryUnconfirmed) ?? false
         enrollmentUnconfirmed = try c.decodeIfPresent(Bool.self, forKey: .enrollmentUnconfirmed) ?? false
+        keyUnconfirmed = try c.decodeIfPresent(Bool.self, forKey: .keyUnconfirmed) ?? false
         activatesAt = try c.decodeIfPresent(Int.self, forKey: .activatesAt)
         boxID = try c.decodeIfPresent(String.self, forKey: .boxID)
     }

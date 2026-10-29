@@ -508,6 +508,7 @@ public actor Vault {
         identity.roster = [RosterEntry(deviceID: deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: pub.sig,
                                        encPubkey: pub.enc, via: "recovery")]
         identity.recoveryPinned = true
+        identity.keyUnconfirmed = true   // confirmed against the box's manifest before the first upload (see `sync`)
         identity.activatesAt = activatesAt.map { Int($0.timeIntervalSince1970) }
         try store.setIdentity(identity)
         setKey(vk)
@@ -588,6 +589,24 @@ public actor Vault {
         if changed { try store.setIdentity(id) }
         // Entries this device knows that the shared manifest lacks (a freshly recovered device itself): publish them.
         if id.roster.contains(where: { r in !manifest.roster.contains { $0.deviceID == r.deviceID } }) { try writeManifest() }
+    }
+
+    /// The manifest the box's first device wrote is sealed under the real vault key: if it (or, for a box that never had one, an
+    /// item the box already held) opens under the key this device received, the key is the box's.
+    private func confirmBoxKey(_ k: LockedKey) throws {
+        var candidates: [StoredRecord] = []
+        if let m = try store.record(ReservedRecord.manifestID), !m.deleted, m.pending == .none { candidates.append(m) }
+        if candidates.isEmpty {
+            candidates = Array(try store.liveRecords().lazy.filter { $0.pending == .none && !ReservedRecord.isReserved($0.id) }.prefix(5))
+        }
+        guard !candidates.isEmpty else { throw IntegrityError.boxKeyUnconfirmed }
+        guard candidates.contains(where: { canOpen($0, with: k) }) else {
+            lock()
+            throw IntegrityError.keyConfirmationFailed
+        }
+        var id = try requireIdentity()
+        id.keyUnconfirmed = false
+        try store.setIdentity(id)
     }
 
     /// Devices this vault's owner approved, as known to this device.
@@ -746,7 +765,23 @@ public actor Vault {
         }
         guard try store.identity()?.serverURL != nil else { return SyncReport() }   // local-only: nothing to sync with
         let held = liveKey()
-        let report = try await SyncEngine(store: store, client: try client(), vaultKey: { held }).run()
+        let engine = SyncEngine(store: store, client: try client(), vaultKey: { held })
+        var report: SyncReport
+        if try store.identity()?.keyUnconfirmed == true {
+            // The key came from the server's relay (recovery phrase, or another device's rotation). A server that knows this
+            // device's or the recovery public key could have sealed a key of its own, so: pull, check it opens the box's
+            // manifest (or an item the box already held), and only then upload anything sealed under it.
+            report = try await engine.run(pushing: false)
+            if report.rotationAdopted { lock(); return report }   // another rotation arrived: the key in memory is already stale
+            guard let held else { return report }   // locked: nothing can be checked, nothing is uploaded
+            try confirmBoxKey(held)
+            var next = try await engine.run()
+            next.pulled += report.pulled
+            next.events = report.events + next.events
+            report = next
+        } else {
+            report = try await engine.run()
+        }
         if report.rotationAdopted { lock() }   // the key in memory is the rotated-away one; unlock to get the new one
         else if let held { try ingestManifest(held) }
         return report

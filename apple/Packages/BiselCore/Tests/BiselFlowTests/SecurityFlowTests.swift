@@ -247,6 +247,68 @@ struct SecurityFlowTests {
         }
     }
 
+    @Test("a key the server relayed (recovery phrase, rotation) is checked against the box before anything is uploaded under it")
+    func relayedKeysAreConfirmedBeforeUploading() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            let phrase = try await a.bootstrap(server)
+            try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            let count = { try server.value("SELECT COUNT(*) FROM items") }
+            let boxItems = try count()
+
+            // Honest recovery: an item saved before the first sync is uploaded once the key is confirmed.
+            let honest = try Device("honest")
+            try await honest.vault.recover(server: server.url, phrase: phrase, deviceName: "honest", boxID: try server.onlyBoxID())
+            let mine = try await honest.vault.save(login("Mine", password: "mine-pw"))
+            try await honest.vault.sync()
+            #expect(try count() != boxItems, "confirmed, then uploaded")
+            #expect(try await honest.vault.identity()?.keyUnconfirmed == false)
+            try await a.vault.sync()
+            #expect(try await a.vault.revealPassword(id: mine.id) == "mine-pw")
+            let afterHonest = try count()
+
+            // A lying server seals a key of its own to the recovery public key it knows. The phrase holder cannot tell on the spot.
+            let keys = try RecoveryKeys(phrase: phrase)
+            let fake = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+            let forged = try RecoveryKeys.seal(vaultKey: fake, toEncryptionKey: keys.encryptionPublicKey, signingKey: keys.publicKey, epoch: 1)
+            try server.sql("UPDATE boxes SET recovery_envelope = '\(forged.base64URLEncoded())'")
+            let victim = try Device("victim")
+            try await victim.vault.recover(server: server.url, phrase: phrase, deviceName: "victim", boxID: try server.onlyBoxID())
+            _ = try await victim.vault.save(login("Secret", password: "never-upload"))
+            await #expect(throws: IntegrityError.keyConfirmationFailed) { _ = try await victim.vault.sync() }
+            #expect(try count() == afterHonest, "nothing was uploaded under the server's key")
+            #expect(!(await victim.vault.isUnlocked))
+        }
+    }
+
+    @Test("a rotation the server forged for a device is not trusted with uploads")
+    func forgedRotationAdoptionUploadsNothing() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a"), b = try Device("b")
+            try await a.bootstrap(server)
+            try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await b.enroll(through: a, server: server)
+            let count = { try server.value("SELECT COUNT(*) FROM items") }
+            let before = try count()
+
+            // The server claims epoch 2 and hands b an envelope for a key it made up.
+            let me = try #require(try await b.vault.identity())
+            let encPub = try #require(me.roster.first { $0.deviceID == me.deviceID }?.encPubkey)
+            let fake = Data((0..<32).map { _ in UInt8.random(in: 0...255) })
+            let envelope = try DeviceEnvelope.seal(vaultKey: fake, toEncryptionKey: encPub)
+            try server.sql("UPDATE boxes SET epoch = 2")
+            try server.sql("UPDATE devices SET envelope = '\(envelope.base64URLEncoded())', envelope_epoch = 2 WHERE id = '\(me.deviceID)'")
+            let report = try await b.vault.sync()
+            #expect(report.rotationAdopted)
+            try await b.vault.unlock()
+            _ = try await b.vault.save(login("Secret", password: "never-upload"))
+            await #expect(throws: IntegrityError.keyConfirmationFailed) { _ = try await b.vault.sync() }
+            #expect(try count() == before, "nothing was uploaded under the server's key")
+        }
+    }
+
     // MARK: M2
 
     @Test("a delete forged without the vault key is undone; a real delete lands in the trash; a rolled-back server is noticed")

@@ -36,17 +36,18 @@ public struct SyncEngine: Sendable {
         self.store = store; self.client = client; self.vaultKey = vaultKey
     }
 
-    public func run() async throws -> SyncReport {
+    /// `pushing: false` only pulls: used while the vault key this device holds is not yet confirmed against the box.
+    public func run(pushing: Bool = true) async throws -> SyncReport {
         var report = SyncReport()
         let epoch = try store.identity()?.epoch ?? 1
         var staleEpoch = false
-        try await push(&report, epoch: epoch, staleEpoch: &staleEpoch)
+        if pushing { try await push(&report, epoch: epoch, staleEpoch: &staleEpoch) }
         var serverRevs: [String: Int] = [:]
         let reseeding = try store.reseedPending()
         let serverEpoch = try await pull(&report, serverRevs: &serverRevs, fromStart: reseeding)
         if staleEpoch || serverEpoch > epoch {
             try await adoptRotation(&report)
-        } else if let vk = vaultKey() {
+        } else if pushing, let vk = vaultKey() {
             if reseeding {
                 // The server was reset (restored from an older state, or rebuilt): put back what only this device still has.
                 try reseed(serverRevs: serverRevs, vk)
@@ -73,6 +74,8 @@ public struct SyncEngine: Sendable {
         }
         identity.envelope = envelope
         identity.epoch = epoch
+        // The server chose this key for us: check it against the box's own records before anything is uploaded under it.
+        identity.keyUnconfirmed = true
         try store.setIdentity(identity)
         report.rotationAdopted = true
     }
