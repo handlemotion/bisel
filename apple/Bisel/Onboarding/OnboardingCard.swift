@@ -101,7 +101,7 @@ struct ProgressTrack: View {
 /// Window sizes for the card phases.
 enum OnboardingLayout {
     static let setup = NSSize(width: 646, height: 420)   // Figma frame is 646 wide
-    static let phrase = NSSize(width: 646, height: 580)
+    static let phrase = NSSize(width: 646, height: 480)
     static let locked = NSSize(width: 560, height: 280)
 }
 

@@ -3,6 +3,9 @@ import BiselCore
 
 /// Where this process keeps its vault, and which key store backs it.
 enum BiselEnvironment {
+    /// The one server every box uses. Not a setting: the person only ever chooses to connect or not.
+    static let defaultServer = "https://box.bisel.app"
+
     /// `~/Library/Application Support/bisel/vault`. SPEC §7 wants the App Group container from day one; that needs a
     /// Team ID, so until the app is signed the store lives here (see SPEC §8, "Storage").
     /// Debug only: `BISEL_DATA_DIR=<dir>` points a run at a throwaway store (flow tests, screenshots).

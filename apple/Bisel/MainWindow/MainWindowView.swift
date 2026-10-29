@@ -16,6 +16,9 @@ struct MainWindowView: View {
 
     private let service = AppModel.shared.service
     @State private var section: Section? = .settings
+    /// After the recovery phrase of a new box: one last onboarding step to import passwords.
+    @State private var showImport = false
+    @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.theme) private var theme
 
     var body: some View {
@@ -27,7 +30,9 @@ struct MainWindowView: View {
             } else if service.phase == .needsSetup {
                 SetupView(service: service)
             } else if let phrase = service.pendingPhrase {
-                PhraseGateView(service: service, phrase: phrase) { service.confirmPhraseStored() }
+                PhraseGateView(service: service, phrase: phrase) { service.confirmPhraseStored(); showImport = true }
+            } else if showImport {
+                OnboardingImportView(service: service) { showImport = false; dismissWindow(id: "main") }
             } else if service.phase == .locked {
                 LockedView(service: service)
             } else {
@@ -52,6 +57,7 @@ struct MainWindowView: View {
     private var cardSize: NSSize? {
         guard service.startupError == nil, !usesFixture else { return nil }
         if service.pendingPhrase != nil { return OnboardingLayout.phrase }
+        if showImport { return OnboardingLayout.setup }
         switch service.phase {
         case .needsSetup: return OnboardingLayout.setup
         case .locked: return OnboardingLayout.locked
@@ -139,7 +145,7 @@ struct SettingsView: View {
     @State private var idleLock = VaultService.idleLockMinutes
     @State private var phraseSheet: RecoveryPhrase?
     @State private var vaultMessage: String?
-    @State private var connectServer = ""
+    @State private var connectServer = BiselEnvironment.defaultServer
     @State private var connectToken = ""
     @State private var connectError: String?
     private let service = AppModel.shared.service
@@ -259,7 +265,7 @@ struct SettingsView: View {
         guard let url else { connectError = bad; return }
         let token = connectToken.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
-            do { try await service.connectServer(server: url, token: token); connectToken = ""; connectServer = "" }
+            do { try await service.connectServer(server: url, token: token); connectToken = "" }
             catch { connectError = describe(error) }
         }
     }
