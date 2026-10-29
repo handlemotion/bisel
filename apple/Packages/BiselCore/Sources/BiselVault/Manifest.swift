@@ -92,6 +92,11 @@ public enum IntegrityError: Error, Sendable, Equatable, LocalizedError {
     case recoveryNotPinned
     /// This device was registered through the recovery phrase and is held back until `until`.
     case pendingActivation(until: Date)
+    /// Erasing this device would lose items that exist nowhere else (a box without a server, or edits not yet uploaded).
+    case wouldDiscardData(items: Int)
+    /// The box key this device holds came through the server (recovery phrase, or another device's rotation) and the box's own
+    /// manifest does not confirm it, so nothing is uploaded under it.
+    case boxKeyUnconfirmed
 
     public var errorDescription: String? {
         switch self {
@@ -103,6 +108,8 @@ public enum IntegrityError: Error, Sendable, Equatable, LocalizedError {
         case .invalidCursor: return "The server sent an inconsistent sync position and was ignored."
         case .recoveryMaterialChanged: return "The recovery keys on the server are not the ones this device recorded. Your recovery phrase may no longer work: create a new one from a device you trust."
         case .recoveryNotPinned: return "Sync first: this device has not yet confirmed the recovery keys."
+        case .wouldDiscardData(let n): return "\(n) item(s) on this Mac exist nowhere else. Recover this Mac with your 24 words, or export a backup first, before erasing it."
+        case .boxKeyUnconfirmed: return "This device could not confirm its box key against the box yet, so nothing was uploaded. Sync again; if this keeps happening the server may be misbehaving: do not add passwords."
         case .pendingActivation(let until): return "This device was added with the recovery phrase and is held back until \(until.formatted(date: .abbreviated, time: .shortened)). Your other devices can cancel it."
         }
     }

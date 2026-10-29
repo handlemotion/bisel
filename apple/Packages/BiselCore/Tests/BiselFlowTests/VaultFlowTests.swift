@@ -258,6 +258,51 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("a local-only box whose device keys are gone is recovered in place with the 24 words; erasing it is refused while it holds items")
+    func localOnlyKeyLossRecoversInPlace() async throws {
+        try await TestServer.with { server in
+            let a = try Device("a")
+            let phrase = try await a.vault.bootstrapLocal(deviceName: "a")
+            let kept = try await a.vault.save(Item(title: "Only here", username: "me", password: "p-only"))
+            let before = try await a.vault.identity()
+
+            // The Secure Enclave key is gone (fingerprints changed): the old unlock is dead, and no backup was ever made.
+            try a.keyStore.deleteKeys()
+            await a.vault.lock()
+            await #expect(throws: (any Error).self) { try await a.vault.unlock() }
+
+            // The app's "erase and start over" must not silently destroy the only copy.
+            await #expect(throws: IntegrityError.wouldDiscardData(items: 1)) { try await a.vault.removeLocalDevice() }
+            #expect(await a.vault.isConfigured)
+
+            // A different phrase, or a connected device, cannot use this path.
+            await #expect(throws: (any Error).self) { try await a.vault.recoverLocal(phrase: try RecoveryPhrase.generate()) }
+            try await a.vault.recoverLocal(phrase: phrase)
+            #expect(try await a.vault.items().items.map(\.id) == [kept.id])
+            #expect(try await a.vault.revealPassword(id: kept.id) == "p-only")
+            let after = try await a.vault.identity()
+            #expect(after?.deviceID == before?.deviceID)
+            #expect(after?.roster.first?.sigPubkey != before?.roster.first?.sigPubkey, "new device keys, same box")
+
+            // It unlocks with the new keys from a cold start, and a server can still be connected.
+            try await a.vault.unlock()
+            try await a.vault.connectServer(server.url, bootstrapToken: TestServer.bootstrapToken)
+            try await a.vault.sync()
+            let b = try Device("b")
+            try await b.vault.recover(server: server.url, phrase: phrase, deviceName: "b", boxID: try server.onlyBoxID())
+            try await b.vault.sync()
+            #expect(try await b.vault.revealPassword(id: kept.id) == "p-only")
+            await #expect(throws: (any Error).self) { try await a.vault.recoverLocal(phrase: phrase) }   // connected now
+
+            // Erasing stays possible on purpose.
+            let c = try Device("c")
+            _ = try await c.vault.bootstrapLocal(deviceName: "c")
+            _ = try await c.vault.save(Item(title: "Throwaway", username: "me", password: "x"))
+            try await c.vault.removeLocalDevice(discardingUnsyncedItems: true)
+            #expect(!(await c.vault.isConfigured))
+        }
+    }
+
     @Test("after the server's database is restored from an earlier point, the device uploads again what the restore lost")
     func deviceReseedsARestoredServer() async throws {
         try await TestServer.with { server in

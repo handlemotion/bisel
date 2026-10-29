@@ -1000,10 +1000,50 @@ public actor Vault {
 
     /// Erases everything this device holds (database, keys, saved server address). The vault on the server and on other
     /// devices is untouched; the owner should also revoke this device from another one. Use before enrolling again.
-    public func removeLocalDevice() throws {
+    /// Refuses while this Mac holds items that exist nowhere else (a box without a server, or edits not yet uploaded):
+    /// `recoverLocal` brings those back with the 24 words; `discardingUnsyncedItems: true` is the explicit "erase anyway".
+    public func removeLocalDevice(discardingUnsyncedItems: Bool = false) throws {
+        if !discardingUnsyncedItems, let id = try store.identity() {
+            let alone = id.serverURL == nil
+            let atRisk = try store.allRecords().filter {
+                !ReservedRecord.isReserved($0.id) && ($0.pending != .none || (alone && !$0.deleted))
+            }
+            if !atRisk.isEmpty { throw IntegrityError.wouldDiscardData(items: atRisk.count) }
+        }
         lock()
         try store.removeAll()
         try config.keyStore.deleteKeys()
+    }
+
+    /// A box without a server whose device keys are gone (Touch ID fingerprints changed, a new Secure Enclave): the 24 words open
+    /// the recovery envelope this Mac kept, so the items on this Mac stay. New device keys are made; nothing is erased.
+    public func recoverLocal(phrase: RecoveryPhrase) throws {
+        guard var id = try store.identity() else { throw VaultError.notConfigured }
+        guard id.serverURL == nil else { throw VaultError.alreadyConfigured }   // a connected device recovers through the server
+        guard let envelope = id.recoveryEnvelope, let pub = id.recoveryPublicKey else { throw VaultError.notConfigured }
+        let keys = try RecoveryKeys(phrase: phrase)
+        guard keys.publicKey == pub else { throw BiselCryptoError.authenticationFailed }
+        var vkData = try keys.open(envelope: envelope, epoch: id.epoch)
+        defer { vkData.zeroize() }
+        // The recovery envelope is the box key only if the items on this Mac open with it.
+        let vk = SymmetricKey(data: vkData)
+        let live = try store.liveRecords().filter { !$0.deleted }
+        guard live.isEmpty || live.contains(where: { (try? ItemSealer.open(blob: $0.blob, id: $0.id, rev: $0.rev, vaultKey: vk)) != nil }) else {
+            throw IntegrityError.noRecordDecrypts
+        }
+        let keysNow = try config.keyStore.createKeys()
+        id.envelope = try DeviceEnvelope.seal(vaultKey: vkData, toEncryptionKey: keysNow.enc)
+        id.previousEnvelope = nil
+        id.keyStore = config.keyStore.implementation
+        if let i = id.roster.firstIndex(where: { $0.deviceID == id.deviceID }) {
+            id.roster[i].sigPubkey = keysNow.sig
+            id.roster[i].encPubkey = keysNow.enc
+        }
+        // The owner just proved they hold this phrase.
+        id.recoveryUnconfirmed = false
+        try store.setIdentity(id)
+        setKey(vkData)
+        try? writeManifest()
     }
 
     // MARK: backup
