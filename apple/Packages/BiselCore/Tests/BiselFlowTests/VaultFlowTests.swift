@@ -123,7 +123,9 @@ struct VaultFlowTests {
             await #expect(throws: VaultError.locked) { _ = try await a.vault.item(id: "anything") }
             // Background sync works while locked (no VK needed to move ciphertext).
             let report = try await a.vault.sync()
-            #expect(report.pushed == 2)   // the item and the manifest
+            #expect(report.pushed == 1)   // the item; the manifest needs the vault-admin signature, so it waits for an unlock
+            try await a.vault.unlock()
+            #expect(try await a.vault.sync().pushed == 1)   // the deferred manifest
         }
     }
 

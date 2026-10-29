@@ -139,15 +139,16 @@ public struct SyncClient: Sendable {
     }
 
     /// `epoch` is the epoch of the vault key the blob's item key is wrapped under.
-    public func put(id: String, baseRev: Int, blob: Data, epoch: Int) async throws -> PutOutcome {
+    /// Writes to the vault manifest need `admin` (the server refuses them with `admin_signature_required` otherwise).
+    public func put(id: String, baseRev: Int, blob: Data, epoch: Int, admin: AdminSigner? = nil) async throws -> PutOutcome {
         let body = try JSONCoding.encoder.encode(PutRequest(baseRev: baseRev, epoch: epoch, blob: blob.base64URLEncoded()))
-        return try await mutate("PUT", "/v1/items/\(id)", body: body)
+        return try await mutate("PUT", "/v1/items/\(id)", body: body, admin: admin)
     }
 
     /// `marker` is the sealed tombstone marker (`ItemSealer.sealTombstone`), stored as the tombstone's blob.
-    public func delete(id: String, baseRev: Int, marker: Data, epoch: Int) async throws -> PutOutcome {
+    public func delete(id: String, baseRev: Int, marker: Data, epoch: Int, admin: AdminSigner? = nil) async throws -> PutOutcome {
         let body = try JSONCoding.encoder.encode(DeleteItemRequest(epoch: epoch, marker: marker.base64URLEncoded()))
-        return try await mutate("DELETE", "/v1/items/\(id)", query: [("base_rev", String(baseRev))], body: body)
+        return try await mutate("DELETE", "/v1/items/\(id)", query: [("base_rev", String(baseRev))], body: body, admin: admin)
     }
 
     /// Previous states of items (overwritten, deleted, re-keyed) the server still holds.
@@ -233,9 +234,10 @@ public struct SyncClient: Sendable {
 
     // MARK: plumbing
 
-    private func mutate(_ method: String, _ path: String, query: [(String, String)] = [], body: Data = Data()) async throws -> PutOutcome {
+    private func mutate(_ method: String, _ path: String, query: [(String, String)] = [], body: Data = Data(),
+                        admin: AdminSigner? = nil) async throws -> PutOutcome {
         do {
-            let (data, _) = try await send(method, path, query: query, body: body)
+            let (data, _) = try await send(method, path, query: query, body: body, admin: admin)
             guard let rec = try decode(ItemResponse.self, data).item.record else { throw SyncError.malformedResponse }
             return .accepted(rec)
         } catch SyncError.conflict(let current) {

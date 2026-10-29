@@ -1,7 +1,7 @@
 import { expect, test, type APIResponse } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { TEST_BOOTSTRAP_TOKEN } from "../playwright.config";
-import { adminState, b64u, boxState, Bisel, newAdminKey, newDevice, prepare, randomId, randomX25519Pub, recoveryKeyFromSeed, type AdminKey, type TestDevice } from "./support/client";
+import { MANIFEST_ID, adminState, b64u, boxState, Bisel, newAdminKey, newDevice, prepare, randomId, randomX25519Pub, recoveryKeyFromSeed, type AdminKey, type TestDevice } from "./support/client";
 
 // One story against one database. Each step depends on the state the previous ones left behind.
 test.describe.configure({ mode: "serial" });
@@ -682,6 +682,29 @@ test("destructive routes need the vault-admin signature that only a VK holder ca
   expect((await api.call(a, "POST", "/v1/devices", { json: { ...victim.registration(), epoch } })).status()).toBe(201);
   // (and the planted device is revoked again right away, so later tests see the same two active devices)
   expect((await api.call(a, "DELETE", `/v1/devices/${victim.id}`)).status()).toBe(200);
+});
+
+test("the vault manifest can only be written with the vault-admin signature", async ({ request }) => {
+  const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.3" });
+  const path = `/v1/items/${MANIFEST_ID}`;
+  const before = await snapshot(api, a);
+
+  // A stolen device-signing key cannot create, overwrite or delete the manifest, whatever the revision.
+  const put = await api.call(a, "PUT", path, { json: putBody(0, blob()), admin: false });
+  expect(put.status()).toBe(403);
+  expect(await json(put)).toEqual({ error: "admin_signature_required" });
+  expect((await api.call(a, "DELETE", path, { query: { base_rev: 1 }, json: del(), admin: false })).status()).toBe(403);
+  expect((await api.call(a, "PUT", path, { json: putBody(0, blob()), admin: await newAdminKey() })).status()).toBe(403);
+  expect((await snapshot(api, a)).headSeq).toBe(before.headSeq);
+
+  // The VK holder can; an ordinary item still needs no second signature.
+  const ok = await api.call(a, "PUT", path, { json: putBody(0, blob()) });
+  expect(ok.status()).toBe(200);
+  expect((await json(ok)).item.rev).toBe(1);
+  const plain = randomId();
+  expect((await api.call(a, "PUT", `/v1/items/${plain}`, { json: putBody(0, blob()), admin: false })).status()).toBe(200);
+  expect((await api.call(a, "DELETE", `/v1/items/${plain}`, { query: { base_rev: 1 }, json: del(), admin: false })).status()).toBe(200);
+  headSeq = (await snapshot(api, a)).headSeq;
 });
 
 test("overwritten, deleted and re-keyed items stay recoverable server-side; events tell every device what happened", async ({ request }) => {

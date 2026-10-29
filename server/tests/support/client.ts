@@ -83,12 +83,14 @@ export const adminState: { key: AdminKey | null } = { key: null };
 
 /** The box recovery requests name in X-Bisel-Box (device requests never send it). Unset = the pre-accounts fallback. */
 export const boxState: { id: string | null } = { id: null };
+export const MANIFEST_ID = "bisel-manifest-v1-reserved";
 
 /** Routes that need the second (vault-admin) signature. */
 export function needsAdmin(method: string, path: string): boolean {
   return (
     (method === "POST" && (path === "/v1/rotate" || path === "/v1/devices" || path === "/v1/recovery/rotate" || path === "/v1/box/claim")) ||
-    (method === "DELETE" && path.startsWith("/v1/devices/"))
+    (method === "DELETE" && path.startsWith("/v1/devices/")) ||
+    ((method === "PUT" || method === "DELETE") && path === `/v1/items/${MANIFEST_ID}`)
   );
 }
 

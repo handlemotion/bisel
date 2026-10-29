@@ -53,6 +53,12 @@ struct SecurityFlowTests {
                                             recoveryEnvelope: Data(repeating: 5, count: 60), admin: impostor)
             }
 
+            // The same key cannot overwrite or delete the manifest either (it would lock every device out on the next sync).
+            let manifest = try #require(page.records.first { $0.id == ReservedRecord.manifestID })
+            await #expect(throws: refused) { _ = try await client.put(id: manifest.id, baseRev: manifest.rev, blob: Data(repeating: 6, count: 80), epoch: 1) }
+            await #expect(throws: refused) { _ = try await client.put(id: manifest.id, baseRev: manifest.rev, blob: Data(repeating: 6, count: 80), epoch: 1, admin: impostor) }
+            await #expect(throws: refused) { _ = try await client.delete(id: manifest.id, baseRev: manifest.rev, marker: Data(repeating: 6, count: 40), epoch: 1) }
+
             // Nothing moved: both devices work, the recovery phrase's keys are intact, the item still decrypts.
             #expect(try await a.vault.devices().filter { !$0.isRevoked }.count == 2)
             _ = try await a.vault.sync()

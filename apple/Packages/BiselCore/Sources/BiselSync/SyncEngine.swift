@@ -84,9 +84,24 @@ public struct SyncEngine: Sendable {
             let pending = try store.pendingRecords().filter { !skipped.contains($0.id) }
             if pending.isEmpty { return }
             for rec in pending {
-                let outcome = rec.pending == .delete
-                    ? try await client.delete(id: rec.id, baseRev: rec.baseRev, marker: rec.blob, epoch: epoch)
-                    : try await client.put(id: rec.id, baseRev: rec.baseRev, blob: rec.blob, epoch: epoch)
+                // The manifest needs the vault-admin signature. Locked, or signing with a key the server has since rotated
+                // away, it stays pending: the next unlocked sync (after pulling the new envelope) pushes it.
+                var admin: AdminSigner?
+                if ReservedRecord.isReserved(rec.id) {
+                    guard let vk = vaultKey() else { skipped.insert(rec.id); continue }
+                    var raw = try vk.rawBytes()
+                    defer { raw.zeroize() }
+                    admin = try AdminSigner(vaultKey: raw)
+                }
+                let outcome: PutOutcome
+                do {
+                    outcome = rec.pending == .delete
+                        ? try await client.delete(id: rec.id, baseRev: rec.baseRev, marker: rec.blob, epoch: epoch, admin: admin)
+                        : try await client.put(id: rec.id, baseRev: rec.baseRev, blob: rec.blob, epoch: epoch, admin: admin)
+                } catch SyncError.server(_, let code) where admin != nil && code == "admin_signature_required" {
+                    skipped.insert(rec.id)
+                    continue
+                }
                 switch outcome {
                 case .accepted(let server):
                     try store.confirmPushed(pushed: rec, server: server)

@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { createMiddleware } from "hono/factory";
 import { secureHeaders } from "hono/secure-headers";
 import type { ZodMiniType } from "zod/mini";
 import {
@@ -97,6 +98,15 @@ const deviceAuth = authenticate("device");
 const recoveryAuth = authenticate("recovery");
 /** Destructive routes: the device signature is not enough, the vault-admin signature (needs VK) must follow. */
 const adminAuth = requireAdmin();
+/**
+ * The vault manifest (roster + recovery pins) is an ordinary item row to the server, so a stolen device-signing key could
+ * overwrite it with garbage and lock every device out of the vault. Writes to it need the vault-admin signature too.
+ */
+const MANIFEST_ID = "bisel-manifest-v1-reserved";
+const manifestAdmin = createMiddleware<AppEnv>(async (c, next) => {
+  if (c.req.param("id") === MANIFEST_ID) return adminAuth(c, next);
+  await next();
+});
 
 app.onError((err, c) => {
   // Auth and bootstrap catch their own errors and answer 404; anything reaching here happened
@@ -400,7 +410,7 @@ app.get("/v1/sync", deviceAuth, async (c) => {
 // a rejected write never consumes a seq. D1 runs a batch as a single transaction and serialises
 // writers, so nothing can slip between the statements.
 
-app.put("/v1/items/:id", deviceAuth, async (c) => {
+app.put("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
   const id = c.req.param("id");
   if (!IdSchema.safeParse(id).success) return bad(c, "invalid_id");
   const nq = parseQuery(c, EmptyQuerySchema);
@@ -452,7 +462,7 @@ app.put("/v1/items/:id", deviceAuth, async (c) => {
   return c.json({ item: itemJson(row!) });
 });
 
-app.delete("/v1/items/:id", deviceAuth, async (c) => {
+app.delete("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
   const id = c.req.param("id");
   if (!IdSchema.safeParse(id).success) return bad(c, "invalid_id");
   const q = parseQuery(c, DeleteQuerySchema);
