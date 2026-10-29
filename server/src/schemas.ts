@@ -20,7 +20,11 @@ export const BODY_LIMITS = {
   small: 32 * 1024,
   rotate: MAX_BODY_BYTES,
 } as const;
-export const MAX_ROTATE_ITEMS = 20_000;
+/**
+ * Rotation sends one 127-byte JSON entry per item as a single D1 parameter, and D1 refuses values over 2 MB:
+ * 20,000 entries are 2.54 MB, 12,000 are 1.5 MB.
+ */
+export const MAX_ROTATE_ITEMS = 12_000;
 export const MAX_DEVICES = 64;
 
 // zod/mini, not the classic build: the classic import alone is ~25 ms of Worker startup (826 KB of source);
@@ -95,6 +99,46 @@ export const PutItemSchema = z.strictObject({
   blob: z.string().check(z.minLength(1), z.refine(isB64url, "must be unpadded base64url")),
 });
 
+const ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const isRev = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
+const keyCount = (o: object) => {
+  let n = 0;
+  for (const _ in o) n++;
+  return n;
+};
+
+/**
+ * Rotate's `items` / `tombstones` arrays are up to MAX_ROTATE_ITEMS long. Running a zod object schema per element costs
+ * ~1 ms per 1,000 elements of the Worker's 10 ms CPU budget, so these are checked with one plain loop (same rules: strict
+ * keys, id shape, rev >= 1, base64url payload, unique ids).
+ */
+function rotateList<T extends { id: string }>(name: string, valueKey: string, validValue: (v: unknown) => boolean) {
+  return z.custom<T[]>((input) => {
+    if (!Array.isArray(input) || input.length > MAX_ROTATE_ITEMS) return false;
+    const seen = new Set<string>();
+    for (const e of input) {
+      if (typeof e !== "object" || e === null || keyCount(e) !== 3) return false;
+      const { id, rev: r, [valueKey]: v } = e as Record<string, unknown>;
+      if (typeof id !== "string" || !ID_RE.test(id) || !isRev(r) || !validValue(v)) return false;
+      if (seen.has(id)) return false;
+      seen.add(id);
+    }
+    return true;
+  }, `invalid ${name}`);
+}
+
+const tombstoneList = rotateList<{ id: string; rev: number; marker: string }>(
+  "tombstones",
+  "marker",
+  (v) => typeof v === "string" && v.length > 0 && isB64url(v) && b64urlByteLength(v) <= 256,
+);
+const rotateItemList = rotateList<{ id: string; rev: number; key: string }>(
+  "items",
+  "key",
+  /** New wrapped item key: exactly 60 bytes, replaces the first 60 bytes of the stored blob. */
+  (v) => typeof v === "string" && v.length === WRAPPED_KEY_CHARS && isB64url(v),
+);
+
 const unique = (ids: string[]) => new Set(ids).size === ids.length;
 
 /**
@@ -110,19 +154,8 @@ export const RotateSchema = z.strictObject({
   /** Ed25519 public key derived from the new VK. The request's admin signature (made with the old key) authorises it. */
   new_admin_pubkey: b64(32),
   /** Every tombstone, re-sealed under the new VK. */
-  tombstones: z
-    .array(z.strictObject({ id: IdSchema, rev, marker }))
-    .check(z.maxLength(MAX_ROTATE_ITEMS), z.refine((a) => unique(a.map((i) => i.id)), "duplicate tombstone id")),
-  items: z
-    .array(
-      z.strictObject({
-        id: IdSchema,
-        rev,
-        /** New wrapped item key: exactly 60 bytes, replaces the first 60 bytes of the stored blob. */
-        key: z.string().check(z.length(WRAPPED_KEY_CHARS), z.refine(isB64url, "must be unpadded base64url")),
-      }),
-    )
-    .check(z.maxLength(MAX_ROTATE_ITEMS), z.refine((a) => unique(a.map((i) => i.id)), "duplicate item id")),
+  tombstones: tombstoneList,
+  items: rotateItemList,
   devices: z
     .array(z.strictObject({ id: IdSchema, envelope: b64(MAX_KEY_ENVELOPE_BYTES) }))
     .check(z.minLength(1), z.maxLength(MAX_DEVICES), z.refine((a) => unique(a.map((d) => d.id)), "duplicate device id")),
