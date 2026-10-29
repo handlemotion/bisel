@@ -409,8 +409,9 @@ app.put("/v1/items/:id", deviceAuth, async (c) => {
       .bind(id, base_rev, blob, now, epoch, boxId),
     db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE box_id = ?2 AND id = ?1`).bind(id, boxId),
     db.prepare("SELECT epoch, item_count FROM boxes WHERE id = ?1").bind(boxId),
+    // Last, in the same round trip: expired history is pruned with the write that adds to it.
+    pruneHistory(c.env, now),
   ]);
-  await pruneHistory(c.env, now).run();
   const row = current!.results[0] as ItemRow | undefined;
   if (bump!.meta.changes !== 1) {
     const st = state!.results[0] as { epoch: number; item_count: number };
@@ -454,8 +455,9 @@ app.delete("/v1/items/:id", deviceAuth, async (c) => {
       .bind(id, base_rev, now, marker, epoch, boxId),
     db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE box_id = ?2 AND id = ?1`).bind(id, boxId),
     db.prepare("SELECT epoch FROM boxes WHERE id = ?1").bind(boxId),
+    // Last, in the same round trip: expired history is pruned with the write that adds to it.
+    pruneHistory(c.env, now),
   ]);
-  await pruneHistory(c.env, now).run();
   const row = current!.results[0] as ItemRow | undefined;
   if (!row) return c.json({ error: "not_found" }, 404);
   if (bump!.meta.changes !== 1) {
