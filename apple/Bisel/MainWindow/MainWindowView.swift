@@ -69,7 +69,8 @@ struct MainWindowView: View {
             #endif
         }
         .toolbarBackgroundVisibility(cardSize == nil ? .automatic : .hidden, for: .windowToolbar)
-        .navigationTitle(service.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel")
+        // Onboarding screens have no window title at all (it would be drawn in the titlebar, over the progress bar).
+        .navigationTitle(cardSize != nil ? "" : (service.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel"))
     }
 
     /// Set-up, the recovery phrase and the lock screen are the glass island itself: the window is small, borderless-looking
@@ -92,6 +93,7 @@ struct MainWindowView: View {
             w.titlebarAppearsTransparent = true
             w.titlebarSeparatorStyle = .none
             w.titleVisibility = .hidden
+            w.title = ""
             w.styleMask.insert(.fullSizeContentView)
             w.styleMask.remove(.resizable)
             // No traffic lights on the onboarding screens: the window closes from the Dock.
