@@ -707,7 +707,7 @@ test("the vault manifest can only be written with the vault-admin signature", as
   headSeq = (await snapshot(api, a)).headSeq;
 });
 
-test("overwritten, deleted and re-keyed items stay recoverable server-side; events tell every device what happened", async ({ request }) => {
+test("overwritten and deleted items stay recoverable server-side, a rotation keeps no key history; events tell every device what happened", async ({ request }) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.2" });
   const id = randomId();
   const v1 = blob(700), v2 = blob(700);
@@ -727,16 +727,14 @@ test("overwritten, deleted and re-keyed items stay recoverable server-side; even
   const again = await json(await api.call(a, "GET", "/v1/history", { query: { id, after: history.entries.at(-1).id } }));
   expect(again.entries.map((e: any) => [e.kind, e.rev, e.deleted])).toEqual([["delete", 3, 1]]);
 
-  // A rotation keeps the previous wrapped keys (80 chars each) of the live items.
+  // A rotation keeps no history of its own: the old wrapped item keys would let an old-key holder open the current payloads.
   const snap = await snapshot(api, a);
-  const before = snap.live.find((i) => i.id === id)!;
   const rot = await rotation(snap);
   expect((await api.call(a, "POST", "/v1/rotate", { json: rot.body })).status()).toBe(200);
   rot.adopt();
   epoch += 1;
   const rotated = await json(await api.call(a, "GET", "/v1/history", { query: { id } }));
-  const last = rotated.entries.at(-1);
-  expect(last).toMatchObject({ kind: "rotate", rev: before.rev, blob: before.blob.slice(0, 80), epoch: epoch - 1 });
+  expect(rotated.entries.map((e: any) => e.kind)).toEqual(["overwrite", "overwrite", "delete"]);
   headSeq = (await snapshot(api, a)).headSeq;
 
   // Events: every sync carries what happened, newest last; `events_since` pages.

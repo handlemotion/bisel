@@ -514,7 +514,7 @@ app.delete("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
 
 // GET /v1/history[?id=][&after=][&limit=]: previous states of items, newest last. Ciphertext only; a client that
 // holds VK opens them and re-saves the wanted one as a new revision (the AAD binds the old rev, so it cannot be
-// pushed back verbatim). 'rotate' rows hold just the previous wrapped item key.
+// pushed back verbatim).
 app.get("/v1/history", deviceAuth, async (c) => {
   const nb = noBody(c);
   if (nb) return nb;
@@ -678,13 +678,6 @@ app.post("/v1/rotate", deviceAuth, adminAuth, async (c) => {
               .bind(now, r.revoke, boxId),
           ]
         : []),
-      // The wrapped item keys being replaced stay recoverable for the retention period.
-      db
-        .prepare(
-          `INSERT INTO item_history (box_id, item_id, rev, kind, blob, deleted, epoch, replaced_at)
-           SELECT box_id, id, rev, 'rotate', substr(blob, 1, ${WRAPPED_KEY_CHARS}), 0, ?1, ?2 FROM items WHERE box_id = ?3 AND deleted = 0`,
-        )
-        .bind(r.base_epoch, now, boxId),
       // New wrapped item keys. `seq` is assigned in request order, base_seq + 1 .. base_seq + n, all above every existing seq.
       db
         .prepare(
