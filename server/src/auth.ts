@@ -2,7 +2,11 @@ import { createMiddleware } from "hono/factory";
 import { b64urlDecode, hex } from "./encoding";
 import { MAX_BODY_BYTES } from "./schemas";
 
-export type Principal = { kind: "device"; id: string } | { kind: "recovery" };
+/** Every principal belongs to exactly one box; handlers take the box from here and never from the request. */
+export type Principal = { kind: "device"; id: string; boxId: string } | { kind: "recovery"; boxId: string };
+
+/** The box that existed before accounts. Recovery requests without X-Bisel-Box resolve to it (drop once clients send the header). */
+export const LEGACY_BOX_ID = "legacy_box_00000000";
 
 export type AppEnv = {
   Bindings: Env;
@@ -28,6 +32,7 @@ const MAX_TRACKED_IPS = 20_000;
 const RE_DEVICE = /^[A-Za-z0-9_-]{16,64}$/;
 const RE_TS = /^\d{1,12}$/;
 const RE_NONCE = /^[A-Za-z0-9_-]{16,64}$/;
+const RE_BOX = /^[A-Za-z0-9_-]{16,64}$/;
 export const RECOVERY_DEVICE_HEADER = "recovery";
 
 /** Valid public keys of nobody: a request for an unknown principal is verified against these, so it costs the same. */
@@ -154,6 +159,8 @@ async function sha256Hex(data: Uint8Array<ArrayBuffer>): Promise<string> {
 
 interface PrincipalRow {
   id?: string;
+  box_id: string;
+  disabled_at: number | null;
   sig_alg: string;
   sig_pubkey: string;
   revoked_at: number | null;
@@ -212,6 +219,10 @@ export function authenticate(mode: Mode) {
       if (mode === "device" ? !RE_DEVICE.test(deviceId) : deviceId !== RECOVERY_DEVICE_HEADER) {
         return await fail("malformed_headers");
       }
+      // Only recovery requests name their box (a device's box is its row); absent = the pre-accounts box.
+      const boxHeader = req.headers.get("x-bisel-box");
+      if (boxHeader !== null && (mode !== "recovery" || !RE_BOX.test(boxHeader))) return await fail("malformed_headers");
+      const recoveryBox = boxHeader ?? LEGACY_BOX_ID;
       let sig: Uint8Array<ArrayBuffer>;
       try {
         sig = b64urlDecode(sigB64);
@@ -224,8 +235,14 @@ export function authenticate(mode: Mode) {
       if (!body) return await fail("body_too_large");
 
       const row = await (mode === "device"
-        ? env.DB.prepare("SELECT id, sig_alg, sig_pubkey, revoked_at, last_seen_at, activates_at FROM devices WHERE id = ?1").bind(deviceId)
-        : env.DB.prepare("SELECT recovery_alg AS sig_alg, recovery_pubkey AS sig_pubkey, NULL AS revoked_at, NULL AS last_seen_at FROM meta WHERE id = 1")
+        ? env.DB.prepare(
+            `SELECT d.id, d.box_id, d.sig_alg, d.sig_pubkey, d.revoked_at, d.last_seen_at, d.activates_at, b.disabled_at
+             FROM devices d JOIN boxes b ON b.id = d.box_id WHERE d.id = ?1`,
+          ).bind(deviceId)
+        : env.DB.prepare(
+            `SELECT id AS box_id, recovery_alg AS sig_alg, recovery_pubkey AS sig_pubkey, NULL AS revoked_at, NULL AS last_seen_at, disabled_at
+             FROM boxes WHERE id = ?1`,
+          ).bind(recoveryBox)
       ).first<PrincipalRow>();
 
       const url = new URL(req.url);
@@ -240,6 +257,7 @@ export function authenticate(mode: Mode) {
       // Evaluated only after the verification so every outcome did the same work.
       if (!row) return await fail(mode === "device" ? "unknown_device" : "not_bootstrapped", { device: deviceId });
       if (row.revoked_at != null) return await fail("revoked_device", { device: deviceId });
+      if (row.disabled_at != null) return await fail("box_disabled", { device: deviceId });
       if (row.activates_at != null && row.activates_at > now) return await fail("pending_activation", { device: deviceId });
       if (Math.abs(now - Number(ts)) > MAX_SKEW_SECONDS) return await fail("clock_skew", { device: deviceId, skew: now - Number(ts) });
       if (!valid) return await fail("bad_signature", { device: deviceId });
@@ -262,7 +280,7 @@ export function authenticate(mode: Mode) {
         await env.DB.prepare("UPDATE devices SET last_seen_at = ?1 WHERE id = ?2").bind(now - (now % 3600), deviceId).run();
       }
 
-      c.set("principal", mode === "device" ? { kind: "device", id: deviceId } : { kind: "recovery" });
+      c.set("principal", mode === "device" ? { kind: "device", id: deviceId, boxId: row.box_id } : { kind: "recovery", boxId: row.box_id });
       c.set("body", body);
       c.set("now", now);
       c.set("signed", new TextDecoder().decode(signed));
@@ -296,7 +314,9 @@ export function requireAdmin() {
   return createMiddleware<AppEnv>(async (c, next) => {
     const refuse = () => c.json({ error: "admin_signature_required" }, 403);
     const header = c.req.header("x-bisel-admin") ?? "";
-    const meta = await c.env.DB.prepare("SELECT admin_pubkey FROM meta WHERE id = 1").first<{ admin_pubkey: string }>();
+    const meta = await c.env.DB.prepare("SELECT admin_pubkey FROM boxes WHERE id = ?1")
+      .bind(c.get("principal").boxId)
+      .first<{ admin_pubkey: string }>();
     let ok = false;
     try {
       const sig = b64urlDecode(header);

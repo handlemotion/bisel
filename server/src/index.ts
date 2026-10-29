@@ -12,7 +12,7 @@ import {
   shortHash,
   type AppEnv,
 } from "./auth";
-import { b64urlByteLength, b64urlDecode } from "./encoding";
+import { b64urlByteLength, b64urlDecode, b64urlEncode } from "./encoding";
 import {
   BODY_LIMITS,
   BootstrapSchema,
@@ -168,13 +168,13 @@ async function validRecoveryKeys(sigPub: string, encPub: string): Promise<boolea
   }
 }
 
-function insertDevice(db: D1Database, d: DeviceRegistration, now: number, epoch: number, activatesAt: number | null = null) {
+function insertDevice(db: D1Database, boxId: string, d: DeviceRegistration, now: number, epoch: number, activatesAt: number | null = null) {
   return db
     .prepare(
-      `INSERT INTO devices (id, name, kind, sig_alg, sig_pubkey, enc_pubkey, envelope, envelope_epoch, created_at, activates_at)
-       VALUES (?1, ?2, ?3, 'p256', ?4, ?5, ?6, ?7, ?8, ?9)`,
+      `INSERT INTO devices (id, box_id, name, kind, sig_alg, sig_pubkey, enc_pubkey, envelope, envelope_epoch, created_at, activates_at)
+       VALUES (?1, ?2, ?3, ?4, 'p256', ?5, ?6, ?7, ?8, ?9, ?10)`,
     )
-    .bind(d.id, d.name, d.kind, d.sig_pubkey, d.enc_pubkey, d.envelope, epoch, now, activatesAt);
+    .bind(d.id, boxId, d.name, d.kind, d.sig_pubkey, d.enc_pubkey, d.envelope, epoch, now, activatesAt);
 }
 
 const retentionSeconds = (env: Env) => (Number(env.HISTORY_RETENTION_DAYS) || 30) * 86400;
@@ -185,6 +185,12 @@ function pruneHistory(env: Env, now: number) {
     "DELETE FROM item_history WHERE id IN (SELECT id FROM item_history WHERE replaced_at < ?1 LIMIT 100)",
   ).bind(now - retentionSeconds(env));
 }
+
+/** Every box-scoped statement takes its box from the authenticated principal, never from the request. */
+const boxOf = (c: Ctx) => c.get("principal").boxId;
+
+/** A fresh box id: 128 random bits, base64url. */
+const newBoxId = () => b64urlEncode(crypto.getRandomValues(new Uint8Array(16)));
 
 async function validAdminKey(pub: string): Promise<boolean> {
   try {
@@ -197,10 +203,10 @@ async function validAdminKey(pub: string): Promise<boolean> {
   }
 }
 
-function insertEvent(db: D1Database, now: number, deviceId: string | null, type: string, subject: string | null) {
+function insertEvent(db: D1Database, boxId: string, now: number, deviceId: string | null, type: string, subject: string | null) {
   return db
-    .prepare("INSERT INTO events (ts, device_id, type, subject_id) VALUES (?1, ?2, ?3, ?4)")
-    .bind(now, deviceId, type, subject);
+    .prepare("INSERT INTO events (box_id, ts, device_id, type, subject_id) VALUES (?1, ?2, ?3, ?4, ?5)")
+    .bind(boxId, now, deviceId, type, subject);
 }
 
 /**
@@ -214,8 +220,8 @@ const clearAssertions = (db: D1Database) => db.prepare("DELETE FROM assertions")
 const isAssertionFailure = (err: unknown) => /CHECK constraint/i.test(String(err));
 const isUnique = (err: unknown) => /UNIQUE/i.test(String(err));
 
-async function metaState(db: D1Database) {
-  return (await db.prepare("SELECT epoch, head_seq FROM meta WHERE id = 1").first<{ epoch: number; head_seq: number }>())!;
+async function metaState(db: D1Database, boxId: string) {
+  return (await db.prepare("SELECT epoch, head_seq FROM boxes WHERE id = ?1").bind(boxId).first<{ epoch: number; head_seq: number }>())!;
 }
 
 interface ItemRow {
@@ -228,6 +234,8 @@ interface ItemRow {
 }
 const itemJson = (r: ItemRow) => ({ ...r, deleted: r.deleted === 1 });
 const ITEM_COLS = "id, rev, seq, deleted, blob, updated_at";
+/** Items one box may hold (live and tombstones): open sign-up must not be a free file store. */
+const maxItemsPerBox = (env: Env) => Math.max(1, Number(env.MAX_ITEMS_PER_BOX) || 5000);
 
 const DEVICE_PUBLIC_COLS = "id, name, kind, sig_pubkey, enc_pubkey, created_at, last_seen_at, revoked_at, activates_at";
 
@@ -248,16 +256,14 @@ app.post("/v1/bootstrap", async (c) => {
     const supplied = req.headers.get("x-bisel-bootstrap") ?? "";
     const expected = env.BOOTSTRAP_TOKEN ?? "";
     const enc = new TextEncoder();
-    const [a, b, done] = await Promise.all([
+    const [a, b] = await Promise.all([
       crypto.subtle.digest("SHA-256", enc.encode(supplied)),
       crypto.subtle.digest("SHA-256", enc.encode(expected)),
-      env.DB.prepare("SELECT 1 AS x FROM meta WHERE id = 1").first(),
     ]);
     const tokenOk = expected.length > 0 && crypto.subtle.timingSafeEqual(a, b);
-    if (!tokenOk || done) {
+    if (!tokenOk) {
       await decoyVerify("device", new Uint8Array(64), new Uint8Array(32));
-      if (!tokenOk) await recordFailure(env, req, now, "bad_bootstrap_token");
-      else console.log(JSON.stringify({ evt: "auth_fail", reason: "already_bootstrapped", ip: await shortHash(clientIp(req)) }));
+      await recordFailure(env, req, now, "bad_bootstrap_token");
       return deny();
     }
     body = await readBodyCapped(req, BODY_LIMITS.bootstrap);
@@ -280,22 +286,23 @@ app.post("/v1/bootstrap", async (c) => {
     return bad(c, "invalid_key");
   }
 
+  const boxId = newBoxId();
   try {
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO meta (id, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, head_seq, epoch, created_at)
-         VALUES (1, 'ed25519', ?1, ?2, ?3, ?4, 0, 1, ?5)`,
-      ).bind(recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, now),
-      insertDevice(env.DB, device, now, 1),
-      insertEvent(env.DB, now, device.id, "bootstrap", device.id),
+        `INSERT INTO boxes (id, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, head_seq, epoch, created_at)
+         VALUES (?1, 'ed25519', ?2, ?3, ?4, ?5, 0, 1, ?6)`,
+      ).bind(boxId, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, now),
+      insertDevice(env.DB, boxId, device, now, 1),
+      insertEvent(env.DB, boxId, now, device.id, "bootstrap", device.id),
     ]);
   } catch (err) {
-    // Lost a race with another bootstrap: meta.id is a CHECK(id=1) primary key.
+    // The device id is already registered (in this or another box): same refusal as any other bootstrap failure.
     console.log(JSON.stringify({ evt: "auth_fail", reason: "bootstrap_conflict", message: String(err) }));
     return deny();
   }
-  console.log(JSON.stringify({ evt: "bootstrap", device: device.id }));
-  return c.json({ device_id: device.id, head_seq: 0, epoch: 1 }, 201);
+  console.log(JSON.stringify({ evt: "bootstrap", box: boxId.slice(0, 8), device: device.id }));
+  return c.json({ device_id: device.id, box_id: boxId, head_seq: 0, epoch: 1 }, 201);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -311,17 +318,22 @@ app.get("/v1/sync", deviceAuth, async (c) => {
 
   // One batch = one transaction: items, head_seq, epoch and the device list are a consistent snapshot.
   const { events_since } = q.data;
+  const boxId = boxOf(c);
   const [itemsRes, metaRes, devicesRes, eventsRes] = await db.batch([
-    db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE seq > ?1 ORDER BY seq ASC LIMIT ?2`).bind(since, limit + 1),
-    db.prepare("SELECT head_seq, epoch, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope FROM meta WHERE id = 1"),
-    db.prepare(`SELECT ${DEVICE_PUBLIC_COLS} FROM devices ORDER BY created_at ASC, id ASC`),
+    db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE box_id = ?3 AND seq > ?1 ORDER BY seq ASC LIMIT ?2`).bind(since, limit + 1, boxId),
+    db
+      .prepare("SELECT head_seq, epoch, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope FROM boxes WHERE id = ?1")
+      .bind(boxId),
+    db.prepare(`SELECT ${DEVICE_PUBLIC_COLS} FROM devices WHERE box_id = ?1 ORDER BY created_at ASC, id ASC`).bind(boxId),
     events_since === undefined
-      ? db.prepare(
-          "SELECT id, ts, device_id, type, subject_id FROM (SELECT id, ts, device_id, type, subject_id FROM events ORDER BY id DESC LIMIT 50) ORDER BY id ASC",
-        )
+      ? db
+          .prepare(
+            "SELECT id, ts, device_id, type, subject_id FROM (SELECT id, ts, device_id, type, subject_id FROM events WHERE box_id = ?1 ORDER BY id DESC LIMIT 50) ORDER BY id ASC",
+          )
+          .bind(boxId)
       : db
-          .prepare("SELECT id, ts, device_id, type, subject_id FROM events WHERE id > ?1 ORDER BY id ASC LIMIT 100")
-          .bind(events_since),
+          .prepare("SELECT id, ts, device_id, type, subject_id FROM events WHERE box_id = ?2 AND id > ?1 ORDER BY id ASC LIMIT 100")
+          .bind(events_since, boxId),
   ]);
   const rows = itemsRes!.results as unknown as ItemRow[];
   const meta = metaRes!.results[0] as {
@@ -371,34 +383,40 @@ app.put("/v1/items/:id", deviceAuth, async (c) => {
 
   const db = c.env.DB;
   const now = c.get("now");
-  const REV_GUARD = "COALESCE((SELECT rev FROM items WHERE id = ?1), 0) = ?2";
+  const boxId = boxOf(c);
+  // ?6 is the box in every statement below. The bump and the write carry the same guard, which now also includes
+  // room under the per-box cap for a brand-new item (the items trigger keeps item_count current).
+  const REV_GUARD = "COALESCE((SELECT rev FROM items WHERE box_id = ?6 AND id = ?1), 0) = ?2";
+  const maxItems = maxItemsPerBox(c.env);
+  const ROOM = `(EXISTS (SELECT 1 FROM items WHERE box_id = ?6 AND id = ?1) OR (SELECT item_count FROM boxes WHERE id = ?6) < ${maxItems})`;
   const [bump, , , current, state] = await db.batch([
-    db.prepare(`UPDATE meta SET head_seq = head_seq + 1 WHERE id = 1 AND epoch = ?3 AND ${REV_GUARD}`).bind(id, base_rev, epoch),
+    db.prepare(`UPDATE boxes SET head_seq = head_seq + 1 WHERE id = ?6 AND epoch = ?3 AND ${ROOM} AND ${REV_GUARD}`).bind(id, base_rev, epoch, null, null, boxId),
     // The state being replaced stays recoverable for the retention period (same guard as the write).
     db
       .prepare(
-        `INSERT INTO item_history (item_id, rev, kind, blob, deleted, epoch, replaced_at)
-         SELECT id, rev, CASE deleted WHEN 1 THEN 'delete' ELSE 'overwrite' END, blob, deleted, ?3, ?4 FROM items
-         WHERE id = ?1 AND rev = ?2 AND (SELECT epoch FROM meta WHERE id = 1) = ?3`,
+        `INSERT INTO item_history (box_id, item_id, rev, kind, blob, deleted, epoch, replaced_at)
+         SELECT ?6, id, rev, CASE deleted WHEN 1 THEN 'delete' ELSE 'overwrite' END, blob, deleted, ?3, ?4 FROM items
+         WHERE box_id = ?6 AND id = ?1 AND rev = ?2 AND (SELECT epoch FROM boxes WHERE id = ?6) = ?3`,
       )
-      .bind(id, base_rev, epoch, now),
+      .bind(id, base_rev, epoch, now, null, boxId),
     db
       .prepare(
-        `INSERT INTO items (id, rev, seq, deleted, blob, updated_at)
-         SELECT ?1, ?2 + 1, head_seq, 0, ?3, ?4 FROM meta WHERE id = 1 AND epoch = ?5 AND ${REV_GUARD}
-         ON CONFLICT(id) DO UPDATE SET
+        `INSERT INTO items (box_id, id, rev, seq, deleted, blob, updated_at)
+         SELECT ?6, ?1, ?2 + 1, head_seq, 0, ?3, ?4 FROM boxes WHERE id = ?6 AND epoch = ?5 AND ${ROOM} AND ${REV_GUARD}
+         ON CONFLICT(box_id, id) DO UPDATE SET
            rev = excluded.rev, seq = excluded.seq, deleted = 0, blob = excluded.blob, updated_at = excluded.updated_at`,
       )
-      .bind(id, base_rev, blob, now, epoch),
-    db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ?1`).bind(id),
-    db.prepare("SELECT epoch FROM meta WHERE id = 1"),
+      .bind(id, base_rev, blob, now, epoch, boxId),
+    db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE box_id = ?2 AND id = ?1`).bind(id, boxId),
+    db.prepare("SELECT epoch, item_count FROM boxes WHERE id = ?1").bind(boxId),
   ]);
   await pruneHistory(c.env, now).run();
   const row = current!.results[0] as ItemRow | undefined;
   if (bump!.meta.changes !== 1) {
-    const serverEpoch = (state!.results[0] as { epoch: number }).epoch;
+    const st = state!.results[0] as { epoch: number; item_count: number };
     // The blob's item key is wrapped under a vault key that has since been rotated: refuse, the client re-wraps.
-    if (serverEpoch !== epoch) return c.json({ error: "stale_epoch", epoch: serverEpoch }, 409);
+    if (st.epoch !== epoch) return c.json({ error: "stale_epoch", epoch: st.epoch }, 409);
+    if (!row && st.item_count >= maxItems) return c.json({ error: "box_full", max_items: maxItems }, 409);
     return c.json({ error: "conflict", current: row ? itemJson(row) : null }, 409);
   }
   return c.json({ item: itemJson(row!) });
@@ -416,25 +434,26 @@ app.delete("/v1/items/:id", deviceAuth, async (c) => {
 
   const db = c.env.DB;
   const now = c.get("now");
-  const guard = "EXISTS (SELECT 1 FROM items WHERE id = ?1 AND rev = ?2 AND deleted = 0) AND (SELECT epoch FROM meta WHERE id = 1) = ?3";
+  const boxId = boxOf(c);
+  const guard = "EXISTS (SELECT 1 FROM items WHERE box_id = ?6 AND id = ?1 AND rev = ?2 AND deleted = 0) AND (SELECT epoch FROM boxes WHERE id = ?6) = ?3";
   const [bump, , , current, state] = await db.batch([
-    db.prepare(`UPDATE meta SET head_seq = head_seq + 1 WHERE id = 1 AND ${guard}`).bind(id, base_rev, epoch),
+    db.prepare(`UPDATE boxes SET head_seq = head_seq + 1 WHERE id = ?6 AND ${guard}`).bind(id, base_rev, epoch, null, null, boxId),
     db
       .prepare(
-        `INSERT INTO item_history (item_id, rev, kind, blob, deleted, epoch, replaced_at)
-         SELECT id, rev, 'overwrite', blob, deleted, ?3, ?4 FROM items
-         WHERE id = ?1 AND rev = ?2 AND deleted = 0 AND (SELECT epoch FROM meta WHERE id = 1) = ?3`,
+        `INSERT INTO item_history (box_id, item_id, rev, kind, blob, deleted, epoch, replaced_at)
+         SELECT ?6, id, rev, 'overwrite', blob, deleted, ?3, ?4 FROM items
+         WHERE box_id = ?6 AND id = ?1 AND rev = ?2 AND deleted = 0 AND (SELECT epoch FROM boxes WHERE id = ?6) = ?3`,
       )
-      .bind(id, base_rev, epoch, now),
+      .bind(id, base_rev, epoch, now, null, boxId),
     // The tombstone keeps a sealed marker instead of an empty blob: other devices verify it before honouring the delete.
     db
       .prepare(
-        `UPDATE items SET rev = rev + 1, seq = (SELECT head_seq FROM meta WHERE id = 1), deleted = 1, blob = ?4, updated_at = ?3
-         WHERE id = ?1 AND rev = ?2 AND deleted = 0 AND (SELECT epoch FROM meta WHERE id = 1) = ?5`,
+        `UPDATE items SET rev = rev + 1, seq = (SELECT head_seq FROM boxes WHERE id = ?6), deleted = 1, blob = ?4, updated_at = ?3
+         WHERE box_id = ?6 AND id = ?1 AND rev = ?2 AND deleted = 0 AND (SELECT epoch FROM boxes WHERE id = ?6) = ?5`,
       )
-      .bind(id, base_rev, now, marker, epoch),
-    db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ?1`).bind(id),
-    db.prepare("SELECT epoch FROM meta WHERE id = 1"),
+      .bind(id, base_rev, now, marker, epoch, boxId),
+    db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE box_id = ?2 AND id = ?1`).bind(id, boxId),
+    db.prepare("SELECT epoch FROM boxes WHERE id = ?1").bind(boxId),
   ]);
   await pruneHistory(c.env, now).run();
   const row = current!.results[0] as ItemRow | undefined;
@@ -458,9 +477,9 @@ app.get("/v1/history", deviceAuth, async (c) => {
   const { id, after, limit } = q.data;
   const { results } = await c.env.DB.prepare(
     `SELECT id, item_id, rev, kind, blob, deleted, epoch, replaced_at FROM item_history
-     WHERE id > ?1 AND (?2 IS NULL OR item_id = ?2) ORDER BY id ASC LIMIT ?3`,
+     WHERE box_id = ?4 AND id > ?1 AND (?2 IS NULL OR item_id = ?2) ORDER BY id ASC LIMIT ?3`,
   )
-    .bind(after, id ?? null, limit)
+    .bind(after, id ?? null, limit, boxOf(c))
     .all();
   return c.json({ entries: results });
 });
@@ -474,8 +493,10 @@ app.get("/v1/devices", deviceAuth, async (c) => {
   const nq = parseQuery(c, EmptyQuerySchema);
   if (!nq.ok) return nq.res;
   const { results } = await c.env.DB.prepare(
-    `SELECT ${DEVICE_PUBLIC_COLS} FROM devices ORDER BY created_at ASC, id ASC`,
-  ).all();
+    `SELECT ${DEVICE_PUBLIC_COLS} FROM devices WHERE box_id = ?1 ORDER BY created_at ASC, id ASC`,
+  )
+    .bind(boxOf(c))
+    .all();
   return c.json({ devices: results });
 });
 
@@ -487,15 +508,16 @@ app.post("/v1/devices", deviceAuth, adminAuth, async (c) => {
   const p = c.get("principal");
   const now = c.get("now");
   const db = c.env.DB;
+  const boxId = p.boxId;
   try {
     await db.batch([
-      assertThat(db, "EXISTS (SELECT 1 FROM meta WHERE id = 1 AND epoch = ?1)", epoch),
-      insertDevice(db, d, now, epoch),
-      insertEvent(db, now, p.kind === "device" ? p.id : null, "approve", d.id),
+      assertThat(db, "EXISTS (SELECT 1 FROM boxes WHERE id = ?2 AND epoch = ?1)", epoch, boxId),
+      insertDevice(db, boxId, d, now, epoch),
+      insertEvent(db, boxId, now, p.kind === "device" ? p.id : null, "approve", d.id),
       clearAssertions(db),
     ]);
   } catch (err) {
-    if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db)).epoch }, 409);
+    if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db, boxId)).epoch }, 409);
     if (isUnique(err)) return c.json({ error: "exists" }, 409);
     throw err;
   }
@@ -515,7 +537,8 @@ app.delete("/v1/devices/:id", deviceAuth, adminAuth, async (c) => {
   const nq = parseQuery(c, EmptyQuerySchema);
   if (!nq.ok) return nq.res;
   const db = c.env.DB;
-  const target = await db.prepare("SELECT id, revoked_at FROM devices WHERE id = ?1").bind(id).first<{
+  const boxId = boxOf(c);
+  const target = await db.prepare("SELECT id, revoked_at FROM devices WHERE id = ?1 AND box_id = ?2").bind(id, boxId).first<{
     id: string;
     revoked_at: number | null;
   }>();
@@ -525,8 +548,8 @@ app.delete("/v1/devices/:id", deviceAuth, adminAuth, async (c) => {
   const now = c.get("now");
   // Wipe the envelope too: a revoked device has no reason to keep a server-side copy of VK-to-it.
   await db.batch([
-    db.prepare("UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND revoked_at IS NULL").bind(now, id),
-    insertEvent(db, now, p.kind === "device" ? p.id : null, "revoke", id),
+    db.prepare("UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND box_id = ?3 AND revoked_at IS NULL").bind(now, id, boxId),
+    insertEvent(db, boxId, now, p.kind === "device" ? p.id : null, "revoke", id),
   ]);
   return c.json({ id, revoked_at: now, rotated: false });
 });
@@ -538,9 +561,9 @@ app.get("/v1/envelope", deviceAuth, async (c) => {
   if (!nq.ok) return nq.res;
   const p = c.get("principal");
   const row = await c.env.DB.prepare(
-    "SELECT d.envelope AS envelope, d.envelope_epoch AS epoch FROM devices d WHERE d.id = ?1",
+    "SELECT d.envelope AS envelope, d.envelope_epoch AS epoch FROM devices d WHERE d.id = ?1 AND d.box_id = ?2",
   )
-    .bind(p.kind === "device" ? p.id : "")
+    .bind(p.kind === "device" ? p.id : "", p.boxId)
     .first<{ envelope: string; epoch: number }>();
   return c.json({ device_id: p.kind === "device" ? p.id : null, envelope: row?.envelope ?? "", epoch: row?.epoch ?? 0 });
 });
@@ -577,22 +600,25 @@ app.post("/v1/rotate", deviceAuth, adminAuth, async (c) => {
   const markers = JSON.stringify(r.tombstones.map((i) => ({ id: i.id, rev: i.rev, k: i.marker })));
   const envelopes = JSON.stringify(r.devices);
 
+  const boxId = p.boxId;
   try {
     await db.batch([
-      assertThat(db, "EXISTS (SELECT 1 FROM meta WHERE id = 1 AND epoch = ?1 AND head_seq = ?2)", r.base_epoch, r.base_seq),
+      assertThat(db, "EXISTS (SELECT 1 FROM boxes WHERE id = ?3 AND epoch = ?1 AND head_seq = ?2)", r.base_epoch, r.base_seq, boxId),
       ...(r.revoke
         ? [
-            assertThat(db, "EXISTS (SELECT 1 FROM devices WHERE id = ?1 AND revoked_at IS NULL)", r.revoke),
-            db.prepare("UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND revoked_at IS NULL").bind(now, r.revoke),
+            assertThat(db, "EXISTS (SELECT 1 FROM devices WHERE id = ?1 AND box_id = ?2 AND revoked_at IS NULL)", r.revoke, boxId),
+            db
+              .prepare("UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND box_id = ?3 AND revoked_at IS NULL")
+              .bind(now, r.revoke, boxId),
           ]
         : []),
       // The wrapped item keys being replaced stay recoverable for the retention period.
       db
         .prepare(
-          `INSERT INTO item_history (item_id, rev, kind, blob, deleted, epoch, replaced_at)
-           SELECT id, rev, 'rotate', substr(blob, 1, ${WRAPPED_KEY_CHARS}), 0, ?1, ?2 FROM items WHERE deleted = 0`,
+          `INSERT INTO item_history (box_id, item_id, rev, kind, blob, deleted, epoch, replaced_at)
+           SELECT box_id, id, rev, 'rotate', substr(blob, 1, ${WRAPPED_KEY_CHARS}), 0, ?1, ?2 FROM items WHERE box_id = ?3 AND deleted = 0`,
         )
-        .bind(r.base_epoch, now),
+        .bind(r.base_epoch, now, boxId),
       // New wrapped item keys. `seq` is assigned in request order, base_seq + 1 .. base_seq + n, all above every existing seq.
       db
         .prepare(
@@ -600,49 +626,52 @@ app.post("/v1/rotate", deviceAuth, adminAuth, async (c) => {
                              json_extract(value, '$.k') AS k, key AS pos FROM json_each(?1))
            UPDATE items SET blob = r.k || substr(items.blob, ${WRAPPED_KEY_CHARS + 1}), seq = ?2 + 1 + r.pos, updated_at = ?3
            FROM r
-           WHERE items.id = r.id AND items.rev = r.rev AND items.deleted = 0 AND length(items.blob) > ${WRAPPED_KEY_CHARS}`,
+           WHERE items.box_id = ?4 AND items.id = r.id AND items.rev = r.rev AND items.deleted = 0 AND length(items.blob) > ${WRAPPED_KEY_CHARS}`,
         )
-        .bind(keys, r.base_seq, now),
+        .bind(keys, r.base_seq, now, boxId),
       // Tombstone markers are sealed under VK, so they are re-sealed too; seqs follow the items'.
       db
         .prepare(
           `WITH r AS (SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.rev') AS rev,
                              json_extract(value, '$.k') AS k, key AS pos FROM json_each(?1))
            UPDATE items SET blob = r.k, seq = ?2 + ?4 + 1 + r.pos, updated_at = ?3
-           FROM r WHERE items.id = r.id AND items.rev = r.rev AND items.deleted = 1`,
+           FROM r WHERE items.box_id = ?5 AND items.id = r.id AND items.rev = r.rev AND items.deleted = 1`,
         )
-        .bind(markers, r.base_seq, now, n),
+        .bind(markers, r.base_seq, now, n, boxId),
       db
         .prepare(
           `WITH r AS (SELECT json_extract(value, '$.id') AS id, json_extract(value, '$.envelope') AS envelope FROM json_each(?1))
-           UPDATE devices SET envelope = r.envelope, envelope_epoch = ?2 FROM r WHERE devices.id = r.id AND devices.revoked_at IS NULL`,
+           UPDATE devices SET envelope = r.envelope, envelope_epoch = ?2 FROM r
+           WHERE devices.id = r.id AND devices.box_id = ?3 AND devices.revoked_at IS NULL`,
         )
-        .bind(envelopes, newEpoch),
+        .bind(envelopes, newEpoch, boxId),
       // The admin key moves with VK; this request was authorised by the old one.
       db
-        .prepare("UPDATE meta SET epoch = ?1, head_seq = head_seq + ?2, recovery_envelope = ?3, admin_pubkey = ?4 WHERE id = 1")
-        .bind(newEpoch, n + t, r.recovery_envelope, r.new_admin_pubkey),
+        .prepare("UPDATE boxes SET epoch = ?1, head_seq = head_seq + ?2, recovery_envelope = ?3, admin_pubkey = ?4 WHERE id = ?5")
+        .bind(newEpoch, n + t, r.recovery_envelope, r.new_admin_pubkey, boxId),
       // Every live item and tombstone was rotated (none omitted, none at another rev, none appeared) and every active device got its envelope.
       assertThat(
         db,
-        `(SELECT COUNT(*) FROM items WHERE deleted = 0) = ?1 AND (SELECT COUNT(*) FROM items WHERE deleted = 0 AND seq > ?2) = ?1
-         AND (SELECT COUNT(*) FROM items WHERE deleted = 1) = ?3 AND (SELECT COUNT(*) FROM items WHERE deleted = 1 AND seq > ?2) = ?3`,
+        `(SELECT COUNT(*) FROM items WHERE box_id = ?4 AND deleted = 0) = ?1 AND (SELECT COUNT(*) FROM items WHERE box_id = ?4 AND deleted = 0 AND seq > ?2) = ?1
+         AND (SELECT COUNT(*) FROM items WHERE box_id = ?4 AND deleted = 1) = ?3 AND (SELECT COUNT(*) FROM items WHERE box_id = ?4 AND deleted = 1 AND seq > ?2) = ?3`,
         n,
         r.base_seq,
         t,
+        boxId,
       ),
       assertThat(
         db,
-        `(SELECT COUNT(*) FROM devices WHERE revoked_at IS NULL) = ?1 AND (SELECT COUNT(*) FROM devices WHERE revoked_at IS NULL AND envelope_epoch = ?2) = ?1`,
+        `(SELECT COUNT(*) FROM devices WHERE box_id = ?3 AND revoked_at IS NULL) = ?1 AND (SELECT COUNT(*) FROM devices WHERE box_id = ?3 AND revoked_at IS NULL AND envelope_epoch = ?2) = ?1`,
         m,
         newEpoch,
+        boxId,
       ),
-      insertEvent(db, now, callerId, "rotate", r.revoke),
+      insertEvent(db, boxId, now, callerId, "rotate", r.revoke ?? null),
       clearAssertions(db),
     ]);
   } catch (err) {
     if (!isAssertionFailure(err)) throw err;
-    const state = await metaState(db);
+    const state = await metaState(db, boxId);
     console.log(JSON.stringify({ evt: "rotate_conflict", device: callerId.slice(0, 8), base_epoch: r.base_epoch, epoch: state.epoch }));
     return c.json({ error: "conflict", epoch: state.epoch, head_seq: state.head_seq }, 409);
   }
@@ -668,27 +697,29 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
     const nq = parseQuery(c, EmptyQuerySchema);
     if (!nq.ok) return nq.res;
   }
+  const boxId = boxOf(c);
   const delay = Math.max(0, Number(c.env.RECOVERY_ACTIVATION_DELAY_SECONDS) || 0);
   const activatesAt = delay > 0 ? now + delay : null;
   if (device) {
     if (!(await validDeviceKeys(device))) return bad(c, "invalid_key");
     try {
       await db.batch([
-        assertThat(db, "EXISTS (SELECT 1 FROM meta WHERE id = 1 AND epoch = ?1)", epoch),
-        insertDevice(db, device, now, epoch, activatesAt),
-        insertEvent(db, now, null, "recovery", device.id),
+        assertThat(db, "EXISTS (SELECT 1 FROM boxes WHERE id = ?2 AND epoch = ?1)", epoch, boxId),
+        insertDevice(db, boxId, device, now, epoch, activatesAt),
+        insertEvent(db, boxId, now, null, "recovery", device.id),
         clearAssertions(db),
       ]);
     } catch (err) {
-      if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db)).epoch }, 409);
+      if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db, boxId)).epoch }, 409);
       if (isUnique(err)) return c.json({ error: "exists" }, 409);
       throw err;
     }
   } else {
-    await insertEvent(db, now, null, "recovery", null).run();
+    await insertEvent(db, boxId, now, null, "recovery", null).run();
   }
   const meta = await db
-    .prepare("SELECT recovery_envelope, head_seq, epoch FROM meta WHERE id = 1")
+    .prepare("SELECT recovery_envelope, head_seq, epoch FROM boxes WHERE id = ?1")
+    .bind(boxId)
     .first<{ recovery_envelope: string; head_seq: number; epoch: number }>();
   return c.json({
     recovery_envelope: meta!.recovery_envelope,
@@ -706,17 +737,18 @@ app.post("/v1/recovery/rotate", deviceAuth, adminAuth, async (c) => {
   const p = c.get("principal");
   const now = c.get("now");
   const db = c.env.DB;
+  const boxId = p.boxId;
   try {
     await db.batch([
-      assertThat(db, "EXISTS (SELECT 1 FROM meta WHERE id = 1 AND epoch = ?1)", epoch),
+      assertThat(db, "EXISTS (SELECT 1 FROM boxes WHERE id = ?2 AND epoch = ?1)", epoch, boxId),
       db
-        .prepare("UPDATE meta SET recovery_pubkey = ?1, recovery_enc_pubkey = ?2, recovery_envelope = ?3 WHERE id = 1")
-        .bind(recovery_pubkey, recovery_enc_pubkey, recovery_envelope),
-      insertEvent(db, now, p.kind === "device" ? p.id : null, "recovery_rotate", null),
+        .prepare("UPDATE boxes SET recovery_pubkey = ?1, recovery_enc_pubkey = ?2, recovery_envelope = ?3 WHERE id = ?4")
+        .bind(recovery_pubkey, recovery_enc_pubkey, recovery_envelope, boxId),
+      insertEvent(db, boxId, now, p.kind === "device" ? p.id : null, "recovery_rotate", null),
       clearAssertions(db),
     ]);
   } catch (err) {
-    if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db)).epoch }, 409);
+    if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db, boxId)).epoch }, 409);
     throw err;
   }
   return c.json({ ok: true });

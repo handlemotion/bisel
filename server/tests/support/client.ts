@@ -81,6 +81,9 @@ export async function newAdminKey(): Promise<AdminKey> {
 /** The admin key the tests' "owner" currently holds (moves on every successful rotation). */
 export const adminState: { key: AdminKey | null } = { key: null };
 
+/** The box recovery requests name in X-Bisel-Box (device requests never send it). Unset = the pre-accounts fallback. */
+export const boxState: { id: string | null } = { id: null };
+
 /** Routes that need the second (vault-admin) signature. */
 export function needsAdmin(method: string, path: string): boolean {
   return (
@@ -146,6 +149,7 @@ export async function prepare(
       "X-Bisel-Nonce": nonce,
       "X-Bisel-Sig": b64u(sig),
       ...(adminSig ? { "X-Bisel-Admin": adminSig } : {}),
+      ...(principal.id === "recovery" && boxState.id ? { "X-Bisel-Box": boxState.id } : {}),
       ...(body.length ? { "Content-Type": "application/json" } : {}),
     },
   };

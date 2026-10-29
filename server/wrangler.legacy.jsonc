@@ -1,0 +1,11 @@
+{
+  // Test-only: the pre-accounts schema (migrations 0001-0003 copied to .wrangler/pre by `pnpm test:legacy`), used to seed a
+  // database the way production looked before accounts, so migration 0004 can be proved on it. Never deployed.
+  "name": "bisel-server-legacy-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "d1_databases": [
+    { "binding": "DB", "database_name": "bisel", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": ".wrangler/pre" }
+  ]
+}

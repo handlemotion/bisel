@@ -1,7 +1,7 @@
 import { expect, test, type APIResponse } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { TEST_BOOTSTRAP_TOKEN } from "../playwright.config";
-import { adminState, b64u, Bisel, newAdminKey, newDevice, prepare, randomId, randomX25519Pub, recoveryKeyFromSeed, type AdminKey, type TestDevice } from "./support/client";
+import { adminState, b64u, boxState, Bisel, newAdminKey, newDevice, prepare, randomId, randomX25519Pub, recoveryKeyFromSeed, type AdminKey, type TestDevice } from "./support/client";
 
 // One story against one database. Each step depends on the state the previous ones left behind.
 test.describe.configure({ mode: "serial" });
@@ -37,7 +37,7 @@ async function fingerprint(res: APIResponse) {
   return { status: res.status(), body: (await res.body()).toString("utf8"), headers };
 }
 
-test("bootstrap is one-time and guarded by the secret", async ({ request }) => {
+test("bootstrap is guarded by the secret and makes a new box each time", async ({ request }) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.1.0.1" });
   a = await newDevice("test-mac");
   recovery = await recoveryKeyFromSeed(randomBytes(32));
@@ -61,14 +61,22 @@ test("bootstrap is one-time and guarded by the secret", async ({ request }) => {
 
   const ok = await api.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, body);
   expect(ok.status()).toBe(201);
+  boxState.id = (await json(ok)).box_id;
+  expect(boxState.id).toMatch(/^[A-Za-z0-9_-]{22}$/);
 
-  // After success the endpoint always 404s, even with the right secret.
+  // Boxes are no longer one per server: the secret creates another, independent, unowned box...
+  const other = await newDevice("second-box-mac");
   const again = await api.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, {
     ...body,
-    device: (await newDevice("intruder")).registration(),
+    device: other.registration(),
   });
-  expect(again.status()).toBe(404);
-  expect(await again.text()).toBe("");
+  expect(again.status()).toBe(201);
+  const created = await json(again);
+  expect(created.box_id).not.toBe((await json(ok)).box_id);
+  // ...but never with a device id that is already registered anywhere (same bare refusal as a wrong secret).
+  const reuse = await api.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, { ...body, device: a.registration() });
+  expect(reuse.status()).toBe(404);
+  expect(await reuse.text()).toBe("");
 });
 
 test("first device syncs an empty vault and reads back its own envelope", async ({ request }) => {
@@ -817,7 +825,16 @@ test("unknown routes, wrong methods and every kind of auth failure look identica
     validSignatureWrongMethod: await api.call(a, "POST", "/v1/sync"),
     bootstrapGet: await api.api.fetch("/v1/bootstrap", { headers: { "CF-Connecting-IP": "10.4.0.3" } }),
     bootstrapWrongToken: await api.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": "wrong" }, {}),
-    bootstrapRightTokenAlreadyDone: await api.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, {}),
+    // The right recovery key, aimed at a box that does not exist: nothing may tell it from a wrong key.
+    recoveryUnknownBox: await (async () => {
+      const keep = boxState.id;
+      boxState.id = "nonexistent_box_000000";
+      try {
+        return await api.call(recovery, "POST", "/v1/recovery/session");
+      } finally {
+        boxState.id = keep;
+      }
+    })(),
     recoveryWrongKey: await api.call(await recoveryKeyFromSeed(randomBytes(32)), "POST", "/v1/recovery/session"),
   };
   const reference = await fingerprint(responses.unknownRoute!);
@@ -891,9 +908,9 @@ test("failed-auth backoff: it slows the offender, never locks out a valid signat
   expect(fine.ms).toBeLessThan(350);
   expect((await elsewhere.call(a, "GET", "/v1/sync")).status()).toBe(200);
 
-  // A correct bootstrap token is not delayed either (it is just refused: this vault exists).
+  // A correct bootstrap token is not delayed either (an empty body is just refused as invalid).
   const refused = await timed(() => attacker.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, {}));
-  expect(refused.status).toBe(404);
+  expect(refused.status).toBe(400);
   expect(refused.ms).toBeLessThan(350);
 });
 

@@ -31,6 +31,8 @@
     "AUTH_BACKOFF_MS": "1000",
     // Previous item blobs / wrapped keys are kept this long so a bad write can be undone by the owner.
     "HISTORY_RETENTION_DAYS": "30",
+    // Most items (live and tombstones) one box may hold; a new item beyond it is answered 409 box_full.
+    "MAX_ITEMS_PER_BOX": "5000",
     // A device registered through the recovery phrase can only sign requests after this delay (0 = immediately).
     "RECOVERY_ACTIVATION_DELAY_SECONDS": "0"
   },
@@ -74,6 +76,7 @@
         "AUTH_FAIL_WINDOW_SECONDS": "600",
         "AUTH_BACKOFF_MS": "1000",
         "HISTORY_RETENTION_DAYS": "30",
+        "MAX_ITEMS_PER_BOX": "5000",
         // 24 h: someone who has seen the 24 words once cannot silently take the vault; every enrolled device is
         // told on its next sync and can cancel. Set to "0" to recover instantly.
         "RECOVERY_ACTIVATION_DELAY_SECONDS": "86400"
