@@ -12,7 +12,7 @@ struct SetupView: View {
 
     enum Step { case welcome, recover }
     @State private var step: Step = SetupView.initialStep
-    @State private var phrase = ""
+    @State private var words = Array(repeating: "", count: 24)
     @State private var error: String?
 
     private static var initialStep: Step {
@@ -25,7 +25,13 @@ struct SetupView: View {
     private var deviceName: String { Host.current().localizedName ?? "Mac" }
 
     var body: some View {
-        OnboardingFrame(progress: step == .welcome ? 0.2 : 0.5, title: title, message: message) {
+        content
+            .onChange(of: step) { _, new in OnboardingState.shared.recovering = (new == .recover) }
+            .onAppear { OnboardingState.shared.recovering = (step == .recover) }
+    }
+
+    private var content: some View {
+        OnboardingFrame(progress: step == .welcome ? 0.2 : 0.5, title: title, message: message, centered: step == .recover) {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
                 switch step {
                 case .welcome:
@@ -36,11 +42,7 @@ struct SetupView: View {
                     }
                     .padding(theme.spacing.l)
                 case .recover:
-                    VStack(alignment: .leading, spacing: theme.spacing.s) {
-                        Caption("Recovery phrase (24 words)")
-                        SecureField("", text: $phrase).onboardingField(theme, placeholder: "word1 word2 word3 …", text: phrase)
-                            .accessibilityIdentifier("setup-phrase")
-                    }
+                    PhraseInputGrid(words: $words)
                 }
                 ErrorLine(text: error)
             }
@@ -57,12 +59,14 @@ struct SetupView: View {
             case .recover:
                 Button("Back") { error = nil; step = .welcome }
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-back")
+                Button("Upload file", action: uploadPhrase)
+                    .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-upload")
                 Spacer(minLength: 0)
                 Button(action: recover) {
                     if service.isBusy { ProgressView().controlSize(.small) } else { Text("Connect") }
                 }
                 .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
-                .disabled(service.isBusy || phrase.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(service.isBusy || words.contains(where: \.isEmpty))
                 .accessibilityIdentifier("setup-recover")
             }
         }
@@ -73,7 +77,7 @@ struct SetupView: View {
     private var message: String {
         step == .welcome
             ? "Bisel is the password manager we meant to be easy to reach while staying amazingly secure, working fully on a command menu taking less time to reach your info."
-            : "Type or paste your 24-word recovery phrase and this Mac joins your box."
+            : "Paste your 24 words into any cell, or upload the file you saved."
     }
 
     private func create() {
@@ -88,10 +92,22 @@ struct SetupView: View {
         error = nil
         let (url, bad) = ServerURLCheck.parse(BiselEnvironment.defaultServer)
         guard let url else { error = bad; return }
-        let words = phrase, name = deviceName
+        let phrase = words.joined(separator: " "), name = deviceName
         Task {
-            do { try await service.recover(server: url, phrase: words, deviceName: name); phrase = "" }
+            do { try await service.recover(server: url, phrase: phrase, deviceName: name); words = Array(repeating: "", count: 24) }
             catch { self.error = describe(error) }
+        }
+    }
+
+    private func uploadPhrase() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.begin { response in
+            guard response == .OK, let url = panel.url, let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+            let parsed = RecoveryPhraseText.words(in: text)
+            guard !parsed.isEmpty else { error = "No recovery words found in that file"; return }
+            error = nil
+            for i in 0..<24 { words[i] = i < parsed.count ? parsed[i] : "" }
         }
     }
 }
@@ -107,20 +123,15 @@ struct PhraseGateView: View {
 
     var body: some View {
         OnboardingFrame(progress: title == "Your recovery phrase" ? 0.6 : nil, title: title,
-                        message: "These 24 words are the only way back into your box if you lose every device. Keep them somewhere safe, we show them once and never keep a copy.",
+                        message: "Your only way back in if you lose every device. Shown once, never kept.",
                         centered: true) {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.s), count: 4), alignment: .leading, spacing: theme.spacing.s) {
                     ForEach(Array(phrase.words.enumerated()), id: \.offset) { i, w in
-                        HStack(spacing: theme.spacing.s) {
-                            Text("\(i + 1)").font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.tertiaryText.color)
-                            Spacer(minLength: theme.spacing.s)
+                        PhraseCellChrome(number: i + 1) {
                             Text(w).font(theme.font(theme.fonts.value, weight: .medium)).textSelection(.disabled)
                                 .accessibilityIdentifier("phrase-word-\(i + 1)")
                         }
-                        .padding(.vertical, theme.spacing.s).padding(.horizontal, theme.spacing.m)
-                        .frame(maxWidth: .infinity)
-                        .background(RoundedRectangle(cornerRadius: theme.radii.field, style: .continuous).fill(theme.colors.field.color))
                     }
                 }
                 if let saved { Caption("Saved as \(saved)") }

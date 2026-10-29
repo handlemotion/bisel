@@ -59,7 +59,7 @@ struct MainWindowView: View {
         if service.pendingPhrase != nil { return OnboardingLayout.phrase }
         if showImport { return OnboardingLayout.setup }
         switch service.phase {
-        case .needsSetup: return OnboardingLayout.setup
+        case .needsSetup: return OnboardingState.shared.recovering ? OnboardingLayout.phrase : OnboardingLayout.setup
         case .locked: return OnboardingLayout.locked
         default: return nil
         }
