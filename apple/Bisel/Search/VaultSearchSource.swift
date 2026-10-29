@@ -46,7 +46,7 @@ enum VaultError: Error, LocalizedError {
     case locked, notFound, unavailable(SecretKind)
     var errorDescription: String? {
         switch self {
-        case .locked: "Vault is locked"
+        case .locked: "Box is locked"
         case .notFound: "Item not found"
         case .unavailable(let k): "This item has no \(k.rawValue)"
         }

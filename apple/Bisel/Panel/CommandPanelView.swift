@@ -209,7 +209,7 @@ struct CommandPanelView: View {
     private var lockedState: some View {
         VStack(spacing: theme.spacing.s) {
             Image(systemName: "touchid").font(.system(size: 28)).foregroundStyle(theme.colors.accent.color)
-            Text("Vault locked").font(theme.font(theme.fonts.detailTitle / 1.5, weight: .semibold))
+            Text("Box locked").font(theme.font(theme.fonts.detailTitle / 1.5, weight: .semibold))
             Text("Press Return to unlock with Touch ID")
                 .font(theme.font(theme.fonts.detail)).foregroundStyle(theme.colors.secondaryText.color)
         }

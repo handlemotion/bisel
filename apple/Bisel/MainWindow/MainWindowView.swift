@@ -4,7 +4,7 @@ import BiselCore
 
 struct MainWindowView: View {
     enum Section: String, CaseIterable, Identifiable {
-        case vault = "Vault", generator = "Generator", devices = "Devices", importer = "Import", settings = "Settings"
+        case vault = "Box", generator = "Generator", devices = "Devices", importer = "Import", settings = "Settings"
         var id: String { rawValue }
         var symbol: String {
             switch self {
@@ -54,7 +54,7 @@ struct MainWindowView: View {
 
     private var fixtureNotice: some View {
         ContentUnavailableView("Dev fixture is active", systemImage: "testtube.2",
-                               description: Text("This run uses the fake panel fixture. Start without it to use the real vault."))
+                               description: Text("This run uses the fake panel fixture. Start without it to use the real box."))
     }
 
     private var unlocked: some View {
@@ -107,9 +107,9 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Vault") {
+            Section("Box") {
                 if service.isLocalOnly {
-                    LabeledContent("Sync") { Text("Not connected: this vault is on this Mac only") }
+                    LabeledContent("Sync") { Text("Not connected: this box is on this Mac only") }
                     DisclosureGroup("Connect a server…") {
                         TextField("Server URL", text: $connectServer, prompt: Text("https://your-server.example")).accessibilityIdentifier("connect-server")
                         SecureField("Bootstrap token", text: $connectToken, prompt: Text("Set with wrangler secret BOOTSTRAP_TOKEN")).accessibilityIdentifier("connect-token")
@@ -132,7 +132,7 @@ struct SettingsView: View {
                     ForEach([1, 2, 5, 10, 15, 30], id: \.self) { Text("\($0) min").tag($0) }
                 }
                 .onChange(of: idleLock) { _, v in UserDefaults.standard.set(v, forKey: VaultService.idleLockKey) }
-                Text("The vault also locks on sleep, screen lock and fast user switching.").font(.caption).foregroundStyle(.secondary)
+                Text("The box also locks on sleep, screen lock and fast user switching.").font(.caption).foregroundStyle(.secondary)
             }
             Section("Backup and recovery") {
                 HStack {
@@ -164,12 +164,12 @@ struct SettingsView: View {
                     .onChange(of: hideFromCapture) { _, new in UserDefaults.standard.set(new, forKey: PanelCapture.defaultsKey) }
                 Toggle("Require Touch ID to reveal or copy password and OTP", isOn: $strict)
                     .onChange(of: strict) { _, new in UserDefaults.standard.set(new, forKey: SecuritySettings.requireTouchIDKey) }
-                Text("Off: values are visible while the vault is unlocked and copy without another prompt. On: masked until a fresh Touch ID check, and every copy asks again.")
+                Text("Off: values are visible while the box is unlocked and copy without another prompt. On: masked until a fresh Touch ID check, and every copy asks again.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Site icons") {
                 Toggle("Load site icons", isOn: $icons.enabled)
-                Text("Off by default. When on, Bisel contacts each site in your vault to fetch its icon, so your network and DNS provider can see which sites you use. Icons come straight from the site (HTTPS, public addresses only, no cookies, no third-party service) and are cached on this Mac only.")
+                Text("Off by default. When on, Bisel contacts each site in your box to fetch its icon, so your network and DNS provider can see which sites you use. Icons come straight from the site (HTTPS, public addresses only, no cookies, no third-party service) and are cached on this Mac only.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Text(icons.cacheSizeDescription).foregroundStyle(.secondary)

@@ -617,13 +617,13 @@
         }
       }
     },
-    "Vault locked": {
+    "Box locked": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Vault locked"
+            "value": "Box locked"
           }
         }
       }

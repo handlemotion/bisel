@@ -60,7 +60,7 @@ func describe(_ error: Error) -> String {
     case let e as KeyStoreError:
         switch e {
         case .userCancelled: return "Cancelled"
-        case .noKeys: return "This Mac has no device keys for this vault"
+        case .noKeys: return "This Mac has no device keys for this box"
         case .unavailable(let m): return "Touch ID unavailable: \(m)"
         case .failed(let m): return m
         }
@@ -77,11 +77,11 @@ func describe(_ error: Error) -> String {
         }
     case let e as BiselVault.VaultError:
         switch e {
-        case .locked: return "Vault is locked"
+        case .locked: return "Box is locked"
         case .notFound: return "Item not found"
         case .notConfigured: return "This Mac isn't set up yet"
-        case .alreadyConfigured: return "This Mac already has a vault"
-        case .noServer: return "This vault is on this Mac only. Connect a server in Settings first"
+        case .alreadyConfigured: return "This Mac already has a box"
+        case .noServer: return "This box is on this Mac only. Connect a server in Settings first"
         case .noTOTP: return "This item has no one-time code"
         case .badBackup(let m): return m
         case .unsupportedPayloadVersion(let v): return "Item format v\(v) is newer than this app"

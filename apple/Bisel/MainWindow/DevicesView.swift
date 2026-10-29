@@ -16,7 +16,7 @@ struct DevicesView: View {
                 Spacer()
                 Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } }.disabled(loading).accessibilityIdentifier("devices-refresh")
             }
-            if service.isLocalOnly { Caption("This vault is on this Mac only. Connect a server in Settings → Vault to add your iPhone or another Mac.") }
+            if service.isLocalOnly { Caption("This box is on this Mac only. Connect a server in Settings → Box to add your iPhone or another Mac.") }
             ErrorLine(text: error)
             List(devices) { d in
                 HStack(spacing: theme.spacing.m) {
@@ -48,7 +48,7 @@ struct DevicesView: View {
                             titleVisibility: .visible) {
             Button("Revoke", role: .destructive) { if let d = revoking { Task { await revoke(d) } } }.accessibilityIdentifier("revoke-confirm")
             Button("Cancel", role: .cancel) {}
-        } message: { Text("It can no longer sync, and the vault key is replaced. Anything it already saw stays readable to whoever has that device, so change the passwords of sensitive accounts. Touch ID is required.") }
+        } message: { Text("It can no longer sync, and the box key is replaced. Anything it already saw stays readable to whoever has that device, so change the passwords of sensitive accounts. Touch ID is required.") }
     }
 
     /// Device names come from the server: drop control and bidirectional-override characters before showing them.

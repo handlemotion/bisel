@@ -8,7 +8,7 @@ struct SetupView: View {
     @Environment(\.theme) private var theme
 
     enum Mode: String, CaseIterable, Identifiable {
-        case create = "New vault", recover = "Recover", restore = "Restore backup"
+        case create = "New box", recover = "Recover", restore = "Restore backup"
         var id: String { rawValue }
     }
     @State private var mode: Mode = .create
@@ -69,7 +69,7 @@ struct SetupView: View {
                 Caption(footer)
                 // New vault is the normal path; the other two are for a Mac that is joining or rebuilding one.
                 HStack(spacing: theme.spacing.m) {
-                    if mode != .create { Button("Back to new vault") { mode = .create; error = nil }.accessibilityIdentifier("setup-mode-create") }
+                    if mode != .create { Button("Back to new box") { mode = .create; error = nil }.accessibilityIdentifier("setup-mode-create") }
                     if mode != .recover { Button("I have a recovery phrase") { mode = .recover; error = nil }.accessibilityIdentifier("setup-mode-recover") }
                     if mode != .restore { Button("Restore from a backup file") { mode = .restore; error = nil }.accessibilityIdentifier("setup-mode-restore") }
                 }
@@ -87,11 +87,11 @@ struct SetupView: View {
     private var blurb: String {
         switch mode {
         case .create: "Creates your keys on this Mac and a 24-word recovery phrase. Everything stays on this Mac until you connect a server."
-        case .recover: "Enter your recovery phrase to rebuild the vault on this Mac from the server."
-        case .restore: "Re-create the vault on a fresh server from a .bisel-backup file and its recovery phrase."
+        case .recover: "Enter your recovery phrase to rebuild the box on this Mac from the server."
+        case .restore: "Re-create the box on a fresh server from a .bisel-backup file and its recovery phrase."
         }
     }
-    private var actionTitle: String { switch mode { case .create: "Create vault"; case .recover: "Recover"; case .restore: "Restore" } }
+    private var actionTitle: String { switch mode { case .create: "Create box"; case .recover: "Recover"; case .restore: "Restore" } }
     private var footer: String {
         BiselEnvironment.usesSoftwareKeys ? "Debug build: device keys are kept in a plain file, not the Secure Enclave." : "Device keys are created in the Secure Enclave and need Touch ID."
     }
@@ -171,7 +171,7 @@ struct PhraseGateView: View {
             VStack(alignment: .leading, spacing: theme.spacing.l) {
                 VStack(alignment: .leading, spacing: theme.spacing.xs) {
                     Text(title).font(theme.font(theme.fonts.title, weight: .semibold))
-                    Text("These 24 words are the only way back into your vault if every device is lost. Write them down or store them in a safe place. They are shown once and never saved by Bisel.")
+                    Text("These 24 words are the only way back into your box if every device is lost. Write them down or store them in a safe place. They are shown once and never saved by Bisel.")
                         .font(theme.font(theme.fonts.subtitle)).foregroundStyle(theme.colors.secondaryText.color)
                 }
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: theme.spacing.m), count: 4), alignment: .leading, spacing: theme.spacing.s) {

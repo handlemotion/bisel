@@ -4,6 +4,8 @@ A personal, single-user, zero-knowledge password manager for Apple devices. Own 
 
 This file is the contract between `server/` and `apple/`. If an implementation needs to deviate, change this file in the same change and say why.
 
+Terminology: what this spec calls the *vault* is called a **box** in every user-facing string (UI, panel, docs for users). Code, wire formats and this spec keep "vault" internally. The production server is box.bisel.app; the bisel.app apex is the marketing site.
+
 ## 1. Goals and non-goals
 
 Goals

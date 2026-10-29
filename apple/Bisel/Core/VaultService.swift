@@ -86,7 +86,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             vault = try Vault(.init(location: StoreLocation(directory: directory), keyStore: keyStore, gate: AppGate(),
                                     fillWindow: 30 * 60, deviceKind: "mac"))
         } catch {
-            startupError = "Could not open the local vault store: \(error.localizedDescription)"
+            startupError = "Could not open the local box store: \(error.localizedDescription)"
             Log.app.error("vault init failed: \(error.localizedDescription)")
         }
     }
@@ -366,7 +366,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             if report.rotationAdopted, await !vault.isUnlocked {
                 // Another device rotated the vault key (a revoke): the core locked itself. Drop everything and ask for Touch ID.
                 setPhase(.locked)
-                Toast.shared.show("Vault key changed on another device. Unlock to continue", duration: .seconds(4))
+                Toast.shared.show("Box key changed on another device. Unlock to continue", duration: .seconds(4))
                 return
             }
             if report.pulled > 0 || report.pushed > 0 || !report.conflicts.isEmpty { await reload() }

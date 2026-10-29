@@ -52,7 +52,7 @@ final class BiselFlowUITests: XCTestCase {
         app.checkBoxes["phrase-stored"].click()
         XCTAssertTrue(app.buttons["phrase-continue"].isEnabled)
         app.buttons["phrase-continue"].click()
-        exists(app.buttons["nav-Vault"].firstMatch.exists ? app.buttons["nav-Vault"] : app.staticTexts["Vault"], 15, "vault after set-up")
+        exists(app.buttons["nav-Box"].firstMatch.exists ? app.buttons["nav-Box"] : app.staticTexts["Box"], 15, "vault after set-up")
         return words.joined(separator: " ")
     }
 
@@ -127,7 +127,7 @@ final class BiselFlowUITests: XCTestCase {
             exists(app.staticTexts["import-summary"], 10)
             app.buttons["import-run"].click()
             exists(app.staticTexts["import-done"], 30)
-            app.buttons["nav-Vault"].click()
+            app.buttons["nav-Box"].click()
             exists(app.staticTexts["Acme Mail (FAKE)"].firstMatch, 10, "imported login in list")
         }
         app.terminate()
