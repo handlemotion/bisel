@@ -57,7 +57,7 @@ enum BrandIcon {
             RoundedRectangle(cornerRadius: tile * 0.2237, style: .continuous)
                 .fill(Color(white: 0.04))
                 .frame(width: tile, height: tile)
-            BevelShape().fill(.white).frame(width: tile * 0.40, height: tile * 0.40)
+            BevelShape().fill(.white).frame(width: tile * 0.52, height: tile * 0.52)
         }
         .frame(width: 1024, height: 1024)
         let r = ImageRenderer(content: view)
