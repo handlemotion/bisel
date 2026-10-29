@@ -422,8 +422,14 @@ public final class LocalStore: Sendable {
     public func setRecentEventsJSON(_ json: Data) throws { try setMeta("events", json) }
 
     /// Drops a record that never reached the server (local create followed by local delete).
-    public func forget(_ id: String) throws {
-        try pool.write { try $0.execute(sql: "DELETE FROM records WHERE id = ?", arguments: [id]) }
+    public func forget(_ id: String, keepInTrash: Bool = false) throws {
+        try pool.write { db in
+            if keepInTrash, let cur = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [id]).map(StoredRecord.init(row:)),
+               !cur.deleted {
+                try trash(cur, reason: "local-delete", db)
+            }
+            try db.execute(sql: "DELETE FROM records WHERE id = ?", arguments: [id])
+        }
     }
 
     /// Keeps the latest recovery public keys / envelope the server reported (needed for backup files and rotation).

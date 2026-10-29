@@ -473,6 +473,27 @@ struct VaultFlowTests {
         }
     }
 
+    @Test("a box without a server keeps replaced and deleted versions in the local trash, and they can be restored")
+    func localOnlyHistory() async throws {
+        let a = try Device("a")
+        _ = try await a.vault.bootstrapLocal(deviceName: "a")
+        var item = try await a.vault.save(login("Local", password: "v1"))
+        item.password = "v2"
+        _ = try await a.vault.save(item)
+        item.password = "v3"
+        _ = try await a.vault.save(item)
+        #expect(try await a.vault.trash().compactMap(\.item.password).sorted() == ["v1", "v2"], "each overwrite keeps the version it replaced")
+        try await a.vault.delete(id: item.id)
+        let kept = try await a.vault.trash()
+        #expect(kept.compactMap(\.item.password).sorted() == ["v1", "v2", "v3"], "a delete keeps the last version too")
+        #expect(try await a.vault.items().items.isEmpty)
+
+        let back = try #require(kept.first { $0.item.password == "v2" })
+        try await a.vault.restore(back)
+        #expect(try await a.vault.revealPassword(id: item.id) == "v2")
+        #expect(try await a.vault.trash().compactMap(\.item.password).sorted() == ["v1", "v3"], "a restored version leaves the trash")
+    }
+
     @Test("recover from the 24 words on a fresh store; wrong or rotated-away phrases do not work")
     func recoveryFromPhrase() async throws {
         try await TestServer.with { server in

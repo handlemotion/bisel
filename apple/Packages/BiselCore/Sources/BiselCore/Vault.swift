@@ -231,6 +231,10 @@ public actor Vault {
         }
     }
 
+    /// A box without a server has no server-side history: every version an edit or delete replaces goes to the local trash
+    /// (30 days), so an overwritten password can still be taken back.
+    private func keepsLocalHistory() -> Bool { ((try? store.identity()) ?? nil)?.serverURL == nil }
+
     /// Zeroes VK. Call on sleep, screen lock, idle timeout.
     public func lock() {
         key?.zero()
@@ -697,7 +701,7 @@ public actor Vault {
         item.updatedAt = now
         let payload = try ItemCodec.encode(item)
         let id = item.id
-        try store.commitLocal(id: id, deleted: false, now: now) { rev in
+        try store.commitLocal(id: id, deleted: false, now: now, keepPrevious: keepsLocalHistory()) { rev in
             try k.withKey { try ItemSealer.seal(payload: payload, id: id, rev: rev, vaultKey: $0) }
         }
         return item
@@ -707,8 +711,8 @@ public actor Vault {
         let k = try requireKey()
         guard let rec = try store.record(id), !rec.deleted else { throw VaultError.notFound(id) }
         try await config.gate.authenticate(reason: "Delete item")
-        if rec.pending == .put && rec.baseRev == 0 { try store.forget(id); return }   // never reached the server
-        try store.commitLocal(id: id, deleted: true) { rev in
+        if rec.pending == .put && rec.baseRev == 0 { try store.forget(id, keepInTrash: keepsLocalHistory()); return }   // never reached the server
+        try store.commitLocal(id: id, deleted: true, keepPrevious: keepsLocalHistory()) { rev in
             try k.withKey { try ItemSealer.sealTombstone(id: id, rev: rev, vaultKey: $0) }
         }
     }
@@ -956,7 +960,7 @@ public actor Vault {
         item.updatedAt = Date()
         let payload = try ItemCodec.encode(item)
         let id = version.itemID
-        try store.commitLocal(id: id, deleted: false) { rev in
+        try store.commitLocal(id: id, deleted: false, keepPrevious: keepsLocalHistory()) { rev in
             try k.withKey { try ItemSealer.seal(payload: payload, id: id, rev: rev, vaultKey: $0) }
         }
         if let key = version.localKey { try store.removeFromTrash(key: key) }
