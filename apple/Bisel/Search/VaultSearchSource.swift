@@ -37,11 +37,14 @@ protocol VaultSearchSource: AnyObject, Sendable {
 protocol VaultSecretProvider: AnyObject, Sendable {
     func secret(_ kind: SecretKind, for id: String) async throws -> String
     func url(for id: String) -> URL?
+    /// Hosts of the item's addresses, for the fill origin check. Sources without addresses return none (no check).
+    func hosts(for id: String) -> [String]
     /// Seconds a TOTP code lives (the item's `period`).
     func totpPeriod(for id: String) -> Int
 }
 
 extension VaultSecretProvider {
+    func hosts(for id: String) -> [String] { [] }
     func totpPeriod(for id: String) -> Int { 30 }
 }
 

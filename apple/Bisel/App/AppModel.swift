@@ -100,8 +100,9 @@ final class AppModel {
             }
             let vault = self.vault
             let id = item.id
+            let hosts = vault.hosts(for: id)
             Task {
-                let outcome = await FillEngine.shared.fill(plan, into: target) { kind in
+                let outcome = await FillEngine.shared.fill(plan, into: target, itemHosts: hosts) { kind in
                     return try await vault.secret(kind, for: id)
                 }
                 self.finish(outcome, itemID: id)

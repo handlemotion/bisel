@@ -42,9 +42,10 @@ final class FillEngine {
         }
     }
 
-    func fill(_ plan: FillPlan, into target: NSRunningApplication, fetch: @escaping SecretFetch) async -> FillOutcome {
+    /// `itemHosts`: the hosts of the chosen login's addresses; the page in front must match one of them unless the fill is forced.
+    func fill(_ plan: FillPlan, into target: NSRunningApplication, itemHosts: [String] = [], fetch: @escaping SecretFetch) async -> FillOutcome {
         guard AccessibilityInspector.isTrusted() else { return .needsAccessibility }
-        return await Self.perform(plan, target: target, fetch: fetch)
+        return await Self.perform(plan, target: target, itemHosts: itemHosts, fetch: fetch)
     }
 
     /// Why this field must not receive this kind of secret (security review M9), or nil. A password goes only into a secure field
@@ -67,7 +68,7 @@ final class FillEngine {
     }
 
     @concurrent
-    private static func perform(_ plan: FillPlan, target: NSRunningApplication, fetch: SecretFetch) async -> FillOutcome {
+    private static func perform(_ plan: FillPlan, target: NSRunningApplication, itemHosts: [String], fetch: SecretFetch) async -> FillOutcome {
         await KeyEventTyper.waitForModifierRelease()
         // Let the window server hand key focus back to the target after the panel went away.
         try? await Task.sleep(for: .milliseconds(80))
@@ -86,6 +87,12 @@ final class FillEngine {
         }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == target.processIdentifier else {
             return .failed("The app you were in is no longer in front, nothing was typed")
+        }
+
+        if case .explicit = plan {} else if !itemHosts.isEmpty {
+            let page = AccessibilityInspector.pageURL(of: target, field: field)?.host()
+            let isBrowser = field.bundleID.map(FillOrigin.browserBundleIDs.contains) ?? false
+            if let why = FillOrigin.refusal(pageHost: page, isBrowser: isBrowser, itemHosts: itemHosts) { return .failed(why) }
         }
 
         let method = field.bundleID.flatMap { preferredMethod[$0] } ?? .keyEvents

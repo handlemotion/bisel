@@ -540,5 +540,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         return URLPolicy.allowed(first)
     }
 
+    func hosts(for id: String) -> [String] { FillOrigin.hosts(of: rowsByID[id]?.urls ?? []) }
+
     func totpPeriod(for id: String) -> Int { rowsByID[id]?.totpPeriod ?? 30 }
 }

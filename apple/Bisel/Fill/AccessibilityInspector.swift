@@ -158,6 +158,24 @@ enum AccessibilityInspector {
                             kind: kind, hasElement: true, ref: AXRef(element: el))
     }
 
+    /// The address of the web page the focused field sits in, read through Accessibility: the enclosing web area's `AXURL`, or the
+    /// window's `AXDocument` (Safari, Firefox, Chromium). nil in native apps or when the browser does not expose it.
+    static func pageURL(of app: NSRunningApplication, field: FocusedField) -> URL? {
+        let appEl = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appEl, 0.4)
+        var el = field.ref?.element
+        for _ in 0..<14 {
+            guard let cur = el else { break }
+            if string(cur, kAXRoleAttribute) == "AXWebArea", let u = copy(cur, "AXURL") {
+                if let url = u as? URL { return url }
+                if let text = u as? String { return URL(string: text) }
+            }
+            el = element(cur, kAXParentAttribute)
+        }
+        if let win = element(appEl, kAXFocusedWindowAttribute), let doc = string(win, kAXDocumentAttribute) { return URL(string: doc) }
+        return nil
+    }
+
     /// True while `field` is still what the user is looking at: the target app is frontmost and its focused element is the one that
     /// was classified. Checked before every typed chunk; anything else (⌘-Tab, Spotlight, a notification, a focus change) aborts.
     static func isStillFocused(_ field: FocusedField, target: NSRunningApplication) -> Bool {

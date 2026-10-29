@@ -353,6 +353,16 @@ enum DebugFlow {
         check(FillEngine.refusal(for: .password, in: field(secure: false, terminal: true), forced: true) != nil, "fill: terminal without secure input refuses even a forced password")
         check(FillEngine.refusal(for: .password, in: field(secure: true, ref: false), forced: false) != nil, "fill: no verifiable focused element → password refused")
         check(FillEngine.refusal(for: .username, in: field(secure: false), forced: false) == nil && FillEngine.refusal(for: .totp, in: field(secure: false), forced: false) == nil, "fill: username and OTP are not restricted")
+        // origin: the page in front must belong to the chosen login (phishing page, look-alike hosts, unreadable browser page)
+        let bank = FillOrigin.hosts(of: ["https://www.bank.example/login", "bank.example"])
+        check(bank == ["bank.example", "bank.example"], "fill origin: addresses reduce to host names (\(bank))")
+        check(FillOrigin.refusal(pageHost: "bank.example", isBrowser: true, itemHosts: bank) == nil, "fill origin: same site is allowed")
+        check(FillOrigin.refusal(pageHost: "login.bank.example", isBrowser: true, itemHosts: bank) == nil, "fill origin: a subdomain of the login's site is allowed")
+        check(FillOrigin.refusal(pageHost: "bank.example.evil.net", isBrowser: true, itemHosts: bank) != nil, "fill origin: bank.example.evil.net is refused")
+        check(FillOrigin.refusal(pageHost: "evilbank.example", isBrowser: true, itemHosts: bank) != nil, "fill origin: a look-alike suffix is refused")
+        check(FillOrigin.refusal(pageHost: nil, isBrowser: true, itemHosts: bank) != nil, "fill origin: a browser page whose address cannot be read is refused")
+        check(FillOrigin.refusal(pageHost: nil, isBrowser: false, itemHosts: bank) == nil, "fill origin: native apps have no page address to check")
+        check(FillOrigin.refusal(pageHost: "anything.example", isBrowser: true, itemHosts: []) == nil, "fill origin: a login without an address is the user's call")
         check(IconStore.shared.enabled == false, "site icons are off by default")
         // images: header-declared huge PNG rejected before decoding, non-allow-listed type rejected, small PNG accepted
         func crc(_ d: Data) -> UInt32 { var c: UInt32 = 0xFFFFFFFF; for b in d { c ^= UInt32(b); for _ in 0..<8 { c = (c & 1) != 0 ? (c >> 1) ^ 0xEDB88320 : c >> 1 } }; return ~c }
