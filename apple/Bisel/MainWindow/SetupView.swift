@@ -127,6 +127,7 @@ struct PhraseGateView: View {
     var onDone: () -> Void
     private let theme = Theme.biselDark
     @State private var saved: String?
+    @State private var copied = false
 
     var body: some View {
         OnboardingFrame(progress: title == "Your recovery phrase" ? 0.6 : nil, title: title,
@@ -148,13 +149,25 @@ struct PhraseGateView: View {
                 Button("Back") { Task { await service.discardNewBox() } }
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("phrase-back")
             }
-            Button("Download", action: download)
-                .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("phrase-download")
+            Menu {
+                Button("Copy", action: copy).accessibilityIdentifier("phrase-copy")
+                Button("Download…", action: download).accessibilityIdentifier("phrase-download")
+            } label: { Text(copied ? "Copied" : "Save") }
+                .menuStyle(.button).menuIndicator(.hidden)
+                .buttonStyle(PillButtonStyle(primary: false)).fixedSize()
+                .accessibilityIdentifier("phrase-save")
             Spacer(minLength: 0)
             Button("Continue", action: onDone)
                 .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("phrase-continue")
         }
+    }
+
+    /// The words on one line, so pasting them into the recovery cells spreads them. Concealed, this Mac only, cleared after 30 s.
+    private func copy() {
+        SecureClipboard.shared.copySecret(phrase.words.joined(separator: " "))
+        copied = true
+        Task { try? await Task.sleep(for: .seconds(2)); copied = false }
     }
 
     private func download() {

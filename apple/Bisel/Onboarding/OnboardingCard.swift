@@ -37,13 +37,13 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
                 }
                 .opacity(dim ? 0 : 1)
             }
+            .layoutPriority(1)
             if centered {
                 // The content sits close to the actions (they add their own 16 pt of padding), the rest of the free space goes
                 // above it, away from the text. It must fit: the progress bar, the text and the actions never move between screens.
                 VStack(spacing: 0) {
-                    Spacer(minLength: 14)
-                    content.frame(maxWidth: .infinity, alignment: .leading)
-                    Spacer().frame(height: theme.spacing.s)
+                    Spacer(minLength: 0)
+                    content.frame(maxWidth: .infinity, alignment: .leading).padding(.bottom, theme.spacing.s)
                 }
                 .frame(maxHeight: .infinity)
                 .id(title)
@@ -59,6 +59,7 @@ struct OnboardingFrame<Content: View, Actions: View>: View {
             }
             HStack(spacing: theme.spacing.m) { actions }
                 .padding(.top, theme.spacing.l)
+                .layoutPriority(1)
                 .id(title)
                 .cascade(0.28, rise: 0)
                 .opacity(dim ? 0 : 1)
