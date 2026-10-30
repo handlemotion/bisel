@@ -32,7 +32,8 @@ From the repo root (`bisel/`), no untracked file needed (`server/.dev.vars` is c
 scripts/check-all.sh            # server + core + app, then a PASS/FAIL summary with timings (about 8 min)
 scripts/check-all.sh --server   # pnpm install --frozen-lockfile, typecheck (worker + dashboard), pnpm test, pnpm test:legacy
 scripts/check-all.sh --core     # BiselCore Swift flow suite: swift test --traits SoftwareKeys (starts its own wrangler dev servers)
-scripts/check-all.sh --app      # xcodegen with project.dev.yml, then a Debug build of the Mac app (software keys)
+scripts/check-all.sh --app      # xcodegen with project.dev.yml, then a Debug build of the Mac app (software keys) and a compile-only build of the UI tests
+scripts/check-all.sh --ui       # opt-in, never in a default run: launches the app and drives the screen (XCUITest, NOT YET RUN, see apple/Bisel/UITests/NEEDED-IDS.md)
 scripts/check-all.sh --release  # opt-in: Release build and scripts/check-release-hooks.sh
 scripts/check-all.sh -v         # stream each step's output; flags combine, e.g. --server --core
 ```

@@ -1,5 +1,7 @@
 import XCTest
 
+/// NOT YET RUN on a real screen (see NEEDED-IDS.md): it compiles, nothing more is claimed. Run it by hand with `scripts/check-all.sh --ui`.
+///
 /// Flow tests on the real app (BiselDev build: software keys, Debug hooks) with a throwaway store. No server: "Create a box"
 /// makes a local-only box, which is the first-run path. Run with
 ///   cd apple && xcodegen generate --spec project.dev.yml
