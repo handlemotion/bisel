@@ -12,21 +12,21 @@ in Doppler (project `bisel`, config `prd`; `doppler setup` binds this directory)
 
 ## 1. What is deployed
 
-| Piece | Where it comes from |
-|---|---|
-| Worker (Hono API `/v1/*`, dashboard API `/api/*`, `/healthz`) | `src/`, built by wrangler |
-| Dashboard (static pages) | `public/`, built by `pnpm build:web`; wrangler runs it from `build.command` on deploy. Served by the assets binding; only `/v1/*`, `/api/*` and `/healthz` run the Worker first, unknown paths fall back to `index.html` (so `/connect` deep-links work) |
-| D1 database `bisel` | `migrations/` (0001-0008). Many boxes in one database: `box_id` on every box table |
-| Accounts | Better Auth with passkeys only (tables from migration 0005); no passwords, no email |
-| Rate limiting | three layers: Workers rate-limiting binding `RATE_LIMITER` (300 req/min per address, bare `429`), a WAF rate-limiting rule (section 4), Better Auth's own per-route limits (D1-backed) |
-| Logging | Workers Logs on, invocation logs and traces off; only the Worker's own lines (`evt`, `reason`, 8-char address hash, 8-char device prefix, method, path, status), never bodies, blobs, keys or tokens; query strings redacted |
+| Piece                                                         | Where it comes from                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Worker (Hono API `/v1/*`, dashboard API `/api/*`, `/healthz`) | `src/`, built by wrangler                                                                                                                                                                                                                                |
+| Dashboard (static pages)                                      | `public/`, built by `pnpm build:web`; wrangler runs it from `build.command` on deploy. Served by the assets binding; only `/v1/*`, `/api/*` and `/healthz` run the Worker first, unknown paths fall back to `index.html` (so `/connect` deep-links work) |
+| D1 database `bisel`                                           | `migrations/` (0001-0008). Many boxes in one database: `box_id` on every box table                                                                                                                                                                       |
+| Accounts                                                      | Better Auth with passkeys only (tables from migration 0005); no passwords, no email                                                                                                                                                                      |
+| Rate limiting                                                 | three layers: Workers rate-limiting binding `RATE_LIMITER` (300 req/min per address, bare `429`), a WAF rate-limiting rule (section 4), Better Auth's own per-route limits (D1-backed)                                                                   |
+| Logging                                                       | Workers Logs on, invocation logs and traces off; only the Worker's own lines (`evt`, `reason`, 8-char address hash, 8-char device prefix, method, path, status), never bodies, blobs, keys or tokens; query strings redacted                             |
 
 **Secrets** (Worker secrets, never in `wrangler.jsonc`):
 
-| Name | Purpose | Required |
-|---|---|---|
-| `BETTER_AUTH_SECRET` | signs dashboard sessions | yes: sign-in fails without it |
-| `BOOTSTRAP_TOKEN` | lets the operator create an unowned box with a typed token | no: once only account-created boxes should exist, delete it. Unset means `POST /v1/bootstrap` with a token is closed |
+| Name                 | Purpose                                                    | Required                                                                                                             |
+| -------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `BETTER_AUTH_SECRET` | signs dashboard sessions                                   | yes: sign-in fails without it                                                                                        |
+| `BOOTSTRAP_TOKEN`    | lets the operator create an unowned box with a typed token | no: once only account-created boxes should exist, delete it. Unset means `POST /v1/bootstrap` with a token is closed |
 
 **Vars** (`env.prod.vars`): `PUBLIC_ORIGIN` (`https://box.bisel.app`; passkeys are bound to this hostname, so changing it orphans every passkey),
 `AUTH_FAIL_LIMIT` / `AUTH_FAIL_WINDOW_SECONDS` / `AUTH_BACKOFF_MS` (failed-auth delay, never refuses a valid signature),
@@ -45,10 +45,10 @@ pnpm exec wrangler deployments list --env prod                       # versions,
 
 Production has 0001-0006. This work adds two. Apply them **before** deploying the new Worker, in this order:
 
-| # | File | What it does | On the empty production database |
-|---|---|---|---|
-| 0007 | `0007_drop_rotate_history.sql` | `DELETE FROM item_history WHERE kind = 'rotate'`: the rotation no longer keeps old wrapped item keys | deletes nothing; safe |
-| 0008 | `0008_box_bytes.sql` | adds `boxes.stored_bytes`, backfills it, adds three triggers on `items` | no rows to backfill, trigger creation only; safe |
+| #    | File                           | What it does                                                                                         | On the empty production database                 |
+| ---- | ------------------------------ | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| 0007 | `0007_drop_rotate_history.sql` | `DELETE FROM item_history WHERE kind = 'rotate'`: the rotation no longer keeps old wrapped item keys | deletes nothing; safe                            |
+| 0008 | `0008_box_bytes.sql`           | adds `boxes.stored_bytes`, backfills it, adds three triggers on `items`                              | no rows to backfill, trigger creation only; safe |
 
 Both are safe to apply to the current (empty) production database, and also to a database that holds boxes (0008's backfill is one `SUM` per box).
 The order matters in one direction only: the new Worker reads `stored_bytes`, so the column must exist first. The previous Worker keeps working
@@ -131,14 +131,14 @@ Restores are limited to 10 per 10 minutes. If the restore crosses a migration, t
    previous Worker keeps working on the new schema and nothing needs to be undone. 0005 to 0008 were written that way.
 3. If a migration must be undone, the only complete undo is the Time Travel bookmark taken before it (5.2); then roll the Worker back too. Reversibility per migration:
 
-| Migration | Safely reversible? |
-|---|---|
-| 0001-0003 | initial schema; never reverse on a database that has data |
-| 0004 accounts | **No.** Rebuilds `devices`, `items`, `item_history`, `events` with `box_id`, turns `meta` into `boxes` and drops `meta`. Only a bookmark taken before it restores the old shape |
-| 0005 Better Auth tables | Only by dropping the auth tables, which deletes every account and passkey. Reverse with a bookmark instead |
-| 0006 connect requests | Droppable (`connect_requests` holds only short-lived codes); the previous Worker never reads it |
-| 0007 drop rotate history | **No.** It deletes rows (no client reads them); a bookmark brings them back |
-| 0008 box bytes | Yes, if ever needed: drop the three `items_bytes_*` triggers, then `ALTER TABLE boxes DROP COLUMN stored_bytes`. The previous Worker does not need it |
+| Migration                | Safely reversible?                                                                                                                                                              |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0001-0003                | initial schema; never reverse on a database that has data                                                                                                                       |
+| 0004 accounts            | **No.** Rebuilds `devices`, `items`, `item_history`, `events` with `box_id`, turns `meta` into `boxes` and drops `meta`. Only a bookmark taken before it restores the old shape |
+| 0005 Better Auth tables  | Only by dropping the auth tables, which deletes every account and passkey. Reverse with a bookmark instead                                                                      |
+| 0006 connect requests    | Droppable (`connect_requests` holds only short-lived codes); the previous Worker never reads it                                                                                 |
+| 0007 drop rotate history | **No.** It deletes rows (no client reads them); a bookmark brings them back                                                                                                     |
+| 0008 box bytes           | Yes, if ever needed: drop the three `items_bytes_*` triggers, then `ALTER TABLE boxes DROP COLUMN stored_bytes`. The previous Worker does not need it                           |
 
 ### 5.4 Disable a box (operator kill switch)
 
@@ -187,7 +187,7 @@ The dashboard answers on `/` and unknown non-`/v1` paths (single-page fallback);
 **Scheduled exports.** Time Travel covers 30 days but lives in the same Cloudflare account. A second copy outside it, daily:
 a scheduled GitHub Actions job (or the owner's Mac via `launchd`) runs `doppler run -- pnpm exec wrangler d1 export bisel --env prod --remote --output dump.sql` with a
 dedicated, D1-read-only API token, encrypts the dump with `age` to a key whose private half stays offline (the dump holds ciphertext, but also account rows,
-passkey public keys and device lists), and uploads it to a private R2 bucket in a *different* Cloudflare account or to any object store, keeping 30 daily and
+passkey public keys and device lists), and uploads it to a private R2 bucket in a _different_ Cloudflare account or to any object store, keeping 30 daily and
 12 monthly copies. A failed or missing run alerts (the same channel as the monitor). Do a restore drill into a scratch D1 (`wrangler d1 execute --file`) once per quarter, because an
 untested backup is a hope. Cost: free tier. Why not a Cron Trigger Worker: it would need the account API token as a Worker secret, putting the key to the whole account next to the data.
 

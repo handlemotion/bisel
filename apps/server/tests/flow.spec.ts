@@ -1,7 +1,20 @@
 import { expect, test, type APIResponse } from "@playwright/test";
 import { randomBytes } from "node:crypto";
 import { TEST_BOOTSTRAP_TOKEN } from "../playwright.config";
-import { MANIFEST_ID, adminState, b64u, boxState, Bisel, newAdminKey, newDevice, prepare, randomId, randomX25519Pub, recoveryKeyFromSeed, type TestDevice } from "./support/client";
+import {
+  MANIFEST_ID,
+  adminState,
+  b64u,
+  boxState,
+  Bisel,
+  newAdminKey,
+  newDevice,
+  prepare,
+  randomId,
+  randomX25519Pub,
+  recoveryKeyFromSeed,
+  type TestDevice,
+} from "./support/client";
 
 // One story against one database. Each step depends on the state the previous ones left behind.
 test.describe.configure({ mode: "serial" });
@@ -27,7 +40,11 @@ const json = async (res: APIResponse) => (await res.json()) as any;
 /** PUT an item the way a current client does: base_rev + the epoch of the VK it wrapped the key under. */
 /** Tombstone marker: sealed under VK by real clients; opaque bytes to the server. */
 const del = (e = epoch) => ({ epoch: e, marker: b64u(randomBytes(32)) });
-const putBody = (base_rev: number, blobValue: string, e = epoch) => ({ base_rev, epoch: e, blob: blobValue });
+const putBody = (base_rev: number, blobValue: string, e = epoch) => ({
+  base_rev,
+  epoch: e,
+  blob: blobValue,
+});
 
 /** Everything a caller could use to tell two responses apart, except the clock. */
 async function fingerprint(res: APIResponse) {
@@ -59,22 +76,37 @@ test("bootstrap is guarded by the secret and makes a new box each time", async (
   // Not yet bootstrapped: the device that is about to exist cannot do anything.
   expect((await api.call(a, "GET", "/v1/sync")).status()).toBe(404);
 
-  const ok = await api.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, body);
+  const ok = await api.raw(
+    "POST",
+    "/v1/bootstrap",
+    { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN },
+    body,
+  );
   expect(ok.status()).toBe(201);
   boxState.id = (await json(ok)).box_id;
   expect(boxState.id).toMatch(/^[A-Za-z0-9_-]{22}$/);
 
   // Boxes are no longer one per server: the secret creates another, independent, unowned box...
   const other = await newDevice("second-box-mac");
-  const again = await api.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, {
-    ...body,
-    device: other.registration(),
-  });
+  const again = await api.raw(
+    "POST",
+    "/v1/bootstrap",
+    { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN },
+    {
+      ...body,
+      device: other.registration(),
+    },
+  );
   expect(again.status()).toBe(201);
   const created = await json(again);
   expect(created.box_id).not.toBe((await json(ok)).box_id);
   // ...but never with a device id that is already registered anywhere (same bare refusal as a wrong secret).
-  const reuse = await api.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, { ...body, device: a.registration() });
+  const reuse = await api.raw(
+    "POST",
+    "/v1/bootstrap",
+    { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN },
+    { ...body, device: a.registration() },
+  );
   expect(reuse.status()).toBe(404);
   expect(await reuse.text()).toBe("");
 });
@@ -98,7 +130,13 @@ test("create and edit an item; sync is incremental", async ({ request }) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.1.0.1" });
   const created = await api.call(a, "PUT", `/v1/items/${item1}`, { json: putBody(0, blob1) });
   expect(created.status()).toBe(200);
-  expect((await json(created)).item).toMatchObject({ id: item1, rev: 1, seq: 1, deleted: false, blob: blob1 });
+  expect((await json(created)).item).toMatchObject({
+    id: item1,
+    rev: 1,
+    seq: 1,
+    deleted: false,
+    blob: blob1,
+  });
 
   const edited = await api.call(a, "PUT", `/v1/items/${item1}`, { json: putBody(1, blob1b) });
   expect(edited.status()).toBe(200);
@@ -114,7 +152,9 @@ test("create and edit an item; sync is incremental", async ({ request }) => {
   headSeq = 2;
 });
 
-test("stale base_rev conflicts, returns the current record, and leaves no gap in seq", async ({ request }) => {
+test("stale base_rev conflicts, returns the current record, and leaves no gap in seq", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.1.0.1" });
   const stale = await api.call(a, "PUT", `/v1/items/${item1}`, { json: putBody(1, blob()) });
   expect(stale.status()).toBe(409);
@@ -130,21 +170,37 @@ test("stale base_rev conflicts, returns the current record, and leaves no gap in
   expect((await json(ghost)).current).toBeNull();
 
   // The three rejected writes consumed no seq: the next real write gets head+1.
-  const next = await json(await api.call(a, "PUT", `/v1/items/${item2}`, { json: putBody(0, blob()) }));
+  const next = await json(
+    await api.call(a, "PUT", `/v1/items/${item2}`, { json: putBody(0, blob()) }),
+  );
   expect(next.item.seq).toBe(headSeq + 1);
   headSeq += 1;
 });
 
-test("delete leaves a tombstone that syncs, and is itself revision-checked", async ({ request }) => {
+test("delete leaves a tombstone that syncs, and is itself revision-checked", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.1.0.1" });
-  const staleDel = await api.call(a, "DELETE", `/v1/items/${item2}`, { query: { base_rev: 5 }, json: del() });
+  const staleDel = await api.call(a, "DELETE", `/v1/items/${item2}`, {
+    query: { base_rev: 5 },
+    json: del(),
+  });
   expect(staleDel.status()).toBe(409);
   expect((await json(staleDel)).current).toMatchObject({ rev: 1, deleted: false });
 
   const tomb = del();
-  const gone = await api.call(a, "DELETE", `/v1/items/${item2}`, { query: { base_rev: 1 }, json: tomb });
+  const gone = await api.call(a, "DELETE", `/v1/items/${item2}`, {
+    query: { base_rev: 1 },
+    json: tomb,
+  });
   expect(gone.status()).toBe(200);
-  expect((await json(gone)).item).toMatchObject({ id: item2, rev: 2, seq: headSeq + 1, deleted: true, blob: tomb.marker });
+  expect((await json(gone)).item).toMatchObject({
+    id: item2,
+    rev: 2,
+    seq: headSeq + 1,
+    deleted: true,
+    blob: tomb.marker,
+  });
   headSeq += 1;
 
   const sync = await json(await api.call(a, "GET", "/v1/sync", { query: { since: headSeq - 1 } }));
@@ -152,9 +208,14 @@ test("delete leaves a tombstone that syncs, and is itself revision-checked", asy
   expect(sync.items[0]).toMatchObject({ id: item2, deleted: true, seq: headSeq });
 
   // Deleting twice does not mint another revision.
-  const twice = await api.call(a, "DELETE", `/v1/items/${item2}`, { query: { base_rev: 2 }, json: del() });
+  const twice = await api.call(a, "DELETE", `/v1/items/${item2}`, {
+    query: { base_rev: 2 },
+    json: del(),
+  });
   expect(twice.status()).toBe(409);
-  expect((await json(await api.call(a, "GET", "/v1/sync", { query: { since: 0 } }))).head_seq).toBe(headSeq);
+  expect((await json(await api.call(a, "GET", "/v1/sync", { query: { since: 0 } }))).head_seq).toBe(
+    headSeq,
+  );
 });
 
 test("concurrent writers still produce a gapless, duplicate-free seq log", async ({ request }) => {
@@ -162,14 +223,18 @@ test("concurrent writers still produce a gapless, duplicate-free seq log", async
   const before = headSeq;
 
   const distinct = await Promise.all(
-    Array.from({ length: 12 }, () => api.call(a, "PUT", `/v1/items/${randomId()}`, { json: putBody(0, blob(100)) })),
+    Array.from({ length: 12 }, () =>
+      api.call(a, "PUT", `/v1/items/${randomId()}`, { json: putBody(0, blob(100)) }),
+    ),
   );
   expect(distinct.map((r) => r.status())).toEqual(Array(12).fill(200));
 
   // Six writers race to create the very same id: exactly one wins, five conflict and burn nothing.
   const same = randomId();
   const race = await Promise.all(
-    Array.from({ length: 6 }, () => api.call(a, "PUT", `/v1/items/${same}`, { json: putBody(0, blob(100)) })),
+    Array.from({ length: 6 }, () =>
+      api.call(a, "PUT", `/v1/items/${same}`, { json: putBody(0, blob(100)) }),
+    ),
   );
   expect(race.filter((r) => r.status() === 200)).toHaveLength(1);
   expect(race.filter((r) => r.status() === 409)).toHaveLength(5);
@@ -193,7 +258,9 @@ test("concurrent writers still produce a gapless, duplicate-free seq log", async
   expect(collected.slice(2)).toEqual(Array.from({ length: 13 }, (_, i) => before + 1 + i));
 });
 
-test("blob size limit: 256 KiB passes, one byte more is refused without consuming a seq", async ({ request }) => {
+test("blob size limit: 256 KiB passes, one byte more is refused without consuming a seq", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.1.0.1" });
   const big = randomId();
   const max = await api.call(a, "PUT", `/v1/items/${big}`, { json: putBody(0, blob(256 * 1024)) });
@@ -201,27 +268,39 @@ test("blob size limit: 256 KiB passes, one byte more is refused without consumin
   headSeq += 1;
   expect((await json(max)).item.seq).toBe(headSeq);
 
-  const over = await api.call(a, "PUT", `/v1/items/${randomId()}`, { json: putBody(0, blob(256 * 1024 + 1)) });
+  const over = await api.call(a, "PUT", `/v1/items/${randomId()}`, {
+    json: putBody(0, blob(256 * 1024 + 1)),
+  });
   expect(over.status()).toBe(413);
   const sync = await json(await api.call(a, "GET", "/v1/sync", { query: { since: headSeq } }));
   expect(sync.head_seq).toBe(headSeq);
 });
 
-test("an existing device approves a second one, which can then sync and write", async ({ request }) => {
+test("an existing device approves a second one, which can then sync and write", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.1.0.1" });
   b = await newDevice("test-iphone", "iphone");
 
   // Not registered yet: its (perfectly valid) signature means nothing.
   expect((await api.call(b, "GET", "/v1/sync")).status()).toBe(404);
 
-  const badKey = await api.call(a, "POST", "/v1/devices", { json: { ...b.registration(), epoch, sig_pubkey: b64u(randomBytes(65)) } });
+  const badKey = await api.call(a, "POST", "/v1/devices", {
+    json: { ...b.registration(), epoch, sig_pubkey: b64u(randomBytes(65)) },
+  });
   expect(badKey.status()).toBe(400);
 
-  const approve = await api.call(a, "POST", "/v1/devices", { json: { ...b.registration(), epoch } });
+  const approve = await api.call(a, "POST", "/v1/devices", {
+    json: { ...b.registration(), epoch },
+  });
   expect(approve.status()).toBe(201);
-  expect((await api.call(a, "POST", "/v1/devices", { json: { ...b.registration(), epoch } })).status()).toBe(409);
+  expect(
+    (await api.call(a, "POST", "/v1/devices", { json: { ...b.registration(), epoch } })).status(),
+  ).toBe(409);
 
-  const sync = await json(await api.call(b, "GET", "/v1/sync", { query: { since: 0, limit: 500 } }));
+  const sync = await json(
+    await api.call(b, "GET", "/v1/sync", { query: { since: 0, limit: 500 } }),
+  );
   expect(sync.head_seq).toBe(headSeq);
   expect(sync.devices.map((d: any) => d.id).sort()).toEqual([a.id, b.id].sort());
   expect((await json(await api.call(b, "GET", "/v1/envelope"))).envelope).toBe(b.envelope);
@@ -232,7 +311,9 @@ test("an existing device approves a second one, which can then sync and write", 
   expect((await json(put)).item).toMatchObject({ rev: 3, seq: headSeq });
 });
 
-test("revoking a device makes its very next request 404, and only its requests", async ({ request }) => {
+test("revoking a device makes its very next request 404, and only its requests", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.1.0.1" });
   expect((await api.call(b, "GET", "/v1/sync")).status()).toBe(200);
 
@@ -245,12 +326,19 @@ test("revoking a device makes its very next request 404, and only its requests",
     ["GET", "/v1/devices"],
     ["PUT", `/v1/items/${item1}`],
   ] as const) {
-    const res = await api.call(b, method, path, method === "PUT" ? { json: putBody(3, blob()) } : {});
+    const res = await api.call(
+      b,
+      method,
+      path,
+      method === "PUT" ? { json: putBody(3, blob()) } : {},
+    );
     expect(res.status(), `${method} ${path}`).toBe(404);
     expect(await res.text()).toBe("");
   }
   // The rejected PUT must not have been applied.
-  const sync = await json(await api.call(a, "GET", "/v1/sync", { query: { since: 0, limit: 500 } }));
+  const sync = await json(
+    await api.call(a, "GET", "/v1/sync", { query: { since: 0, limit: 500 } }),
+  );
   expect(sync.head_seq).toBe(headSeq);
   const dev = sync.devices.find((d: any) => d.id === b.id);
   expect(dev.revoked_at).toBeGreaterThan(0);
@@ -280,7 +368,10 @@ test("authentication failures are indistinguishable from an unknown route", asyn
   const q = await prepare(a, "GET", path, { query: { since: 0 } });
   failures.tamperedQuery = await api.send({ ...q, query: { since: 1 } });
   const putReq = await prepare(a, "PUT", `/v1/items/${randomId()}`, { json: putBody(0, blob(50)) });
-  failures.tamperedBody = await api.send({ ...putReq, body: Buffer.from(JSON.stringify({ base_rev: 0, blob: blob(50) })) });
+  failures.tamperedBody = await api.send({
+    ...putReq,
+    body: Buffer.from(JSON.stringify({ base_rev: 0, blob: blob(50) })),
+  });
   const getReq = await prepare(a, "GET", "/v1/devices");
   failures.tamperedPath = await api.send({ ...getReq, path: "/v1/envelope" });
 
@@ -290,13 +381,19 @@ test("authentication failures are indistinguishable from an unknown route", asyn
   expect((await api.send(await prepare(a, "GET", path, { ts: now - 30 }))).status()).toBe(200); // inside the window
 
   // Unknown device, revoked device, missing headers, and the recovery id used by a device key.
-  failures.unknownDevice = await api.send(await prepare({ ...stranger, id: randomId() }, "GET", path));
+  failures.unknownDevice = await api.send(
+    await prepare({ ...stranger, id: randomId() }, "GET", path),
+  );
   failures.revokedDevice = await api.send(await prepare(b, "GET", path));
   failures.noHeaders = await api.api.fetch(path, { headers: { "CF-Connecting-IP": "10.9.0.1" } });
-  failures.deviceKeyAsRecovery = await api.send(await prepare({ ...a, id: "recovery" }, "POST", "/v1/recovery/session"));
+  failures.deviceKeyAsRecovery = await api.send(
+    await prepare({ ...a, id: "recovery" }, "POST", "/v1/recovery/session"),
+  );
 
   // And what a plain unknown route looks like.
-  failures.unknownRoute = await api.api.fetch("/v1/does-not-exist", { headers: { "CF-Connecting-IP": "10.9.0.1" } });
+  failures.unknownRoute = await api.api.fetch("/v1/does-not-exist", {
+    headers: { "CF-Connecting-IP": "10.9.0.1" },
+  });
 
   const reference = await fingerprint(failures.unknownRoute!);
   expect(reference.status).toBe(404);
@@ -310,7 +407,9 @@ test("authentication failures are indistinguishable from an unknown route", asyn
   expect(sync.items).toEqual([]);
 });
 
-test("recovery key: fetch the envelope, register a replacement device, rotate", async ({ request }) => {
+test("recovery key: fetch the envelope, register a replacement device, rotate", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.2.0.1" });
 
   // Wrong recovery key (Ed25519 verification really rejects).
@@ -322,7 +421,9 @@ test("recovery key: fetch the envelope, register a replacement device, rotate", 
   expect(await json(s1)).toMatchObject({ recovery_envelope: recoveryEnvelope, head_seq: headSeq });
 
   c = await newDevice("test-mac-restored");
-  const s2 = await api.call(recovery, "POST", "/v1/recovery/session", { json: { device: c.registration(), epoch } });
+  const s2 = await api.call(recovery, "POST", "/v1/recovery/session", {
+    json: { device: c.registration(), epoch },
+  });
   expect(s2.status()).toBe(200);
   // The test server holds recovery-registered devices back for 2 s (RECOVERY_ACTIVATION_DELAY_SECONDS): until then it is a bare 404.
   expect((await json(s2)).device.activates_at).toBeGreaterThan(Math.floor(Date.now() / 1000));
@@ -330,7 +431,9 @@ test("recovery key: fetch the envelope, register a replacement device, rotate", 
   await new Promise((r) => setTimeout(r, 2200));
 
   // The replacement device is a normal device now and sees everything.
-  const sync = await json(await api.call(c, "GET", "/v1/sync", { query: { since: 0, limit: 500 } }));
+  const sync = await json(
+    await api.call(c, "GET", "/v1/sync", { query: { since: 0, limit: 500 } }),
+  );
   expect(sync.head_seq).toBe(headSeq);
   expect(sync.items.some((i: any) => i.id === item1 && i.rev === 3)).toBe(true);
 
@@ -339,7 +442,12 @@ test("recovery key: fetch the envelope, register a replacement device, rotate", 
   const nextEnvelope = b64u(randomBytes(60));
   const nextEnc = await randomX25519Pub();
   const rot = await api.call(c, "POST", "/v1/recovery/rotate", {
-    json: { recovery_pubkey: next.pub, recovery_enc_pubkey: nextEnc, recovery_envelope: nextEnvelope, epoch },
+    json: {
+      recovery_pubkey: next.pub,
+      recovery_enc_pubkey: nextEnc,
+      recovery_envelope: nextEnvelope,
+      epoch,
+    },
   });
   expect(rot.status()).toBe(200);
   expect((await api.call(recovery, "POST", "/v1/recovery/session")).status()).toBe(404);
@@ -380,10 +488,15 @@ async function snapshot(api: Bisel, who: TestDevice) {
 const newKey = () => b64u(randomBytes(60)); // a wrapped item key is nonce(12) + key(32) + tag(16)
 
 /** Builds the POST /v1/rotate body a client would send for `snap`, with fresh keys/envelopes and a new admin key. */
-async function rotation(snap: Awaited<ReturnType<typeof snapshot>>, opts: { revoke?: string | null; keep?: string[] } = {}) {
+async function rotation(
+  snap: Awaited<ReturnType<typeof snapshot>>,
+  opts: { revoke?: string | null; keep?: string[] } = {},
+) {
   const keep = opts.keep ?? snap.devices.map((d) => d.id).filter((id) => id !== opts.revoke);
   const keys = new Map(snap.live.map((i) => [i.id as string, newKey()]));
-  const markers = new Map(snap.items.filter((i) => i.deleted).map((i) => [i.id as string, b64u(randomBytes(32))]));
+  const markers = new Map(
+    snap.items.filter((i) => i.deleted).map((i) => [i.id as string, b64u(randomBytes(32))]),
+  );
   const envelopes = new Map(keep.map((id) => [id, b64u(randomBytes(125))]));
   const next = await newAdminKey();
   const body = {
@@ -392,7 +505,9 @@ async function rotation(snap: Awaited<ReturnType<typeof snapshot>>, opts: { revo
     revoke: opts.revoke ?? null,
     new_admin_pubkey: next.pub,
     items: snap.live.map((i) => ({ id: i.id, rev: i.rev, key: keys.get(i.id)! })),
-    tombstones: snap.items.filter((i) => i.deleted).map((i) => ({ id: i.id, rev: i.rev, marker: markers.get(i.id)! })),
+    tombstones: snap.items
+      .filter((i) => i.deleted)
+      .map((i) => ({ id: i.id, rev: i.rev, marker: markers.get(i.id)! })),
     devices: keep.map((id) => ({ id, envelope: envelopes.get(id)! })),
     recovery_envelope: b64u(randomBytes(60)),
   };
@@ -403,7 +518,9 @@ async function rotation(snap: Awaited<ReturnType<typeof snapshot>>, opts: { revo
   return { body, keys, markers, envelopes, next, adopt };
 }
 
-test("rotation without a revoke: wrapped keys are swapped, payload bytes, revs and tombstones are not", async ({ request }) => {
+test("rotation without a revoke: wrapped keys are swapped, payload bytes, revs and tombstones are not", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.3.0.1" });
   const before = await snapshot(api, a);
   expect(before.epoch).toBe(1);
@@ -413,12 +530,18 @@ test("rotation without a revoke: wrapped keys are swapped, payload bytes, revs a
   const rot = await rotation(before);
   const res = await api.call(a, "POST", "/v1/rotate", { json: rot.body });
   expect(res.status()).toBe(200);
-  expect(await json(res)).toMatchObject({ epoch: 2, rotated_items: before.live.length, revoked: null });
+  expect(await json(res)).toMatchObject({
+    epoch: 2,
+    rotated_items: before.live.length,
+    revoked: null,
+  });
   rot.adopt();
 
   const after = await snapshot(api, c);
   expect(after.epoch).toBe(2);
-  expect(after.headSeq).toBe(before.headSeq + before.live.length + before.items.filter((i) => i.deleted).length);
+  expect(after.headSeq).toBe(
+    before.headSeq + before.live.length + before.items.filter((i) => i.deleted).length,
+  );
   expect(after.live).toHaveLength(before.live.length);
   const oldById = new Map(before.live.map((i) => [i.id, i]));
   for (const item of after.live) {
@@ -434,7 +557,9 @@ test("rotation without a revoke: wrapped keys are swapped, payload bytes, revs a
   for (const t of tombs) expect(t.blob).toBe(rot.markers.get(t.id));
   const seqs = after.items.map((i) => i.seq).sort((x, y) => x - y);
   const rotatedCount = before.live.length + tombs.length;
-  expect(seqs.slice(-rotatedCount)).toEqual(Array.from({ length: rotatedCount }, (_, k) => before.headSeq + 1 + k));
+  expect(seqs.slice(-rotatedCount)).toEqual(
+    Array.from({ length: rotatedCount }, (_, k) => before.headSeq + 1 + k),
+  );
 
   // Every active device got its new envelope at the new epoch; the recovery envelope moved too.
   for (const d of [a, c]) {
@@ -442,7 +567,9 @@ test("rotation without a revoke: wrapped keys are swapped, payload bytes, revs a
     expect(env).toMatchObject({ envelope: rot.envelopes.get(d.id), epoch: 2 });
   }
   expect(after.recovery.envelope).toBe(rot.body.recovery_envelope);
-  expect(after.recovery.pubkey, "same phrase: recovery keys are untouched").toBe(before.recovery.pubkey);
+  expect(after.recovery.pubkey, "same phrase: recovery keys are untouched").toBe(
+    before.recovery.pubkey,
+  );
   expect((await json(await api.call(recovery, "POST", "/v1/recovery/session"))).epoch).toBe(2);
   epoch = 2;
   headSeq = after.headSeq;
@@ -454,40 +581,62 @@ test("after a rotation, anything built from the old vault key is refused", async
   const victim = snap.live[0]!;
 
   // A device that has not noticed the rotation writes an item key wrapped under the old VK.
-  const stalePut = await api.call(a, "PUT", `/v1/items/${victim.id}`, { json: putBody(victim.rev, blob(), 1) });
+  const stalePut = await api.call(a, "PUT", `/v1/items/${victim.id}`, {
+    json: putBody(victim.rev, blob(), 1),
+  });
   expect(stalePut.status()).toBe(409);
   expect(await json(stalePut)).toEqual({ error: "stale_epoch", epoch: 2 });
   // ... or approves a new device with an envelope holding the old VK ...
   const late = await newDevice("late");
-  const staleApprove = await api.call(a, "POST", "/v1/devices", { json: { ...late.registration(), epoch: 1 } });
+  const staleApprove = await api.call(a, "POST", "/v1/devices", {
+    json: { ...late.registration(), epoch: 1 },
+  });
   expect(staleApprove.status()).toBe(409);
   expect((await json(staleApprove)).error).toBe("stale_epoch");
   expect((await api.call(late, "GET", "/v1/sync")).status(), "nothing was registered").toBe(404);
   // ... or replaces the recovery envelope with one derived from the old VK, or registers via recovery with it.
   const staleRecRotate = await api.call(a, "POST", "/v1/recovery/rotate", {
-    json: { recovery_pubkey: recovery.pub, recovery_enc_pubkey: recoveryEncPub, recovery_envelope: b64u(randomBytes(60)), epoch: 1 },
+    json: {
+      recovery_pubkey: recovery.pub,
+      recovery_enc_pubkey: recoveryEncPub,
+      recovery_envelope: b64u(randomBytes(60)),
+      epoch: 1,
+    },
   });
   expect(staleRecRotate.status()).toBe(409);
-  const staleRecover = await api.call(recovery, "POST", "/v1/recovery/session", { json: { device: late.registration(), epoch: 1 } });
+  const staleRecover = await api.call(recovery, "POST", "/v1/recovery/session", {
+    json: { device: late.registration(), epoch: 1 },
+  });
   expect(staleRecover.status()).toBe(409);
   expect((await snapshot(api, a)).headSeq, "nothing was written").toBe(snap.headSeq);
 
   // With the current epoch the very same writes go through.
-  const ok = await api.call(a, "PUT", `/v1/items/${victim.id}`, { json: putBody(victim.rev, blob()) });
+  const ok = await api.call(a, "PUT", `/v1/items/${victim.id}`, {
+    json: putBody(victim.rev, blob()),
+  });
   expect(ok.status()).toBe(200);
   headSeq = (await json(ok)).item.seq;
 });
 
-test("rotation is refused, and changes nothing, when anything moved since the snapshot", async ({ request }) => {
+test("rotation is refused, and changes nothing, when anything moved since the snapshot", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.3.0.3" });
   const base = await snapshot(api, a);
-  const attempt = async (body: unknown, who: TestDevice = a) => api.call(who, "POST", "/v1/rotate", { json: body });
+  const attempt = async (body: unknown, who: TestDevice = a) =>
+    api.call(who, "POST", "/v1/rotate", { json: body });
   const expectUnchanged = async (label: string) => {
     const now = await snapshot(api, a);
     expect(now.epoch, label).toBe(base.epoch);
     expect(now.headSeq, label).toBe(base.headSeq);
-    expect(now.live.map((i) => [i.id, i.blob, i.seq]), label).toEqual(base.live.map((i) => [i.id, i.blob, i.seq]));
-    expect(now.allDevices.map((d) => [d.id, d.revoked_at]), label).toEqual(base.allDevices.map((d) => [d.id, d.revoked_at]));
+    expect(
+      now.live.map((i) => [i.id, i.blob, i.seq]),
+      label,
+    ).toEqual(base.live.map((i) => [i.id, i.blob, i.seq]));
+    expect(
+      now.allDevices.map((d) => [d.id, d.revoked_at]),
+      label,
+    ).toEqual(base.allDevices.map((d) => [d.id, d.revoked_at]));
     expect((await json(await api.call(a, "GET", "/v1/envelope"))).envelope, label).toBe(
       (await json(await api.call(a, "GET", "/v1/envelope"))).envelope,
     );
@@ -495,7 +644,9 @@ test("rotation is refused, and changes nothing, when anything moved since the sn
   const good = await rotation(base);
 
   // A concurrent edit: another device wrote an item after the snapshot was taken.
-  const edited = await api.call(c, "PUT", `/v1/items/${base.live[0]!.id}`, { json: putBody(base.live[0]!.rev, blob()) });
+  const edited = await api.call(c, "PUT", `/v1/items/${base.live[0]!.id}`, {
+    json: putBody(base.live[0]!.rev, blob()),
+  });
   expect(edited.status()).toBe(200);
   const racing = await attempt(good.body);
   expect(racing.status()).toBe(409);
@@ -529,24 +680,39 @@ test("rotation is refused, and changes nothing, when anything moved since the sn
 
   const missingDevice = await clean();
   missingDevice.body.devices = missingDevice.body.devices.filter((d) => d.id === a.id);
-  expect((await attempt(missingDevice.body)).status(), "an active device without a new envelope").toBe(409);
+  expect(
+    (await attempt(missingDevice.body)).status(),
+    "an active device without a new envelope",
+  ).toBe(409);
 
   const strangerDevice = await clean();
   strangerDevice.body.devices.push({ id: randomId(), envelope: b64u(randomBytes(125)) });
-  expect((await attempt(strangerDevice.body)).status(), "an envelope for a device that does not exist").toBe(409);
+  expect(
+    (await attempt(strangerDevice.body)).status(),
+    "an envelope for a device that does not exist",
+  ).toBe(409);
 
   const revokedDevice = await clean();
   revokedDevice.body.devices.push({ id: b.id, envelope: b64u(randomBytes(125)) });
-  expect((await attempt(revokedDevice.body)).status(), "an envelope for an already revoked device").toBe(409);
+  expect(
+    (await attempt(revokedDevice.body)).status(),
+    "an envelope for an already revoked device",
+  ).toBe(409);
 
   const staleEpoch = await clean();
   staleEpoch.body.base_epoch = 1;
   expect((await attempt(staleEpoch.body)).status(), "stale epoch").toBe(409);
 
   const revokeRevoked = await rotation(fresh, { revoke: b.id, keep: [a.id, c.id] });
-  expect((await attempt(revokeRevoked.body)).status(), "revoking a device that is already revoked").toBe(409);
+  expect(
+    (await attempt(revokeRevoked.body)).status(),
+    "revoking a device that is already revoked",
+  ).toBe(409);
   const revokeUnknown = await rotation(fresh, { revoke: randomId(), keep: [a.id, c.id] });
-  expect((await attempt(revokeUnknown.body)).status(), "revoking a device that does not exist").toBe(409);
+  expect(
+    (await attempt(revokeUnknown.body)).status(),
+    "revoking a device that does not exist",
+  ).toBe(409);
 
   // Malformed shapes never reach the database: 400, not 409.
   for (const [label, mutate] of [
@@ -556,7 +722,10 @@ test("rotation is refused, and changes nothing, when anything moved since the sn
     ["duplicate item", (x: any) => x.items.push({ ...x.items[0] })],
     ["duplicate device", (x: any) => x.devices.push({ ...x.devices[0] })],
     ["no devices", (x: any) => (x.devices = [])],
-    ["caller not among the devices", (x: any) => (x.devices = x.devices.filter((d: any) => d.id !== a.id))],
+    [
+      "caller not among the devices",
+      (x: any) => (x.devices = x.devices.filter((d: any) => d.id !== a.id)),
+    ],
     ["self revoke", (x: any) => (x.revoke = a.id)],
     ["revoked device also gets an envelope", (x: any) => (x.revoke = c.id)],
     ["fractional epoch", (x: any) => (x.base_epoch = 1.5)],
@@ -573,7 +742,9 @@ test("two rotations racing from the same snapshot: exactly one wins", async ({ r
   const api = new Bisel(request, { "CF-Connecting-IP": "10.3.0.4" });
   const snap = await snapshot(api, a);
   const attempts = [await rotation(snap), await rotation(snap), await rotation(snap)];
-  const results = await Promise.all(attempts.map((r, k) => api.call(k % 2 ? c : a, "POST", "/v1/rotate", { json: r.body })));
+  const results = await Promise.all(
+    attempts.map((r, k) => api.call(k % 2 ? c : a, "POST", "/v1/rotate", { json: r.body })),
+  );
   // The loser is refused either by the transaction (409) or, if the winner already moved the admin key, by the admin signature (403).
   const statuses = results.map((r) => r.status());
   expect(statuses.filter((x) => x === 200)).toHaveLength(1);
@@ -583,16 +754,22 @@ test("two rotations racing from the same snapshot: exactly one wins", async ({ r
 
   const after = await snapshot(api, a);
   expect(after.epoch).toBe(snap.epoch + 1);
-  expect(after.headSeq).toBe(snap.headSeq + snap.live.length + snap.items.filter((i) => i.deleted).length);
+  expect(after.headSeq).toBe(
+    snap.headSeq + snap.live.length + snap.items.filter((i) => i.deleted).length,
+  );
   for (const item of after.live) expect(item.blob.slice(0, 80)).toBe(winner.keys.get(item.id));
   epoch = after.epoch;
   headSeq = after.headSeq;
 });
 
-test("rotating while revoking a device cuts it off in the same transaction", async ({ request }) => {
+test("rotating while revoking a device cuts it off in the same transaction", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.3.0.5" });
   const d = await newDevice("test-ipad", "ipad");
-  const approve = await api.call(a, "POST", "/v1/devices", { json: { ...d.registration(), epoch } });
+  const approve = await api.call(a, "POST", "/v1/devices", {
+    json: { ...d.registration(), epoch },
+  });
   expect(approve.status()).toBe(201);
   expect((await api.call(d, "GET", "/v1/sync")).status()).toBe(200);
 
@@ -606,18 +783,31 @@ test("rotating while revoking a device cuts it off in the same transaction", asy
   rot.adopt();
 
   // The revoked device is out at once, every route, and sees nothing of the new material.
-  for (const [method, path] of [["GET", "/v1/sync"], ["GET", "/v1/envelope"], ["GET", "/v1/devices"]] as const) {
+  for (const [method, path] of [
+    ["GET", "/v1/sync"],
+    ["GET", "/v1/envelope"],
+    ["GET", "/v1/devices"],
+  ] as const) {
     const r = await api.call(d, method, path);
     expect(r.status(), `${method} ${path}`).toBe(404);
     expect(await r.text()).toBe("");
   }
-  expect((await api.call(d, "PUT", `/v1/items/${snap.live[0]!.id}`, { json: putBody(snap.live[0]!.rev, blob(), epoch + 1) })).status()).toBe(404);
+  expect(
+    (
+      await api.call(d, "PUT", `/v1/items/${snap.live[0]!.id}`, {
+        json: putBody(snap.live[0]!.rev, blob(), epoch + 1),
+      })
+    ).status(),
+  ).toBe(404);
   const after = await snapshot(api, a);
   const gone = after.allDevices.find((x) => x.id === d.id);
   expect(gone.revoked_at).toBeGreaterThan(0);
   expect(after.devices.map((x) => x.id).sort()).toEqual([a.id, c.id].sort());
   for (const survivor of [a, c]) {
-    expect(await json(await api.call(survivor, "GET", "/v1/envelope"))).toMatchObject({ envelope: rot.envelopes.get(survivor.id), epoch: epoch + 1 });
+    expect(await json(await api.call(survivor, "GET", "/v1/envelope"))).toMatchObject({
+      envelope: rot.envelopes.get(survivor.id),
+      epoch: epoch + 1,
+    });
   }
   epoch += 1;
   headSeq = after.headSeq;
@@ -629,7 +819,9 @@ test("rotating while revoking a device cuts it off in the same transaction", asy
 // ---------------------------------------------------------------------------------------------
 // vault-admin key, history, events, activation delay (SECURITY-REVIEW H1, M4)
 
-test("destructive routes need the vault-admin signature that only a VK holder can make", async ({ request }) => {
+test("destructive routes need the vault-admin signature that only a VK holder can make", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.1" });
   const before = await snapshot(api, a);
   const victim = await newDevice("planted");
@@ -639,10 +831,28 @@ test("destructive routes need the vault-admin signature that only a VK holder ca
   const junk = await rotation(before);
   const attempts: [string, () => Promise<APIResponse>][] = [
     ["rotate", () => api.call(a, "POST", "/v1/rotate", { json: junk.body, admin: false })],
-    ["approve a device", () => api.call(a, "POST", "/v1/devices", { json: { ...victim.registration(), epoch }, admin: false })],
+    [
+      "approve a device",
+      () =>
+        api.call(a, "POST", "/v1/devices", {
+          json: { ...victim.registration(), epoch },
+          admin: false,
+        }),
+    ],
     ["revoke a device", () => api.call(a, "DELETE", `/v1/devices/${c.id}`, { admin: false })],
-    ["replace the recovery key", () => api.call(a, "POST", "/v1/recovery/rotate", {
-      json: { recovery_pubkey: recovery.pub, recovery_enc_pubkey: recoveryEncPub, recovery_envelope: b64u(randomBytes(60)), epoch }, admin: false })],
+    [
+      "replace the recovery key",
+      () =>
+        api.call(a, "POST", "/v1/recovery/rotate", {
+          json: {
+            recovery_pubkey: recovery.pub,
+            recovery_enc_pubkey: recoveryEncPub,
+            recovery_envelope: b64u(randomBytes(60)),
+            epoch,
+          },
+          admin: false,
+        }),
+    ],
   ];
   for (const [label, go] of attempts) {
     const res = await go();
@@ -652,12 +862,19 @@ test("destructive routes need the vault-admin signature that only a VK holder ca
   // A wrong key is no better, and a signature lifted from another request does not transfer
   // (it covers the method, path, body hash, timestamp and single-use nonce, and the signing device).
   const stranger = await newAdminKey();
-  expect((await api.call(a, "POST", "/v1/rotate", { json: junk.body, admin: stranger })).status()).toBe(403);
-  const real = await prepare(a, "POST", "/v1/devices", { json: { ...victim.registration(), epoch } });
+  expect(
+    (await api.call(a, "POST", "/v1/rotate", { json: junk.body, admin: stranger })).status(),
+  ).toBe(403);
+  const real = await prepare(a, "POST", "/v1/devices", {
+    json: { ...victim.registration(), epoch },
+  });
   const lifted = await prepare(a, "DELETE", `/v1/devices/${c.id}`, { admin: false });
   lifted.headers["X-Bisel-Admin"] = real.headers["X-Bisel-Admin"]!;
   expect((await api.send(lifted)).status(), "signature from another request").toBe(403);
-  const asC = await prepare(c, "POST", "/v1/devices", { json: { ...victim.registration(), epoch }, admin: false });
+  const asC = await prepare(c, "POST", "/v1/devices", {
+    json: { ...victim.registration(), epoch },
+    admin: false,
+  });
   asC.headers["X-Bisel-Admin"] = real.headers["X-Bisel-Admin"]!;
   expect((await api.send(asC)).status(), "signature replayed by another device").toBe(403);
 
@@ -677,14 +894,23 @@ test("destructive routes need the vault-admin signature that only a VK holder ca
   rot.adopt();
   epoch += 1;
   headSeq = (await snapshot(api, a)).headSeq;
-  const late = await api.call(a, "POST", "/v1/devices", { json: { ...victim.registration(), epoch }, admin: oldKey });
+  const late = await api.call(a, "POST", "/v1/devices", {
+    json: { ...victim.registration(), epoch },
+    admin: oldKey,
+  });
   expect(late.status(), "the rotated-away admin key").toBe(403);
-  expect((await api.call(a, "POST", "/v1/devices", { json: { ...victim.registration(), epoch } })).status()).toBe(201);
+  expect(
+    (
+      await api.call(a, "POST", "/v1/devices", { json: { ...victim.registration(), epoch } })
+    ).status(),
+  ).toBe(201);
   // (and the planted device is revoked again right away, so later tests see the same two active devices)
   expect((await api.call(a, "DELETE", `/v1/devices/${victim.id}`)).status()).toBe(200);
 });
 
-test("the vault manifest can only be written with the vault-admin signature", async ({ request }) => {
+test("the vault manifest can only be written with the vault-admin signature", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.3" });
   const path = `/v1/items/${MANIFEST_ID}`;
   const before = await snapshot(api, a);
@@ -693,8 +919,16 @@ test("the vault manifest can only be written with the vault-admin signature", as
   const put = await api.call(a, "PUT", path, { json: putBody(0, blob()), admin: false });
   expect(put.status()).toBe(403);
   expect(await json(put)).toEqual({ error: "admin_signature_required" });
-  expect((await api.call(a, "DELETE", path, { query: { base_rev: 1 }, json: del(), admin: false })).status()).toBe(403);
-  expect((await api.call(a, "PUT", path, { json: putBody(0, blob()), admin: await newAdminKey() })).status()).toBe(403);
+  expect(
+    (
+      await api.call(a, "DELETE", path, { query: { base_rev: 1 }, json: del(), admin: false })
+    ).status(),
+  ).toBe(403);
+  expect(
+    (
+      await api.call(a, "PUT", path, { json: putBody(0, blob()), admin: await newAdminKey() })
+    ).status(),
+  ).toBe(403);
   expect((await snapshot(api, a)).headSeq).toBe(before.headSeq);
 
   // The VK holder can; an ordinary item still needs no second signature.
@@ -702,20 +936,45 @@ test("the vault manifest can only be written with the vault-admin signature", as
   expect(ok.status()).toBe(200);
   expect((await json(ok)).item.rev).toBe(1);
   const plain = randomId();
-  expect((await api.call(a, "PUT", `/v1/items/${plain}`, { json: putBody(0, blob()), admin: false })).status()).toBe(200);
-  expect((await api.call(a, "DELETE", `/v1/items/${plain}`, { query: { base_rev: 1 }, json: del(), admin: false })).status()).toBe(200);
+  expect(
+    (
+      await api.call(a, "PUT", `/v1/items/${plain}`, { json: putBody(0, blob()), admin: false })
+    ).status(),
+  ).toBe(200);
+  expect(
+    (
+      await api.call(a, "DELETE", `/v1/items/${plain}`, {
+        query: { base_rev: 1 },
+        json: del(),
+        admin: false,
+      })
+    ).status(),
+  ).toBe(200);
   headSeq = (await snapshot(api, a)).headSeq;
 });
 
-test("overwritten and deleted items stay recoverable server-side, a rotation keeps no key history; events tell every device what happened", async ({ request }) => {
+test("overwritten and deleted items stay recoverable server-side, a rotation keeps no key history; events tell every device what happened", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.2" });
   const id = randomId();
-  const v1 = blob(700), v2 = blob(700);
-  expect((await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(0, v1) })).status()).toBe(200);
-  expect((await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(1, v2) })).status()).toBe(200);
+  const v1 = blob(700),
+    v2 = blob(700);
+  expect((await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(0, v1) })).status()).toBe(
+    200,
+  );
+  expect((await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(1, v2) })).status()).toBe(
+    200,
+  );
   // A rejected write leaves no history.
-  expect((await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(1, blob()) })).status()).toBe(409);
-  expect((await api.call(a, "DELETE", `/v1/items/${id}`, { query: { base_rev: 2 }, json: del() })).status()).toBe(200);
+  expect((await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(1, blob()) })).status()).toBe(
+    409,
+  );
+  expect(
+    (
+      await api.call(a, "DELETE", `/v1/items/${id}`, { query: { base_rev: 2 }, json: del() })
+    ).status(),
+  ).toBe(200);
 
   const history = await json(await api.call(c, "GET", "/v1/history", { query: { id } }));
   expect(history.entries.map((e: any) => [e.kind, e.rev, e.blob])).toEqual([
@@ -723,8 +982,12 @@ test("overwritten and deleted items stay recoverable server-side, a rotation kee
     ["overwrite", 2, v2],
   ]);
   // Resurrecting over a tombstone records the tombstone too.
-  expect((await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(3, blob()) })).status()).toBe(200);
-  const again = await json(await api.call(a, "GET", "/v1/history", { query: { id, after: history.entries.at(-1).id } }));
+  expect((await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(3, blob()) })).status()).toBe(
+    200,
+  );
+  const again = await json(
+    await api.call(a, "GET", "/v1/history", { query: { id, after: history.entries.at(-1).id } }),
+  );
   expect(again.entries.map((e: any) => [e.kind, e.rev, e.deleted])).toEqual([["delete", 3, 1]]);
 
   // A rotation keeps no history of its own: the old wrapped item keys would let an old-key holder open the current payloads.
@@ -744,14 +1007,32 @@ test("overwritten and deleted items stay recoverable server-side, a rotation kee
   expect(types).toContain("recovery");
   expect(types.indexOf("bootstrap")).toBeLessThan(types.indexOf("rotate"));
   const lastId = sync.events.at(-1).id;
-  expect((await json(await api.call(a, "GET", "/v1/sync", { query: { since: headSeq, events_since: lastId } }))).events).toEqual([]);
-  expect((await json(await api.call(a, "GET", "/v1/sync", { query: { since: headSeq, events_since: lastId - 2 } }))).events).toHaveLength(2);
+  expect(
+    (
+      await json(
+        await api.call(a, "GET", "/v1/sync", { query: { since: headSeq, events_since: lastId } }),
+      )
+    ).events,
+  ).toEqual([]);
+  expect(
+    (
+      await json(
+        await api.call(a, "GET", "/v1/sync", {
+          query: { since: headSeq, events_since: lastId - 2 },
+        }),
+      )
+    ).events,
+  ).toHaveLength(2);
 });
 
-test("a device registered through the recovery key is held back, visible, and cancellable", async ({ request }) => {
+test("a device registered through the recovery key is held back, visible, and cancellable", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.3" });
   const thief = await newDevice("phrase-holder");
-  const reg = await api.call(recovery, "POST", "/v1/recovery/session", { json: { device: thief.registration(), epoch } });
+  const reg = await api.call(recovery, "POST", "/v1/recovery/session", {
+    json: { device: thief.registration(), epoch },
+  });
   expect(reg.status()).toBe(200);
   const activatesAt = (await json(reg)).device.activates_at;
   expect(activatesAt).toBeGreaterThan(Math.floor(Date.now() / 1000) - 1);
@@ -767,56 +1048,98 @@ test("a device registered through the recovery key is held back, visible, and ca
   // The owner cancels it by revoking (this needs the admin signature, so the phrase holder cannot cancel the cancellation).
   expect((await api.call(a, "DELETE", `/v1/devices/${thief.id}`)).status()).toBe(200);
   await new Promise((r) => setTimeout(r, 2200));
-  expect((await api.call(thief, "GET", "/v1/sync")).status(), "still refused after the delay: it was revoked").toBe(404);
+  expect(
+    (await api.call(thief, "GET", "/v1/sync")).status(),
+    "still refused after the delay: it was revoked",
+  ).toBe(404);
 });
 
-test("a leaked recovery phrase cannot bury the owner: pending devices are capped and reading the envelope logs once", async ({ request }) => {
+test("a leaked recovery phrase cannot bury the owner: pending devices are capped and reading the envelope logs once", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.5" });
   const planted: TestDevice[] = [];
   for (let i = 0; i < 3; i++) {
     const d = await newDevice(`planted-${i}`);
-    expect((await api.call(recovery, "POST", "/v1/recovery/session", { json: { device: d.registration(), epoch } })).status()).toBe(200);
+    expect(
+      (
+        await api.call(recovery, "POST", "/v1/recovery/session", {
+          json: { device: d.registration(), epoch },
+        })
+      ).status(),
+    ).toBe(200);
     planted.push(d);
   }
   const extra = await newDevice("planted-extra");
-  const refused = await api.call(recovery, "POST", "/v1/recovery/session", { json: { device: extra.registration(), epoch } });
+  const refused = await api.call(recovery, "POST", "/v1/recovery/session", {
+    json: { device: extra.registration(), epoch },
+  });
   expect(refused.status()).toBe(409);
   expect(await json(refused)).toEqual({ error: "too_many_devices" });
 
   // Reading the envelope several times in a row leaves one event, not one per call.
-  const countEvents = async () => (await json(await api.call(a, "GET", "/v1/sync"))).events.filter((e: any) => e.type === "recovery" && e.subject_id === null).length;
+  const countEvents = async () =>
+    (await json(await api.call(a, "GET", "/v1/sync"))).events.filter(
+      (e: any) => e.type === "recovery" && e.subject_id === null,
+    ).length;
   const before = await countEvents();
-  for (let i = 0; i < 3; i++) expect((await api.call(recovery, "POST", "/v1/recovery/session")).status()).toBe(200);
+  for (let i = 0; i < 3; i++)
+    expect((await api.call(recovery, "POST", "/v1/recovery/session")).status()).toBe(200);
   expect((await countEvents()) - before).toBeLessThanOrEqual(1);
 
   // The owner clears them (admin-signed), after which registration works again.
-  for (const d of planted) expect((await api.call(a, "DELETE", `/v1/devices/${d.id}`)).status()).toBe(200);
+  for (const d of planted)
+    expect((await api.call(a, "DELETE", `/v1/devices/${d.id}`)).status()).toBe(200);
   const again = await newDevice("planted-after");
-  expect((await api.call(recovery, "POST", "/v1/recovery/session", { json: { device: again.registration(), epoch } })).status()).toBe(200);
+  expect(
+    (
+      await api.call(recovery, "POST", "/v1/recovery/session", {
+        json: { device: again.registration(), epoch },
+      })
+    ).status(),
+  ).toBe(200);
   expect((await api.call(a, "DELETE", `/v1/devices/${again.id}`)).status()).toBe(200);
 });
 
-test("a blob too short to be a sealed item is refused (it would stall every rotation)", async ({ request }) => {
+test("a blob too short to be a sealed item is refused (it would stall every rotation)", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.6" });
   const id = randomId();
-  const short = await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(0, b64u(randomBytes(87))) });
+  const short = await api.call(a, "PUT", `/v1/items/${id}`, {
+    json: putBody(0, b64u(randomBytes(87))),
+  });
   expect(short.status()).toBe(400);
   expect(await json(short)).toMatchObject({ error: "invalid_blob" });
-  const ok = await api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(0, b64u(randomBytes(88))) });
+  const ok = await api.call(a, "PUT", `/v1/items/${id}`, {
+    json: putBody(0, b64u(randomBytes(88))),
+  });
   expect(ok.status()).toBe(200);
-  expect((await api.call(a, "DELETE", `/v1/items/${id}`, { query: { base_rev: 1 }, json: del() })).status()).toBe(200);
+  expect(
+    (
+      await api.call(a, "DELETE", `/v1/items/${id}`, { query: { base_rev: 1 }, json: del() })
+    ).status(),
+  ).toBe(200);
   headSeq = (await snapshot(api, a)).headSeq;
 });
 
 test("device names cannot carry control or bidi characters", async ({ request }) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.5.0.4" });
-  for (const name of ["evil\u0000name", "mac\u202Ebook", "line\nbreak", "para\u2029sep", "\u200Bzero-width"]) {
+  for (const name of [
+    "evil\u0000name",
+    "mac\u202Ebook",
+    "line\nbreak",
+    "para\u2029sep",
+    "\u200Bzero-width",
+  ]) {
     const d = await newDevice(name);
     const res = await api.call(a, "POST", "/v1/devices", { json: { ...d.registration(), epoch } });
     expect(res.status(), JSON.stringify(name)).toBe(400);
   }
   const ok = await newDevice("Rodrigo's MacBook Pro (Büro) 💻");
-  expect((await api.call(a, "POST", "/v1/devices", { json: { ...ok.registration(), epoch } })).status()).toBe(201);
+  expect(
+    (await api.call(a, "POST", "/v1/devices", { json: { ...ok.registration(), epoch } })).status(),
+  ).toBe(201);
   expect((await api.call(a, "DELETE", `/v1/devices/${ok.id}`)).status()).toBe(200);
 });
 
@@ -827,64 +1150,148 @@ test("every body and query is validated strictly", async ({ request }) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.4.0.1" });
   const id = randomId();
   const cases: [string, Promise<APIResponse>, number][] = [
-    ["unknown field in PUT body", api.call(a, "PUT", `/v1/items/${id}`, { json: { ...putBody(0, blob()), admin: true } }), 400],
-    ["missing epoch in PUT body", api.call(a, "PUT", `/v1/items/${id}`, { json: { base_rev: 0, blob: blob() } }), 400],
-    ["negative base_rev", api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(-1, blob()) }), 400],
+    [
+      "unknown field in PUT body",
+      api.call(a, "PUT", `/v1/items/${id}`, { json: { ...putBody(0, blob()), admin: true } }),
+      400,
+    ],
+    [
+      "missing epoch in PUT body",
+      api.call(a, "PUT", `/v1/items/${id}`, { json: { base_rev: 0, blob: blob() } }),
+      400,
+    ],
+    [
+      "negative base_rev",
+      api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(-1, blob()) }),
+      400,
+    ],
     ["float epoch", api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(0, blob(), 1.5) }), 400],
-    ["padded blob", api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(0, blob(50) + "==") }), 400],
-    ["non-JSON body", api.call(a, "PUT", `/v1/items/${id}`, { rawBody: Buffer.from("not json") }), 400],
+    [
+      "padded blob",
+      api.call(a, "PUT", `/v1/items/${id}`, { json: putBody(0, blob(50) + "==") }),
+      400,
+    ],
+    [
+      "non-JSON body",
+      api.call(a, "PUT", `/v1/items/${id}`, { rawBody: Buffer.from("not json") }),
+      400,
+    ],
     ["JSON array body", api.call(a, "PUT", `/v1/items/${id}`, { json: [] }), 400],
-    ["__proto__ key", api.call(a, "PUT", `/v1/items/${id}`, { rawBody: Buffer.from(`{"__proto__":{"x":1},"base_rev":0,"epoch":${epoch},"blob":"AAAA"}`) }), 400],
+    [
+      "__proto__ key",
+      api.call(a, "PUT", `/v1/items/${id}`, {
+        rawBody: Buffer.from(`{"__proto__":{"x":1},"base_rev":0,"epoch":${epoch},"blob":"AAAA"}`),
+      }),
+      400,
+    ],
     ["bad item id", api.call(a, "PUT", "/v1/items/short", { json: putBody(0, blob()) }), 400],
-    ["query on a PUT", api.call(a, "PUT", `/v1/items/${id}`, { query: { x: 1 }, json: putBody(0, blob()) }), 400],
+    [
+      "query on a PUT",
+      api.call(a, "PUT", `/v1/items/${id}`, { query: { x: 1 }, json: putBody(0, blob()) }),
+      400,
+    ],
     ["unknown sync param", api.call(a, "GET", "/v1/sync", { query: { since: 0, debug: 1 } }), 400],
     ["non-numeric since", api.call(a, "GET", "/v1/sync", { query: { since: "abc" } }), 400],
     ["limit 0", api.call(a, "GET", "/v1/sync", { query: { limit: 0 } }), 400],
     ["limit 501", api.call(a, "GET", "/v1/sync", { query: { limit: 501 } }), 400],
     ["body on GET", api.call(a, "GET", "/v1/sync", { json: {} }), 400],
-    ["body on DELETE device", api.call(a, "DELETE", `/v1/devices/${randomId()}`, { json: {} }), 400],
+    [
+      "body on DELETE device",
+      api.call(a, "DELETE", `/v1/devices/${randomId()}`, { json: {} }),
+      400,
+    ],
     ["delete without base_rev", api.call(a, "DELETE", `/v1/items/${id}`, { json: del() }), 400],
-    ["delete without a marker", api.call(a, "DELETE", `/v1/items/${id}`, { query: { base_rev: 1 } }), 400],
-    ["delete with an empty marker", api.call(a, "DELETE", `/v1/items/${id}`, { query: { base_rev: 1 }, json: { epoch, marker: "" } }), 400],
-    ["device with extra field", api.call(a, "POST", "/v1/devices", { json: { ...(await newDevice("x")).registration(), epoch, role: "admin" } }), 400],
-    ["device name too long", api.call(a, "POST", "/v1/devices", { json: { ...(await newDevice("x".repeat(101))).registration(), epoch } }), 400],
+    [
+      "delete without a marker",
+      api.call(a, "DELETE", `/v1/items/${id}`, { query: { base_rev: 1 } }),
+      400,
+    ],
+    [
+      "delete with an empty marker",
+      api.call(a, "DELETE", `/v1/items/${id}`, {
+        query: { base_rev: 1 },
+        json: { epoch, marker: "" },
+      }),
+      400,
+    ],
+    [
+      "device with extra field",
+      api.call(a, "POST", "/v1/devices", {
+        json: { ...(await newDevice("x")).registration(), epoch, role: "admin" },
+      }),
+      400,
+    ],
+    [
+      "device name too long",
+      api.call(a, "POST", "/v1/devices", {
+        json: { ...(await newDevice("x".repeat(101))).registration(), epoch },
+      }),
+      400,
+    ],
   ];
   for (const [label, res, status] of cases) expect((await res).status(), label).toBe(status);
 
   // A repeated query parameter is ambiguous, so it is refused rather than guessed at.
   const dup = await prepare(a, "GET", "/v1/sync", { query: { since: 0 } });
-  const dupRes = await api.api.fetch("/v1/sync?since=0&since=1", { headers: { ...dup.headers, "CF-Connecting-IP": "10.4.0.1" } });
+  const dupRes = await api.api.fetch("/v1/sync?since=0&since=1", {
+    headers: { ...dup.headers, "CF-Connecting-IP": "10.4.0.1" },
+  });
   expect(dupRes.status()).toBe(404); // the signature covers one `since`; a smuggled second one fails authentication
 });
 
-test("body size limits: over 4 MiB is the bare 404; per-route limits answer the owner with 413", async ({ request }) => {
+test("body size limits: over 4 MiB is the bare 404; per-route limits answer the owner with 413", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.4.0.2" });
-  const huge = await api.call(a, "PUT", `/v1/items/${randomId()}`, { rawBody: Buffer.alloc(4 * 1024 * 1024 + 1, 0x61) });
+  const huge = await api.call(a, "PUT", `/v1/items/${randomId()}`, {
+    rawBody: Buffer.alloc(4 * 1024 * 1024 + 1, 0x61),
+  });
   expect(huge.status()).toBe(404);
   expect(await huge.text()).toBe("");
 
-  const bigDevice = await api.call(a, "POST", "/v1/devices", { rawBody: Buffer.alloc(40 * 1024, 0x20) });
+  const bigDevice = await api.call(a, "POST", "/v1/devices", {
+    rawBody: Buffer.alloc(40 * 1024, 0x20),
+  });
   expect(bigDevice.status()).toBe(413);
-  const bigItem = await api.call(a, "PUT", `/v1/items/${randomId()}`, { rawBody: Buffer.alloc(401 * 1024, 0x20) });
+  const bigItem = await api.call(a, "PUT", `/v1/items/${randomId()}`, {
+    rawBody: Buffer.alloc(401 * 1024, 0x20),
+  });
   expect(bigItem.status()).toBe(413);
   expect(await json(bigItem)).toMatchObject({ error: "too_large" });
 });
 
-test("unknown routes, wrong methods and every kind of auth failure look identical, headers included", async ({ request }) => {
+test("unknown routes, wrong methods and every kind of auth failure look identical, headers included", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.4.0.3" });
   const stranger = await newDevice("stranger");
   const responses: Record<string, APIResponse> = {
     unknownRoute: await api.api.fetch("/v1/nope", { headers: { "CF-Connecting-IP": "10.4.0.3" } }),
     // "/" is the dashboard's static page now; the dashboard API's unknown paths still look like any other unknown route.
-    unknownApiRoute: await api.api.fetch("/api/nope", { headers: { "CF-Connecting-IP": "10.4.0.3" } }),
-    wrongMethodOnRealRoute: await api.api.fetch("/v1/sync", { method: "POST", headers: { "CF-Connecting-IP": "10.4.0.3" } }),
-    options: await api.api.fetch("/v1/items/" + randomId(), { method: "OPTIONS", headers: { "CF-Connecting-IP": "10.4.0.3" } }),
+    unknownApiRoute: await api.api.fetch("/api/nope", {
+      headers: { "CF-Connecting-IP": "10.4.0.3" },
+    }),
+    wrongMethodOnRealRoute: await api.api.fetch("/v1/sync", {
+      method: "POST",
+      headers: { "CF-Connecting-IP": "10.4.0.3" },
+    }),
+    options: await api.api.fetch("/v1/items/" + randomId(), {
+      method: "OPTIONS",
+      headers: { "CF-Connecting-IP": "10.4.0.3" },
+    }),
     badSignatureRealRoute: await api.call({ ...stranger, id: a.id }, "GET", "/v1/sync"),
     badSignatureUnknownRoute: await api.call({ ...stranger, id: a.id }, "GET", "/v1/nope"),
     validSignatureUnknownRoute: await api.call(a, "GET", "/v1/nope"),
     validSignatureWrongMethod: await api.call(a, "POST", "/v1/sync"),
-    bootstrapGet: await api.api.fetch("/v1/bootstrap", { headers: { "CF-Connecting-IP": "10.4.0.3" } }),
-    bootstrapWrongToken: await api.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": "wrong" }, {}),
+    bootstrapGet: await api.api.fetch("/v1/bootstrap", {
+      headers: { "CF-Connecting-IP": "10.4.0.3" },
+    }),
+    bootstrapWrongToken: await api.raw(
+      "POST",
+      "/v1/bootstrap",
+      { "X-Bisel-Bootstrap": "wrong" },
+      {},
+    ),
     // The right recovery key, aimed at a box that does not exist: nothing may tell it from a wrong key.
     recoveryUnknownBox: await (async () => {
       const keep = boxState.id;
@@ -895,7 +1302,11 @@ test("unknown routes, wrong methods and every kind of auth failure look identica
         boxState.id = keep;
       }
     })(),
-    recoveryWrongKey: await api.call(await recoveryKeyFromSeed(randomBytes(32)), "POST", "/v1/recovery/session"),
+    recoveryWrongKey: await api.call(
+      await recoveryKeyFromSeed(randomBytes(32)),
+      "POST",
+      "/v1/recovery/session",
+    ),
   };
   const reference = await fingerprint(responses.unknownRoute!);
   expect(reference.status).toBe(404);
@@ -906,8 +1317,18 @@ test("unknown routes, wrong methods and every kind of auth failure look identica
   }
 
   // HEAD has no body by definition, so it is compared with a HEAD to a route that does not exist.
-  const headReal = await fingerprint(await api.api.fetch("/v1/sync", { method: "HEAD", headers: { "CF-Connecting-IP": "10.4.0.3" } }));
-  const headFake = await fingerprint(await api.api.fetch("/v1/nope", { method: "HEAD", headers: { "CF-Connecting-IP": "10.4.0.3" } }));
+  const headReal = await fingerprint(
+    await api.api.fetch("/v1/sync", {
+      method: "HEAD",
+      headers: { "CF-Connecting-IP": "10.4.0.3" },
+    }),
+  );
+  const headFake = await fingerprint(
+    await api.api.fetch("/v1/nope", {
+      method: "HEAD",
+      headers: { "CF-Connecting-IP": "10.4.0.3" },
+    }),
+  );
   expect(headReal.status).toBe(404);
   expect(headReal).toEqual(headFake);
 
@@ -930,7 +1351,9 @@ test("unknown routes, wrong methods and every kind of auth failure look identica
   expect(ok.headers()["x-content-type-options"]).toBe("nosniff");
 });
 
-test("failed-auth backoff: it slows the offender, never locks out a valid signature", async ({ request }) => {
+test("failed-auth backoff: it slows the offender, never locks out a valid signature", async ({
+  request,
+}) => {
   const attacker = new Bisel(request, { "CF-Connecting-IP": "10.66.0.1" });
   const elsewhere = new Bisel(request, { "CF-Connecting-IP": "10.66.0.2" });
   const stranger = await newDevice("stranger");
@@ -943,7 +1366,8 @@ test("failed-auth backoff: it slows the offender, never locks out a valid signat
   expect((await attacker.call(a, "GET", "/v1/sync")).status()).toBe(200);
 
   // The first 19 failures are answered at full speed.
-  for (let i = 0; i < 19; i++) expect((await attacker.call({ ...stranger, id: a.id }, "GET", "/v1/sync")).status()).toBe(404);
+  for (let i = 0; i < 19; i++)
+    expect((await attacker.call({ ...stranger, id: a.id }, "GET", "/v1/sync")).status()).toBe(404);
 
   // From the 20th on, failing requests from this address are delayed (AUTH_BACKOFF_MS=400 in the test server) ...
   for (let i = 0; i < 3; i++) {
@@ -969,14 +1393,20 @@ test("failed-auth backoff: it slows the offender, never locks out a valid signat
   expect((await elsewhere.call(a, "GET", "/v1/sync")).status()).toBe(200);
 
   // A correct bootstrap token is not delayed either (an empty body is just refused as invalid).
-  const refused = await timed(() => attacker.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, {}));
+  const refused = await timed(() =>
+    attacker.raw("POST", "/v1/bootstrap", { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN }, {}),
+  );
   expect(refused.status).toBe(400);
   expect(refused.ms).toBeLessThan(350);
 });
 
-test("/healthz answers a bare 200 to anyone, and nothing else about the service", async ({ request }) => {
+test("/healthz answers a bare 200 to anyone, and nothing else about the service", async ({
+  request,
+}) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.70.0.1" });
-  const ok = await fingerprint(await api.api.fetch("/healthz", { headers: { "CF-Connecting-IP": "10.70.0.1" } }));
+  const ok = await fingerprint(
+    await api.api.fetch("/healthz", { headers: { "CF-Connecting-IP": "10.70.0.1" } }),
+  );
   expect(ok.status).toBe(200);
   expect(ok.body).toBe("");
   const h = Object.fromEntries(ok.headers);
@@ -986,19 +1416,38 @@ test("/healthz answers a bare 200 to anyone, and nothing else about the service"
   expect(h["server"]).toBeUndefined();
 
   // Only GET and HEAD exist; any other method is the usual bare 404.
-  const head = await api.api.fetch("/healthz", { method: "HEAD", headers: { "CF-Connecting-IP": "10.70.0.1" } });
+  const head = await api.api.fetch("/healthz", {
+    method: "HEAD",
+    headers: { "CF-Connecting-IP": "10.70.0.1" },
+  });
   expect(head.status()).toBe(200);
-  const post = await fingerprint(await api.api.fetch("/healthz", { method: "POST", headers: { "CF-Connecting-IP": "10.70.0.1" } }));
-  const unknown = await fingerprint(await api.api.fetch("/v1/nope", { headers: { "CF-Connecting-IP": "10.70.0.1" } }));
+  const post = await fingerprint(
+    await api.api.fetch("/healthz", {
+      method: "POST",
+      headers: { "CF-Connecting-IP": "10.70.0.1" },
+    }),
+  );
+  const unknown = await fingerprint(
+    await api.api.fetch("/v1/nope", { headers: { "CF-Connecting-IP": "10.70.0.1" } }),
+  );
   expect(post).toEqual(unknown);
 
   // No CORS, ever: a browser origin gets nothing it could read.
-  const cors = await api.api.fetch("/v1/sync", { method: "OPTIONS", headers: { "CF-Connecting-IP": "10.70.0.1", Origin: "https://evil.example", "Access-Control-Request-Method": "GET" } });
+  const cors = await api.api.fetch("/v1/sync", {
+    method: "OPTIONS",
+    headers: {
+      "CF-Connecting-IP": "10.70.0.1",
+      Origin: "https://evil.example",
+      "Access-Control-Request-Method": "GET",
+    },
+  });
   expect(cors.status()).toBe(404);
   expect(Object.keys(cors.headers()).filter((k) => k.startsWith("access-control-"))).toEqual([]);
 });
 
-test("per-address flood limit: a flood from one address gets a bare 429, other addresses and the owner are untouched", async ({ request }) => {
+test("per-address flood limit: a flood from one address gets a bare 429, other addresses and the owner are untouched", async ({
+  request,
+}) => {
   const flooder = { "CF-Connecting-IP": "10.77.0.1" };
   let limitedAt = -1;
   let limited: APIResponse | undefined;
@@ -1014,12 +1463,17 @@ test("per-address flood limit: a flood from one address gets a bare 429, other a
   expect(limitedAt).toBeLessThanOrEqual(300);
   expect((await limited!.body()).length).toBe(0);
   expect(limited!.headers()["retry-after"]).toBe("10");
-  expect(limited!.headers()["x-content-type-options"], "hardening headers survive the refusal").toBe("nosniff");
+  expect(
+    limited!.headers()["x-content-type-options"],
+    "hardening headers survive the refusal",
+  ).toBe("nosniff");
 
   // The same address stays limited on every route (that is what a flood limit is for).
   expect((await request.fetch("/v1/nope", { headers: flooder })).status()).toBe(429);
   // Another address is not affected.
-  expect((await request.fetch("/healthz", { headers: { "CF-Connecting-IP": "10.77.0.2" } })).status()).toBe(200);
+  expect(
+    (await request.fetch("/healthz", { headers: { "CF-Connecting-IP": "10.77.0.2" } })).status(),
+  ).toBe(200);
   const owner = new Bisel(request, { "CF-Connecting-IP": "10.77.0.3" });
   expect((await owner.call(a, "GET", "/v1/sync")).status()).toBe(200);
 });

@@ -109,10 +109,10 @@ METHOD \n PATH \n SORTED_QUERY \n SHA256_HEX(body) \n TS \n NONCE
 
 Algorithms:
 
-| Who | `X-Bisel-Device` | Algorithm | Signature bytes |
-|-----|------------------|-----------|-----------------|
-| Registered device | its device id | ECDSA P-256 over SHA-256 of the string | **raw `r \|\| s`, 64 bytes** (CryptoKit `ECDSASignature.rawRepresentation`; NOT DER) |
-| Recovery key | `recovery` | Ed25519 over the string bytes (pure Ed25519, no prehash) | 64 bytes (CryptoKit `signature(for:)`) |
+| Who               | `X-Bisel-Device` | Algorithm                                                | Signature bytes                                                                      |
+| ----------------- | ---------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Registered device | its device id    | ECDSA P-256 over SHA-256 of the string                   | **raw `r \|\| s`, 64 bytes** (CryptoKit `ECDSASignature.rawRepresentation`; NOT DER) |
+| Recovery key      | `recovery`       | Ed25519 over the string bytes (pure Ed25519, no prehash) | 64 bytes (CryptoKit `signature(for:)`)                                               |
 
 CryptoKit: `try key.signature(for: Data(signedString.utf8)).rawRepresentation` for P-256 (it hashes with
 SHA-256 itself; Secure Enclave keys work the same way). Do not pre-hash.
@@ -152,22 +152,22 @@ Because the canonical string includes the nonce and body hash, a signature canno
 
 Once a request is authenticated, failures carry a JSON body `{"error": "<code>", ...}`:
 
-| Status | `error` | When |
-|--------|---------|------|
-| 400 | `invalid_request` / `invalid_json` / `invalid_query` / `invalid_id` / `invalid_key` | bad body, query, id, or public key |
-| 404 | `not_found` | item or device id unknown (has a JSON body; auth failures have none) |
-| 409 | `conflict` | stale `base_rev`; body `{"error":"conflict","current": <item record or null>}`. For `/v1/rotate`: `{"error":"conflict","epoch","head_seq"}`, nothing was changed |
-| 403 | `admin_signature_required` | destructive route without a valid vault-admin signature |
-| 409 | `stale_epoch` | key material built for an older vault-key epoch; body has the current `epoch` |
-| 409 | `exists` | device id already registered |
-| 413 | `too_large` | blob over 256 KiB, or a body over the route's cap |
-| 500 | `internal` | server bug |
+| Status | `error`                                                                             | When                                                                                                                                                             |
+| ------ | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | `invalid_request` / `invalid_json` / `invalid_query` / `invalid_id` / `invalid_key` | bad body, query, id, or public key                                                                                                                               |
+| 404    | `not_found`                                                                         | item or device id unknown (has a JSON body; auth failures have none)                                                                                             |
+| 409    | `conflict`                                                                          | stale `base_rev`; body `{"error":"conflict","current": <item record or null>}`. For `/v1/rotate`: `{"error":"conflict","epoch","head_seq"}`, nothing was changed |
+| 403    | `admin_signature_required`                                                          | destructive route without a valid vault-admin signature                                                                                                          |
+| 409    | `stale_epoch`                                                                       | key material built for an older vault-key epoch; body has the current `epoch`                                                                                    |
+| 409    | `exists`                                                                            | device id already registered                                                                                                                                     |
+| 413    | `too_large`                                                                         | blob over 256 KiB, or a body over the route's cap                                                                                                                |
+| 500    | `internal`                                                                          | server bug                                                                                                                                                       |
 
 ### Failed-auth backoff
 
 A valid signature is **never refused because of failures**, so the owner cannot be locked out by anyone sharing an address.
 After `AUTH_FAIL_LIMIT` (20) failed attempts from one `CF-Connecting-IP` inside `AUTH_FAIL_WINDOW_SECONDS` (600), further
-*failing* requests from that address are answered `AUTH_BACKOFF_MS` (1000 ms, plus up to 25 % jitter) late and cause no more D1
+_failing_ requests from that address are answered `AUTH_BACKOFF_MS` (1000 ms, plus up to 25 % jitter) late and cause no more D1
 writes (the counter stops at the limit; at most 20 000 addresses are tracked). Unknown routes, bad signatures, unknown devices and bad
 bootstrap tokens are all treated alike, and an authentication failure is always the same empty 404. Local test hook:
 `CF-Connecting-IP` is client-settable under `wrangler dev` (Cloudflare overwrites it in production).
@@ -196,8 +196,12 @@ an already-bootstrapped server all return the uniform 404.
 ```json
 {
   "device": {
-    "id": "<device id>", "name": "Rodrigo's MacBook", "kind": "mac",
-    "sig_pubkey": "<P-256 X9.63 65B>", "enc_pubkey": "<P-256 X9.63 65B>", "envelope": "<device envelope>"
+    "id": "<device id>",
+    "name": "Rodrigo's MacBook",
+    "kind": "mac",
+    "sig_pubkey": "<P-256 X9.63 65B>",
+    "enc_pubkey": "<P-256 X9.63 65B>",
+    "envelope": "<device envelope>"
   },
   "recovery_pubkey": "<Ed25519 raw 32B>",
   "recovery_enc_pubkey": "<X25519 raw 32B>",
@@ -205,6 +209,7 @@ an already-bootstrapped server all return the uniform 404.
   "admin_pubkey": "<Ed25519 raw 32B, derived from VK>"
 }
 ```
+
 `kind` is a free tag `^[a-z0-9_-]{1,32}$` (`mac`, `iphone`, ...). Response `201 {"device_id","head_seq":0,"epoch":1}`.
 The server imports both public keys, so a malformed key gives `400 invalid_key` (only after the token matched).
 
@@ -222,12 +227,14 @@ The server imports both public keys, so a malformed key gives `400 invalid_key` 
   "recovery": { "alg": "ed25519", "pubkey": "...", "enc_pubkey": "...", "envelope": "..." }   // for .bisel-backup files and rotation
 }
 ```
+
 `seq` is gapless: every successful write takes exactly `head_seq + 1`. A rejected write consumes no seq.
 Page until `has_more` is false.
 
 ### PUT /v1/items/:id
 
 Body `{"base_rev": <int>, "epoch": <int>, "blob": "<b64url, 1..262144 bytes decoded>"}`. `base_rev` is 0 for a new item.
+
 - `200 {"item": record}` with `rev = base_rev + 1` and a fresh `seq`.
 - `409 {"error":"conflict","current": record|null}` when the stored `rev != base_rev` (e.g. creating an id that
   exists, or editing a stale revision). Nothing is written. Writing over a tombstone with its current `rev`
@@ -270,13 +277,13 @@ Vault-key rotation (SPEC §4), optionally revoking a device, in one atomic D1 ba
 
 ```json
 {
-  "base_epoch": 1,                 // epoch the client's snapshot is at
-  "base_seq": 42,                  // head_seq the client's item snapshot is at
-  "revoke": "<device id>" ,        // or null to rotate only; not the caller, not also listed in `devices`
-  "new_admin_pubkey": "<Ed25519 raw 32B, derived from the NEW VK>",   // the request itself is signed with the OLD admin key
-  "tombstones": [ { "id": "...", "rev": 2, "marker": "<tombstone marker sealed under the NEW VK>" } ],   // every deleted record
-  "items": [ { "id": "...", "rev": 3, "key": "<80 b64url chars = new 60-byte wrapped item key>" } ],
-  "devices": [ { "id": "...", "envelope": "<VK_new sealed to that device>" } ],   // every device that stays, the caller included
+  "base_epoch": 1, // epoch the client's snapshot is at
+  "base_seq": 42, // head_seq the client's item snapshot is at
+  "revoke": "<device id>", // or null to rotate only; not the caller, not also listed in `devices`
+  "new_admin_pubkey": "<Ed25519 raw 32B, derived from the NEW VK>", // the request itself is signed with the OLD admin key
+  "tombstones": [{ "id": "...", "rev": 2, "marker": "<tombstone marker sealed under the NEW VK>" }], // every deleted record
+  "items": [{ "id": "...", "rev": 3, "key": "<80 b64url chars = new 60-byte wrapped item key>" }],
+  "devices": [{ "id": "...", "envelope": "<VK_new sealed to that device>" }], // every device that stays, the caller included
   "recovery_envelope": "<VK_new sealed to the recovery encryption key>"
 }
 ```
@@ -299,6 +306,7 @@ Effects: each item's blob gets its first 80 characters replaced by `key` (payloa
 ### POST /v1/recovery/session
 
 Signed with the **Ed25519 recovery key** (`X-Bisel-Device: recovery`), no device id.
+
 - Empty body: `200 {"recovery_envelope","head_seq","epoch"}`. Use it to fetch the envelope and derive VK.
 - Body `{"device": {id,name,kind,sig_pubkey,enc_pubkey,envelope}, "epoch": <from step 1>}`: additionally registers that
   replacement device (its `envelope` is VK encrypted to its own `enc_pubkey`, which the client can build after step one).

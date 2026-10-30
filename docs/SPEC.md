@@ -4,11 +4,12 @@ A personal, single-user, zero-knowledge password manager for Apple devices. Own 
 
 This file is the contract between `server/` and `apple/`. If an implementation needs to deviate, change this file in the same change and say why.
 
-Terminology: what this spec calls the *vault* is called a **box** in every user-facing string (UI, panel, docs for users). Code, wire formats and this spec keep "vault" internally. The production server is box.bisel.app; the bisel.app apex is the marketing site.
+Terminology: what this spec calls the _vault_ is called a **box** in every user-facing string (UI, panel, docs for users). Code, wire formats and this spec keep "vault" internally. The production server is box.bisel.app; the bisel.app apex is the marketing site.
 
 ## 1. Goals and non-goals
 
 Goals
+
 - Fast: the command menu shows results in <50 ms after the hotkey, unlock to fill in ~1 s.
 - Biometrics-only daily unlock (Touch ID / Face ID). No master password, no passcode fallback.
 - Server sees only ciphertext. A full server breach reveals nothing readable.
@@ -16,19 +17,20 @@ Goals
 - Safari and system AutoFill (passwords + passkeys) on Mac and iPhone, in later milestones.
 
 Non-goals (v1)
+
 - Sharing, multiple users, teams, Windows/Android/Linux, Chromium extension, passkey sign-in, agent CLI, cards/addresses, attachments, SSH keys.
 
 ## 2. Milestones
 
-| # | Scope | Status |
-|---|-------|--------|
-| M1 | `server/` Worker + D1, signed-request auth, sync API | this spec |
-| M2 | `BiselCore` Swift package: crypto, vault format, recovery, sync client | this spec |
-| M3 | Mac app: vault UI, ⌘⇧Space command panel, fill engine, devices, recovery, 1pux/CSV import | this spec |
-| M4 | Safari/system AutoFill credential provider on Mac (shares M2 core) | later |
-| M5 | iPhone app + AutoFill provider, device enrollment by QR | later |
-| M6 | Apple Passwords credential-exchange import (with passkeys) | later |
-| M7 | Passkey sign-in everywhere; optional Safari extension for URL context; agent CLI | later |
+| #   | Scope                                                                                     | Status    |
+| --- | ----------------------------------------------------------------------------------------- | --------- |
+| M1  | `server/` Worker + D1, signed-request auth, sync API                                      | this spec |
+| M2  | `BiselCore` Swift package: crypto, vault format, recovery, sync client                    | this spec |
+| M3  | Mac app: vault UI, ⌘⇧Space command panel, fill engine, devices, recovery, 1pux/CSV import | this spec |
+| M4  | Safari/system AutoFill credential provider on Mac (shares M2 core)                        | later     |
+| M5  | iPhone app + AutoFill provider, device enrollment by QR                                   | later     |
+| M6  | Apple Passwords credential-exchange import (with passkeys)                                | later     |
+| M7  | Passkey sign-in everywhere; optional Safari extension for URL context; agent CLI          | later     |
 
 Design now for M4–M7 where it is cheap (shared storage location, key access groups, enrollment endpoints, reserved passkey item type) but do not build them.
 
@@ -54,6 +56,7 @@ Use only platform / well-known libraries. No hand-rolled primitives.
 - KDF: HKDF-SHA256. No password hashing (Argon2/PBKDF) is needed: every secret that feeds a KDF is a random 256-bit value.
 
 Key hierarchy
+
 - **VK** (vault key): random 256 bits, generated once on the first device. Never stored in the clear and never sent to the server except wrapped.
 - **IK** (item key): random 256 bits per item. The item payload is encrypted under IK. IK is wrapped under VK. AAD for both is `bisel/v1|item|<item id>|<rev>` so ciphertext cannot be swapped between items or revisions.
 - **Device keys**, both P-256 in the Secure Enclave:
@@ -61,7 +64,7 @@ Key hierarchy
   - `DK-sig`: `.privateKeyUsage` only, no biometric prompt, so background sync never prompts. Signs requests.
 - **Device envelope**: VK encrypted to a device's `DK-enc` public key. Stored locally and on the server (the server cannot open it).
 - **Recovery phrase**: 24 words (BIP-39 wordlist, 256 bits of entropy), shown once at bootstrap. `RK = phrase entropy`.
-  - `RK-enc`: an X25519 key whose seed is `HKDF(RK, "bisel/v1/recovery-enc")`. Its **public** key is stored on the server and on every device. The **recovery envelope** is a copy of VK sealed to it with HPKE (X25519, HKDF-SHA256, AES-256-GCM), stored on the server. Because sealing needs only the public key, any enrolled device can write a fresh recovery envelope (vault-key rotation) without ever holding the phrase; only the phrase opens it. *(v0.1 used a symmetric `RK-wrap` key, which would have forced the phrase to be typed on every rotation.)*
+  - `RK-enc`: an X25519 key whose seed is `HKDF(RK, "bisel/v1/recovery-enc")`. Its **public** key is stored on the server and on every device. The **recovery envelope** is a copy of VK sealed to it with HPKE (X25519, HKDF-SHA256, AES-256-GCM), stored on the server. Because sealing needs only the public key, any enrolled device can write a fresh recovery envelope (vault-key rotation) without ever holding the phrase; only the phrase opens it. _(v0.1 used a symmetric `RK-wrap` key, which would have forced the phrase to be typed on every rotation.)_
   - `RK-sig`: an Ed25519 key whose seed is `HKDF(RK, "bisel/v1/recovery-sig")`. Its public key is registered at bootstrap and lets a device-less client authenticate to fetch the recovery envelope.
 - **Backup file** `.bisel-backup` (format version 2): the server's records (items, recovery pubkeys, recovery envelope) exported to a single file. Only the recovery phrase opens it.
 - **Vault-admin key** (`AK`): Ed25519, seed `HKDF(VK, "bisel/v1/admin-sig")`, public key registered at bootstrap and replaced by every rotation. The server requires its signature (`X-Bisel-Admin`, over `bisel-admin/v1 \n device \n <canonical request string>`) in addition to the device signature on `POST /v1/rotate`, `POST /v1/devices`, `DELETE /v1/devices/:id` and `POST /v1/recovery/rotate`. `DK-sig` never prompts and has no VK, so a stolen or malware-driven device key can no longer destroy or re-key the vault; producing the admin signature needs an unlocked vault.
@@ -72,26 +75,30 @@ Key hierarchy
 - **Epoch**: a counter that starts at 1 and moves by one on every vault-key rotation. Every request that carries material derived from VK (item blobs, device envelopes, recovery envelopes) states the epoch it was built for, and the server refuses a stale one. This is what stops a device that has not yet noticed a rotation from writing old-key material into the vault.
 
 Vault-key rotation (on every revoke, or on demand)
-- *Why*: removing a device from the server is not enough. A revoked device that kept VK can unwrap the item keys of any ciphertext it still holds or can obtain (server storage, a breach, a backup). Rotation makes everything on the server unreadable to the old VK.
-- *What changes*: a new VK; every live item's **wrapped IK** is re-wrapped under it (IKs, payload ciphertext, `rev` and AAD do not change, so a rotation never rewrites an item's content and never changes a revision); a new device envelope for every remaining device; a new recovery envelope sealed to the *same* recovery key (the existing 24 words keep working). The epoch moves by one.
-- *Atomicity*: one request (`POST /v1/rotate`) applies all of it in one D1 batch or none of it. It is built from a snapshot (epoch, `head_seq`, the exact set of live items and revs, the exact set of active devices); if anything changed since (an edit, a new device, another rotation) the server applies nothing, answers 409, and the client re-syncs and retries.
-- *Other devices*: on their next sync they see the new epoch, fetch their new envelope, lock themselves, and unlock (one Touch ID) into the new VK. Local edits sealed under the old VK stay pending and are re-wrapped at that unlock, then pushed.
-- *Honest limit*: a revoked device still has whatever it already copied (it could read those items at the time, and the plaintext left the vault then). Rotation protects what the server holds from now on and everything written later; after revoking a lost device, change the passwords that matter.
+
+- _Why_: removing a device from the server is not enough. A revoked device that kept VK can unwrap the item keys of any ciphertext it still holds or can obtain (server storage, a breach, a backup). Rotation makes everything on the server unreadable to the old VK.
+- _What changes_: a new VK; every live item's **wrapped IK** is re-wrapped under it (IKs, payload ciphertext, `rev` and AAD do not change, so a rotation never rewrites an item's content and never changes a revision); a new device envelope for every remaining device; a new recovery envelope sealed to the _same_ recovery key (the existing 24 words keep working). The epoch moves by one.
+- _Atomicity_: one request (`POST /v1/rotate`) applies all of it in one D1 batch or none of it. It is built from a snapshot (epoch, `head_seq`, the exact set of live items and revs, the exact set of active devices); if anything changed since (an edit, a new device, another rotation) the server applies nothing, answers 409, and the client re-syncs and retries.
+- _Other devices_: on their next sync they see the new epoch, fetch their new envelope, lock themselves, and unlock (one Touch ID) into the new VK. Local edits sealed under the old VK stay pending and are re-wrapped at that unlock, then pushed.
+- _Honest limit_: a revoked device still has whatever it already copied (it could read those items at the time, and the plaintext left the vault then). Rotation protects what the server holds from now on and everything written later; after revoking a lost device, change the passwords that matter.
 - Padding: item ciphertext is padded to a multiple of 512 bytes before encryption.
 
 Unlock model (client)
+
 1. App launch / unlock: unwrap the device envelope with `DK-enc` (biometric prompt) → VK held in memory (locked, non-swappable memory where possible).
 2. VK stays in memory for the **fill window** (default 5 min). It is zeroed on sleep, screen lock, idle timeout, or explicit lock.
 3. **Sensitive actions**: edit/delete an item always require a fresh `LAContext` evaluation (`.deviceOwnerAuthenticationWithBiometrics`) even inside the window.
-   **Deliberate decision (user, M3 panel):** *revealing and copying a password or OTP inside the fill window does not prompt again.* The command panel shows both in plain text while the vault is unlocked (the Touch ID unlock opened the 5 min window; the panel opens locked and unlocks first if the window expired). Lock on sleep / screen lock / idle and the 30 s clipboard clear still apply, and the panel window is excluded from capture (`NSWindow.sharingType = .none`, setting "Hide from screenshots and screen sharing", default ON in Release, OFF in Debug).
+   **Deliberate decision (user, M3 panel):** _revealing and copying a password or OTP inside the fill window does not prompt again._ The command panel shows both in plain text while the vault is unlocked (the Touch ID unlock opened the 5 min window; the panel opens locked and unlocks first if the window expired). Lock on sleep / screen lock / idle and the 30 s clipboard clear still apply, and the panel window is excluded from capture (`NSWindow.sharingType = .none`, setting "Hide from screenshots and screen sharing", default ON in Release, OFF in Debug).
    Setting **"Require Touch ID to reveal or copy password and OTP"** (default OFF) restores the strict rule: values stay masked until a fresh `LAContext` check, and every copy/fill of a password or TOTP asks again.
 4. If biometrics are unavailable (e.g. clamshell, no Touch ID keyboard) the app stays locked. The only fallback is the recovery phrase on a fresh enrollment.
 
 Clipboard
+
 - Copies use `NSPasteboard` with `org.nspasteboard.ConcealedType` and `org.nspasteboard.TransientType`, and are excluded from Universal Clipboard with **`NSPasteboard.prepareForNewContents(with: .currentHostOnly)`** (`NSPasteboardContentsCurrentHostOnly`, public AppKit API, macOS 10.12+). It must be the call that starts the write; add data with `setString/setData` on the same pasteboard (not `writeObjects`). Observed: on every copy CoreFoundation logs `MakeGenerationLocalOnly('Apple CFPasteboard general' ... gen: N)` (subsystem `com.apple.CFPasteboard`) with N equal to the write's `changeCount`, and the item carries both marker types. Not verifiable without a second Apple device that actual delivery is suppressed.
 - Auto-clear after 30 s only if `changeCount` is unchanged since the copy (also cleared on quit if still ours).
 
 Test-only key store
+
 - `DeviceKeyStore` protocol with a Secure Enclave implementation and a software P-256 implementation. The software one exists only for headless flow runs, is compiled behind `#if BISEL_SOFTWARE_KEYS` (never set for Release), and must say so loudly in logs. In `BiselCore` the flag is defined by the SwiftPM trait `SoftwareKeys`, enabled only by `bisel-dev` and the flow tests (`swift test --traits SoftwareKeys`), so no app or Release build can contain it.
 
 ## 5. Data model
@@ -115,6 +122,7 @@ Test-only key store
   "passkey": { "reserved": true }
 }
 ```
+
 `passkey` is reserved: import must be able to store the raw credential blob losslessly, sign-in comes in M7. Types `login`, `note`, `secret` (API keys, env values) are in v1.
 
 ### Server record (what the server stores)
@@ -144,7 +152,7 @@ Signed string: `METHOD \n PATH \n SORTED_QUERY \n SHA256(body) as hex \n TS \n N
 
 Uniformity: an unknown route, a wrong method, `HEAD`/`OPTIONS`, a failed bootstrap and every authentication failure take the same code path (one principal read, one signature verification against a decoy key when the principal is unknown, at most one counter write) and return the same bare `404` with the same headers, so neither the response nor its timing says what exists. Every response, including the 404, carries the hardening headers (`Cache-Control: no-store`, `Strict-Transport-Security`, `Content-Security-Policy: default-src 'none'`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy: no-referrer`, `Cross-Origin-Resource-Policy`).
 
-Rate limiting: flood protection is a Cloudflare rate-limit rule on the zone (see `apps/server/DEPLOY.md`). The Worker-side counter (D1 `auth_failures`, per `CF-Connecting-IP`, default 20 failures / 600 s, tracks at most 20 000 addresses) **never refuses a valid signature**, so the owner cannot be locked out by traffic from a shared address. Past the limit, a *failing* request from that address is answered `AUTH_BACKOFF_MS` (default 1 s) late and costs no further D1 writes. (v0.1 answered 404 to everything from that address, valid signatures included; that could lock the owner out and was dropped.) Before any D1 work the Worker applies a per-address flood limit (Workers rate-limiting binding, 300 requests/min per `CF-Connecting-IP`) that answers a bare `429` with `Retry-After`, the same for every route and caller; clients wait it out. It is keyed on the address, not the caller, so someone sharing the owner's egress address can make the owner's requests 429 for a minute; accepted. The bootstrap token is compared as two SHA-256 digests with a constant-time compare.
+Rate limiting: flood protection is a Cloudflare rate-limit rule on the zone (see `apps/server/DEPLOY.md`). The Worker-side counter (D1 `auth_failures`, per `CF-Connecting-IP`, default 20 failures / 600 s, tracks at most 20 000 addresses) **never refuses a valid signature**, so the owner cannot be locked out by traffic from a shared address. Past the limit, a _failing_ request from that address is answered `AUTH_BACKOFF_MS` (default 1 s) late and costs no further D1 writes. (v0.1 answered 404 to everything from that address, valid signatures included; that could lock the owner out and was dropped.) Before any D1 work the Worker applies a per-address flood limit (Workers rate-limiting binding, 300 requests/min per `CF-Connecting-IP`) that answers a bare `429` with `Retry-After`, the same for every route and caller; clients wait it out. It is keyed on the address, not the caller, so someone sharing the owner's egress address can make the owner's requests 429 for a minute; accepted. The bootstrap token is compared as two SHA-256 digests with a constant-time compare.
 
 Bodies: anything over 4 MiB is the bare 404 before it is read; after authentication every route has its own cap (413 `too_large`) and a strict Zod schema (unknown fields, repeated query parameters and bodies on GET/DELETE are 400).
 
@@ -152,20 +160,20 @@ After authentication, request errors (bad body, stale `base_rev`, too large) use
 
 ### Endpoints
 
-| Method | Path | Notes |
-|--------|------|-------|
-| POST | `/v1/bootstrap` | One time. Header `X-Bisel-Bootstrap: <secret>` matching the Worker secret `BOOTSTRAP_TOKEN`. Body: first device (id, name, sig pubkey, enc pubkey, device envelope), recovery pubkey, recovery envelope. After success the endpoint always 404s. |
-| GET | `/v1/sync?since=<seq>&events_since=<id>` | Returns changes after `seq`: items (incl. tombstones, whose `blob` is the sealed marker), device list (with `activates_at` for held-back devices), current head `seq`, current `epoch`, `events` (bootstrap/approve/revoke/rotate/recovery/recovery_rotate, so every device can announce "a device was added with the recovery phrase"), and the recovery pubkeys + envelope. Paginated by `limit`. Clients check `next_since <= head_seq`, record seqs, and that `head_seq` never decreases. |
-| PUT | `/v1/items/:id` | Body `{ base_rev, epoch, blob }`. `base_rev` is 0 for new items. 409 `conflict` with the current record if stale; 409 `stale_epoch` if the blob's item key is wrapped under a rotated-away VK; 409 `box_full` past `MAX_ITEMS_PER_BOX` items or `MAX_BOX_BYTES` of blob text. Server assigns `rev+1` and a new `seq`. Max blob 256 KiB. |
-| DELETE | `/v1/items/:id?base_rev=` | Tombstone. Body `{ epoch, marker }`; the sealed marker is stored as the blob. |
-| GET | `/v1/history?id=&after=&limit=` | Previous states the server retained for `HISTORY_RETENTION_DAYS` (30): `overwrite`/`delete` rows hold the whole previous blob. A rotation keeps no history of its own (a retained old wrapped item key would let a holder of the old vault key open current payloads). Ciphertext only; a client with the key re-saves a wanted version as a new revision. |
-| GET | `/v1/devices` | List with name, kind, created, last seen, revoked. |
-| POST | `/v1/devices` | An existing device approves a new device: registers its pubkeys and stores the device envelope the approver created for it. Body adds `epoch` (the VK the envelope holds); 409 `stale_epoch` if it is not current. |
-| POST | `/v1/rotate` | **Vault-key rotation**, optionally revoking a device in the same transaction. Admin-signed with the *old* key; body `{ base_epoch, base_seq, revoke, new_admin_pubkey, items:[{id, rev, key}], tombstones:[{id, rev, marker}], devices:[{id, envelope}], recovery_envelope }`: `key` is the new 60-byte wrapped IK that replaces the first 60 bytes of the item's blob. Applied only if `epoch == base_epoch`, `head_seq == base_seq`, `items` is exactly the live set at exactly those revs and `devices` exactly the active set (minus `revoke`); otherwise 409 and nothing changes. On success every item gets a fresh `seq` (revs untouched), `epoch + 1`, revoked device's envelope wiped. See §4. |
-| DELETE | `/v1/devices/:id` | Revoke **without** rotating (emergency; the device keeps VK). Effective immediately: later requests from that device 404. Clients revoke through `/v1/rotate`. |
-| GET | `/v1/envelope` | The calling device's own device envelope and its epoch. |
-| POST | `/v1/recovery/session` | Authenticated by the Ed25519 recovery signature only (the phrase is the root; no admin signature). A device registered here can be held back for `RECOVERY_ACTIVATION_DELAY_SECONDS` (prod: 24 h): it gets the bare 404 until then, other devices see it in the device list and as an event, and any of them can revoke it. Empty body: returns the recovery envelope and `epoch`. Body `{device, epoch}`: also registers a replacement device (two calls, because the client needs the envelope to derive VK before it can build its own device envelope; 409 `stale_epoch` if a rotation happened in between). |
-| POST | `/v1/recovery/rotate` | Signed by a normal (e.g. the replacement) device. Replace the recovery pubkeys and envelope with a **new phrase's** (body adds `epoch`). Rotating VK (`/v1/rotate`) keeps the phrase. |
+| Method | Path                                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| POST   | `/v1/bootstrap`                          | One time. Header `X-Bisel-Bootstrap: <secret>` matching the Worker secret `BOOTSTRAP_TOKEN`. Body: first device (id, name, sig pubkey, enc pubkey, device envelope), recovery pubkey, recovery envelope. After success the endpoint always 404s.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| GET    | `/v1/sync?since=<seq>&events_since=<id>` | Returns changes after `seq`: items (incl. tombstones, whose `blob` is the sealed marker), device list (with `activates_at` for held-back devices), current head `seq`, current `epoch`, `events` (bootstrap/approve/revoke/rotate/recovery/recovery_rotate, so every device can announce "a device was added with the recovery phrase"), and the recovery pubkeys + envelope. Paginated by `limit`. Clients check `next_since <= head_seq`, record seqs, and that `head_seq` never decreases.                                                                                                                                                                                                           |
+| PUT    | `/v1/items/:id`                          | Body `{ base_rev, epoch, blob }`. `base_rev` is 0 for new items. 409 `conflict` with the current record if stale; 409 `stale_epoch` if the blob's item key is wrapped under a rotated-away VK; 409 `box_full` past `MAX_ITEMS_PER_BOX` items or `MAX_BOX_BYTES` of blob text. Server assigns `rev+1` and a new `seq`. Max blob 256 KiB.                                                                                                                                                                                                                                                                                                                                                                 |
+| DELETE | `/v1/items/:id?base_rev=`                | Tombstone. Body `{ epoch, marker }`; the sealed marker is stored as the blob.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| GET    | `/v1/history?id=&after=&limit=`          | Previous states the server retained for `HISTORY_RETENTION_DAYS` (30): `overwrite`/`delete` rows hold the whole previous blob. A rotation keeps no history of its own (a retained old wrapped item key would let a holder of the old vault key open current payloads). Ciphertext only; a client with the key re-saves a wanted version as a new revision.                                                                                                                                                                                                                                                                                                                                              |
+| GET    | `/v1/devices`                            | List with name, kind, created, last seen, revoked.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| POST   | `/v1/devices`                            | An existing device approves a new device: registers its pubkeys and stores the device envelope the approver created for it. Body adds `epoch` (the VK the envelope holds); 409 `stale_epoch` if it is not current.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| POST   | `/v1/rotate`                             | **Vault-key rotation**, optionally revoking a device in the same transaction. Admin-signed with the _old_ key; body `{ base_epoch, base_seq, revoke, new_admin_pubkey, items:[{id, rev, key}], tombstones:[{id, rev, marker}], devices:[{id, envelope}], recovery_envelope }`: `key` is the new 60-byte wrapped IK that replaces the first 60 bytes of the item's blob. Applied only if `epoch == base_epoch`, `head_seq == base_seq`, `items` is exactly the live set at exactly those revs and `devices` exactly the active set (minus `revoke`); otherwise 409 and nothing changes. On success every item gets a fresh `seq` (revs untouched), `epoch + 1`, revoked device's envelope wiped. See §4. |
+| DELETE | `/v1/devices/:id`                        | Revoke **without** rotating (emergency; the device keeps VK). Effective immediately: later requests from that device 404. Clients revoke through `/v1/rotate`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| GET    | `/v1/envelope`                           | The calling device's own device envelope and its epoch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| POST   | `/v1/recovery/session`                   | Authenticated by the Ed25519 recovery signature only (the phrase is the root; no admin signature). A device registered here can be held back for `RECOVERY_ACTIVATION_DELAY_SECONDS` (prod: 24 h): it gets the bare 404 until then, other devices see it in the device list and as an event, and any of them can revoke it. Empty body: returns the recovery envelope and `epoch`. Body `{device, epoch}`: also registers a replacement device (two calls, because the client needs the envelope to derive VK before it can build its own device envelope; 409 `stale_epoch` if a rotation happened in between).                                                                                        |
+| POST   | `/v1/recovery/rotate`                    | Signed by a normal (e.g. the replacement) device. Replace the recovery pubkeys and envelope with a **new phrase's** (body adds `epoch`). Rotating VK (`/v1/rotate`) keeps the phrase.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 Conflicts: client resolves a 409 by fetching the current record and, if both sides changed, keeping the remote and saving the local edit as a new item titled "<title> (conflict)". No silent overwrite.
 
@@ -185,10 +193,12 @@ events(id, ts, device_id, type, subject_id)        -- bootstrap/approve/revoke/r
 auth_failures(ip, window_start, count)             -- Worker-side failed-auth backoff, indexed on window_start, <= 20 000 rows
 assertions(ok CHECK ok = 1)                        -- empty at rest; a failing `INSERT ... SELECT CASE WHEN cond ...` aborts a D1 batch
 ```
+
 Binary columns are unpadded base64url TEXT (D1 returns BLOBs as number arrays); timestamps are unix seconds.
 `head_seq` increments inside a D1 batch with the item write so seq is gapless and monotonic. Both statements carry the same `rev == base_rev` and `epoch` guard, so a rejected (409) write consumes no seq. A rotation assigns the rotated items `base_seq+1 … base_seq+N` and advances `head_seq` by `N` in the same batch; its preconditions and postconditions are `assertions` statements, so any violation rolls the whole batch back.
 
 ### Secrets and ops
+
 - `BOOTSTRAP_TOKEN` via `wrangler secret put --env prod`, never in the repo. `.dev.vars` (local token) is git-ignored; `.dev.vars.example` is tracked.
 - `wrangler.jsonc`: the default environment is local dev (placeholder D1 id, nothing remote); `env.prod` holds the route pattern and D1 id as `REPLACE_…` placeholders that wrangler refuses to deploy until the owner fills them in. Exact steps: `apps/server/DEPLOY.md`.
 - A deployed instance is created only on the user's say-so. Everything here is built and verified against `wrangler dev` with local D1.
@@ -200,6 +210,7 @@ SwiftPM package, Swift 6, macOS 26+ / iOS 26+. No UI.
 Module names are prefixed (`BiselCrypto`, `BiselKeyStore`, `BiselVault`, `BiselSync`, `BiselRecovery`, `BiselTOTP`) because a module called `Crypto` collides with swift-crypto's (pulled in by the OTP package) and a module called `Vault` would shadow the public `Vault` type. The umbrella module `BiselCore` re-exports them all and defines the `Vault` facade (an `actor`). `BiselTestSupport` (dev/test only, never linked by apps) starts a throwaway local server for flow tests.
 
 Modules
+
 - `Crypto`: key hierarchy above, AEAD helpers, recovery phrase encode/decode (use a maintained BIP-39 Swift package, do not hand-write the wordlist), HKDF via CryptoKit.
 - `KeyStore`: `DeviceKeyStore` (SE + software).
 - `Vault`: item model, encrypt/decrypt, local store.
@@ -214,6 +225,7 @@ The server's address is not kept in the SQLite file: it lives in the Keychain (s
 Local store: SQLite (GRDB or SQLite.swift) holding the same ciphertext records the server holds plus the sync cursor, located in the **App Group container** from day one (`<TEAMID>.app.bisel` for macOS) so the M4/M5 extensions can open it. Keychain items use a shared access group for the same reason. The Mac app is non-sandboxed (Accessibility needs it); the extensions later will be sandboxed, so the store must not depend on app-only paths.
 
 Public surface (names indicative)
+
 ```
 Vault.bootstrap(server:, bootstrapToken:, deviceName:) -> RecoveryPhrase
 Vault.unlock(reason:) async throws          // biometric, fills VK window
@@ -242,6 +254,7 @@ Vault.exportBackup(to:) / importBackup(from:, phrase:)
 Stack: Swift 6, SwiftUI + AppKit, macOS 26. Project generated by XcodeGen from `apps/mac/project.yml`. Bundle id `app.bisel.mac`. Hardened runtime, notarized Developer ID build, **not sandboxed**.
 
 ### Surfaces
+
 1. **Menu-bar item + main window**: item list, detail, edit, password generator, devices, recovery, import, settings, theme.
 2. **Command panel** on global ⌘⇧Space (`KeyboardShortcuts`; user-configurable). A **fixed-size card, 760 × 460 pt** in a borderless, non-activating, floating `NSPanel`: the window never resizes (so nothing moves while typing); only the content animates. It takes keyboard input without activating bisel, so the previously frontmost app stays frontmost.
    - **Position** (setting): bottom-center (default), top-right, bottom-right, on the screen that has the mouse, inset 16 pt from `visibleFrame` (clears Dock and menu bar). The window opens at the same spot every time.
@@ -255,7 +268,7 @@ Stack: Swift 6, SwiftUI + AppKit, macOS 26. Project generated by XcodeGen from `
    - **Motion**: open = scale 0.96 → 1 + fade from the position anchor (snappy spring, ~0.18 s, no overshoot); dismiss ~0.11 s; no animation blocks input. Reduce Motion: opacity only.
    - **Accessibility**: the panel works with VoiceOver, Voice Control and Full Keyboard Access without changing its look. The search field is a labelled search field with a usage hint; each list row is one element (title; value "user, site, 3 of 12"; selected trait; press = select; custom actions copy password / username / one-time code / fill); each Values row is a button (label, value, press = copy) and the card is a group named "Values". **Passwords are never in the accessibility tree** (value "Hidden"); the OTP is exposed as "6 digits, about N seconds left" (5 s steps) and only spoken on the "Read code aloud" action. The shortcut legend is one element that reads the shortcuts in words; icons and the countdown ring are hidden from the tree. Because VoiceOver focus stays in the search field while ↑/↓ moves the selection, the panel posts announcements: the selected login ("GitHub, user, site, 2 of 7"), the result count after typing pauses (low priority), "Actions", and "<value> copied"; the toast is announced too. System switches apply live while open: Reduce Motion (opacity only, ring steps once a second), Reduce Transparency (glass falls back to solid), Increase Contrast (stronger borders, dim text, selection; high-contrast appearance), Differentiate Without Color (the OTP ring also shows the seconds as a number and goes dashed in its last quarter). Text tokens clear WCAG AA 4.5:1 in all four built-in themes, solid and glass; to get there the dim label/placeholder color moved from Figma #393939 to #767676 on the dark theme (#767676 light, #947969 Ember dark, #846F62 Ember light) and tertiary/secondary text alphas rose slightly. The panel hides on sleep, display sleep and fast-user-switch, and re-lays out on display changes.
    - **Site icons**: fetched directly from each item's site on this device, never via a third-party icon service, HTTPS only, ephemeral session (no cookies/cache/credentials/Referer, generic UA), ≤3 redirects within the same registrable domain, HTML head ≤64 KB, image ≤256 KB, decoded and re-encoded with ImageIO (96 px PNG), uniform white/transparent margins trimmed, ≤3 concurrent fetches, lazily for visible rows, failures cached 7 days, cache in `Application Support/bisel/icons` keyed by SHA-256 of the registrable domain (+ NSCache). Never stored in the vault or synced; the server never learns domains. Setting "Load site icons" (**default off, opt-in**: each lookup tells the network which sites are in the vault) and "Clear icon cache"; off = monograms only and no requests. Hosts must be public names on port 443 (no IP literals, single-label or local names; every resolved and every connected address public); only png/jpeg/gif/ico images up to 1024 px / 1 MP are decoded; registrable domain from the bundled Public Suffix List; cache file names are an HMAC under a per-install Keychain key (memory-only cache when no Keychain key is available).
-   - Passwords are never shown in the *list*; Figma icons: search glyph, copy, send are template assets (`Resources/Assets.xcassets`); other icons are SF Symbols placeholders (User ⇥ Pass pill, actions menu).
+   - Passwords are never shown in the _list_; Figma icons: search glyph, copy, send are template assets (`Resources/Assets.xcassets`); other icons are SF Symbols placeholders (User ⇥ Pass pill, actions menu).
 3. **Fill engine**: Accessibility API on the focused element of the frontmost app.
    - Field inference from AX role/subrole: `AXSecureTextField` → password; a field whose label/description/identifier suggests a code → TOTP; otherwise username.
    - Preferred delivery: synthesized key events with `CGEventKeyboardSetUnicodeString` (no clipboard). Fallback: temporary paste with clipboard restore. Document which works where.
@@ -267,9 +280,10 @@ Stack: Swift 6, SwiftUI + AppKit, macOS 26. Project generated by XcodeGen from `
 6. **Import**: 1Password `.1pux` and generic CSV (logins, notes, TOTP). Use the standard zip/JSON/CSV libraries. Passkeys in a 1pux are stored losslessly in the reserved `passkey` type if present.
 
 ### Implementation notes (as built)
+
 - **Storage.** No Team ID exists yet, so the local store and (Debug only) software keys live in `~/Library/Application Support/bisel/vault`, not the App Group container, and the Secure Enclave store is created with a `nil` keychain access group. Switch both to the shared group when the app is signed (M4).
 - **Key store per build.** XcodeGen/Xcode can only set a SwiftPM trait per package reference, not per configuration, so there are two specs: `project.yml` → `Bisel.xcodeproj` (BiselCore **without** `SoftwareKeys`: Secure Enclave only; this is the Release/archive project) and `project.dev.yml` → `BiselDev.xcodeproj` (trait on, `BISEL_SOFTWARE_KEYS` defined for Debug: unsigned runs; loudly logged at startup and in the title bar/panel footer). Never archive `BiselDev.xcodeproj`.
-- **Dev fixture.** Compiled only in Debug (`BISEL_DEV_FIXTURE`), and only *used* when the process is started with `BISEL_DEV_FIXTURE=1`; otherwise the panel runs on the real vault.
+- **Dev fixture.** Compiled only in Debug (`BISEL_DEV_FIXTURE`), and only _used_ when the process is started with `BISEL_DEV_FIXTURE=1`; otherwise the panel runs on the real vault.
 - **Lock.** `VaultService` locks the core (VK zeroed) and drops rows, search index and any revealed state on sleep, screen lock, fast-user-switch, system idle (setting, default 5 min) and when the fill window (setting, default 5 min, counted from unlock) ends. Item secrets are decrypted on demand, never cached in the index.
 - **Unlock UX.** With the Secure Enclave store the OS shows the Touch ID sheet when DK-enc opens the envelope; with software keys (Debug) the app runs the same `LAContext` gate first.
 - **Sync** runs on unlock, panel open, every 60 s while unlocked, after each local save/delete and on demand; failures are shown in the main window as offline/failed, local edits stay pending.
@@ -284,9 +298,11 @@ Stack: Swift 6, SwiftUI + AppKit, macOS 26. Project generated by XcodeGen from `
 - **Import.** `.1pux` via ZIPFoundation + JSON, CSV via SwiftCSV (both pinned). A `passkey` value found anywhere in a 1pux item is stored whole in the item's `passkey` slot; its exact location in real 1Password exports is not verified (only generated fake exports were available).
 
 ### Theming
+
 All visuals come from a `Theme` token set (colors, radii, spacing, fonts, row density, blur/glass). Ships light and dark of the default family plus a second family (Ember, with both variants); the variant follows the system appearance; theme JSON files are loadable from `~/Library/Application Support/bisel/themes/`. No view hard-codes a color or radius.
 
 ### Security details
+
 - No secrets in logs, crash reports or Spotlight. Redact in all `Logger` calls.
 - Secure event input respected: do not fight it.
 - Auto-lock: sleep, screen lock, 5 min idle (configurable).
@@ -297,7 +313,7 @@ All visuals come from a `Theme` token set (colors, radii, spacing, fonts, row de
 1. **No unit tests.** No tests that assert what the code obviously does, mirror the implementation, snapshot copy or text, check layout/placement/colors, or pass by construction. If a test would not fail when the real feature is broken, do not write it.
 2. Only **flow tests** that exercise real behavior through the public interface, using a proper test library:
    - Server: Playwright Test (`request` fixture) against a real `wrangler dev` with a local D1. Flows: bootstrap→sync→edit→conflict→revoke→recovery; replay and bad-signature rejection (all 404); size limits.
-   - Core: Swift Testing or XCTest *flow* tests driving the `bisel-dev` CLI or the package against the real local server with the software key store: two simulated devices, encrypt on one, decrypt on the other, revoke, recover from phrase, backup/restore.
+   - Core: Swift Testing or XCTest _flow_ tests driving the `bisel-dev` CLI or the package against the real local server with the software key store: two simulated devices, encrypt on one, decrypt on the other, revoke, recover from phrase, backup/restore.
    - Mac app: XCUITest (or equivalent real-UI driving) for the critical paths only: onboarding, unlock, search and copy, fill into a real target app, lock on sleep trigger.
 3. **Tests are never the only verification.** Every agent must also run the real thing: start the server, launch the built app, drive it, look at screenshots, and read logs. Report what was actually observed. A task is not done because tests are green.
 4. If something can't be verified in this environment (e.g. no signing identity, no Touch ID in CI), say so explicitly. Do not claim it.
@@ -305,6 +321,7 @@ All visuals come from a `Theme` token set (colors, radii, spacing, fonts, row de
 ## 10. Tooling
 
 Prefer CLIs and libraries to hand-written code.
+
 - Server: `pnpm`, `wrangler`, Hono, Zod, Playwright.
 - Apple: `xcodegen`, `xcodebuild`, SwiftPM, `KeyboardShortcuts`, a BIP-39 package, an OTP package, GRDB (or SQLite.swift), a fuzzy-match package, `swift-format`.
 - Do not vendor or copy library code; pin versions.

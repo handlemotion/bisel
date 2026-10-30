@@ -15,13 +15,15 @@
       "binding": "DB",
       "database_name": "bisel",
       "database_id": "00000000-0000-0000-0000-000000000000",
-      "migrations_dir": "migrations"
-    }
+      "migrations_dir": "migrations",
+    },
   ],
   // Per-address flood limit (CF-Connecting-IP; requests without it, i.e. local dev, are not limited).
   // Cloudflare's Workers rate-limiting binding; `namespace_id` only has to be unique within the account.
   // A device syncs once a minute and writes a handful of items; 300/min leaves room for a bulk import.
-  "ratelimits": [{ "name": "RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 300, "period": 60 } }],
+  "ratelimits": [
+    { "name": "RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 300, "period": 60 } },
+  ],
   // The dashboard: static files from public/ (built by `pnpm build:web`) served by the same Worker on the same hostname.
   // Only these paths run the Worker first; everything else is a static file, and unknown paths fall back to index.html
   // so /connect works as a deep link. /v1/* keeps its uniform bare 404 for anything that is not a real, signed route.
@@ -29,7 +31,7 @@
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/v1/*", "/api/*", "/healthz"]
+    "run_worker_first": ["/v1/*", "/api/*", "/healthz"],
   },
   "build": { "command": "pnpm build:web" },
   "vars": {
@@ -48,7 +50,7 @@
     // Characters of item blob (base64url, ~4/3 of the bytes) one box may store; also bounds its retained history. 409 box_full beyond it.
     "MAX_BOX_BYTES": "67108864",
     // A device registered through the recovery phrase can only sign requests after this delay (0 = immediately).
-    "RECOVERY_ACTIVATION_DELAY_SECONDS": "0"
+    "RECOVERY_ACTIVATION_DELAY_SECONDS": "0",
   },
 
   // ---- production --------------------------------------------------------------------------
@@ -73,7 +75,7 @@
         "enabled": true,
         "redact_query_string": true,
         "logs": { "enabled": true, "invocation_logs": false },
-        "traces": { "enabled": false }
+        "traces": { "enabled": false },
       },
       "d1_databases": [
         {
@@ -81,15 +83,21 @@
           "database_name": "bisel",
           // 5a01b8bc-fb58-4ac7-92f7-b600869c8f0c: the id printed by `wrangler d1 create bisel` (DEPLOY.md step 3).
           "database_id": "5a01b8bc-fb58-4ac7-92f7-b600869c8f0c",
-          "migrations_dir": "migrations"
-        }
+          "migrations_dir": "migrations",
+        },
       ],
-      "ratelimits": [{ "name": "RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 300, "period": 60 } }],
+      "ratelimits": [
+        {
+          "name": "RATE_LIMITER",
+          "namespace_id": "1001",
+          "simple": { "limit": 300, "period": 60 },
+        },
+      ],
       "assets": {
         "directory": "./public",
         "binding": "ASSETS",
         "not_found_handling": "single-page-application",
-        "run_worker_first": ["/v1/*", "/api/*", "/healthz"]
+        "run_worker_first": ["/v1/*", "/api/*", "/healthz"],
       },
       "build": { "command": "pnpm build:web" },
       "vars": {
@@ -102,8 +110,8 @@
         "MAX_BOX_BYTES": "67108864",
         // 24 h: someone who has seen the 24 words once cannot silently take the vault; every enrolled device is
         // told on its next sync and can cancel. Set to "0" to recover instantly.
-        "RECOVERY_ACTIVATION_DELAY_SECONDS": "86400"
-      }
-    }
-  }
+        "RECOVERY_ACTIVATION_DELAY_SECONDS": "86400",
+      },
+    },
+  },
 }

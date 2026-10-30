@@ -22,7 +22,8 @@ const MAX_PENDING_PER_IP = 5;
 const USER_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 const USER_CODE_BODY_LIMIT = 1024;
 
-export const sha256Hex = async (value: string) => hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+export const sha256Hex = async (value: string) =>
+  hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
 
 /** "ABCD-EFGH". Rejection sampling keeps the symbols uniform. */
 export function newUserCode(): string {
@@ -54,7 +55,8 @@ export interface ConnectRow {
   account_id: string | null;
 }
 
-export const CONNECT_COLS = "id, kind, box_id, device_name, country, created_at, expires_at, status, account_id";
+export const CONNECT_COLS =
+  "id, kind, box_id, device_name, country, created_at, expires_at, status, account_id";
 
 /** A new request row and the answer for the Mac. The caller supplies who is asking and what for. */
 export async function createConnectRequest(
@@ -70,7 +72,9 @@ export async function createConnectRequest(
   const id = b64urlEncode(crypto.getRandomValues(new Uint8Array(16)));
   await env.DB.batch([
     // Expired rows go a little after they stop mattering; bounded work per request.
-    env.DB.prepare("DELETE FROM connect_requests WHERE id IN (SELECT id FROM connect_requests WHERE expires_at < ?1 LIMIT 50)").bind(now - 3600),
+    env.DB.prepare(
+      "DELETE FROM connect_requests WHERE id IN (SELECT id FROM connect_requests WHERE expires_at < ?1 LIMIT 50)",
+    ).bind(now - 3600),
     env.DB.prepare(
       `INSERT INTO connect_requests (id, device_code_hash, user_code, kind, box_id, device_name, ip_hash, country, created_at, expires_at, status)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'pending')`,
@@ -129,7 +133,10 @@ connect.post("/connect", async (c) => {
     .bind(await shortHash(clientIp(c.req.raw)), now)
     .first<{ n: number }>();
   if ((pending?.n ?? 0) >= MAX_PENDING_PER_IP) return bare(429);
-  return c.json(await createConnectRequest(c.env, c.req.raw, now, "create", parsed.data.device_name, null), 201);
+  return c.json(
+    await createConnectRequest(c.env, c.req.raw, now, "create", parsed.data.device_name, null),
+    201,
+  );
 });
 
 // POST /v1/connect/poll  { device_code }  ->  { status, account_has_box? }
@@ -143,9 +150,12 @@ connect.post("/connect/poll", async (c) => {
   if (!parsed.success) return c.json({ error: "invalid_request" }, 400);
   const row = await connectByDeviceCode(c.env, parsed.data.device_code);
   const now = Math.floor(Date.now() / 1000);
-  if (!row || (row.status !== "consumed" && row.expires_at <= now)) return c.json({ status: "expired" });
+  if (!row || (row.status !== "consumed" && row.expires_at <= now))
+    return c.json({ status: "expired" });
   if (row.status === "approved" && row.kind === "create" && row.account_id) {
-    const owned = await c.env.DB.prepare("SELECT id FROM boxes WHERE owner_id = ?1").bind(row.account_id).first<{ id: string }>();
+    const owned = await c.env.DB.prepare("SELECT id FROM boxes WHERE owner_id = ?1")
+      .bind(row.account_id)
+      .first<{ id: string }>();
     return c.json({ status: "approved", account_has_box: owned !== null });
   }
   return c.json({ status: row.status });

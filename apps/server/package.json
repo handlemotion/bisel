@@ -2,8 +2,8 @@
   "name": "bisel-server",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "description": "bisel zero-knowledge sync server (Cloudflare Worker + Hono + D1)",
+  "type": "module",
   "scripts": {
     "predev": "node scripts/ensure-dev-vars.mjs && pnpm migrate",
     "dev": "wrangler dev --port 8787",

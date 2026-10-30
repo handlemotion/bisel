@@ -30,9 +30,11 @@ export const MAX_DEVICES = 64;
 // zod/mini, not the classic build: the classic import alone is ~25 ms of Worker startup (826 KB of source);
 // the same schemas on mini evaluate in well under a millisecond.
 const b64 = (maxBytes: number) =>
-  z
-    .string()
-    .check(z.minLength(1), z.refine(isB64url, "must be unpadded base64url"), z.refine((s) => b64urlByteLength(s) <= maxBytes, "too large"));
+  z.string().check(
+    z.minLength(1),
+    z.refine(isB64url, "must be unpadded base64url"),
+    z.refine((s) => b64urlByteLength(s) <= maxBytes, "too large"),
+  );
 
 const intIn = (min: number) => z.int().check(z.minimum(min), z.maximum(Number.MAX_SAFE_INTEGER));
 const uint = intIn(0);
@@ -47,7 +49,10 @@ const deviceName = z
   .check(
     z.minLength(1),
     z.maxLength(100),
-    z.regex(/^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]+$/u, "control or format characters are not allowed"),
+    z.regex(
+      /^[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]+$/u,
+      "control or format characters are not allowed",
+    ),
   );
 
 export const DeviceRegistrationSchema = z.strictObject({
@@ -111,7 +116,11 @@ const keyCount = (o: object) => {
  * ~1 ms per 1,000 elements of the Worker's 10 ms CPU budget, so these are checked with one plain loop (same rules: strict
  * keys, id shape, rev >= 1, base64url payload, unique ids).
  */
-function rotateList<T extends { id: string }>(name: string, valueKey: string, validValue: (v: unknown) => boolean) {
+function rotateList<T extends { id: string }>(
+  name: string,
+  valueKey: string,
+  validValue: (v: unknown) => boolean,
+) {
   return z.custom<T[]>((input) => {
     if (!Array.isArray(input) || input.length > MAX_ROTATE_ITEMS) return false;
     const seen = new Set<string>();
@@ -155,9 +164,11 @@ export const RotateSchema = z.strictObject({
   /** Every tombstone, re-sealed under the new VK. */
   tombstones: tombstoneList,
   items: rotateItemList,
-  devices: z
-    .array(z.strictObject({ id: IdSchema, envelope: b64(MAX_KEY_ENVELOPE_BYTES) }))
-    .check(z.minLength(1), z.maxLength(MAX_DEVICES), z.refine((a) => unique(a.map((d) => d.id)), "duplicate device id")),
+  devices: z.array(z.strictObject({ id: IdSchema, envelope: b64(MAX_KEY_ENVELOPE_BYTES) })).check(
+    z.minLength(1),
+    z.maxLength(MAX_DEVICES),
+    z.refine((a) => unique(a.map((d) => d.id)), "duplicate device id"),
+  ),
   recovery_envelope: b64(MAX_KEY_ENVELOPE_BYTES),
 });
 

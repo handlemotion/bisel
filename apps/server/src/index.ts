@@ -112,7 +112,14 @@ const manifestAdmin = createMiddleware<AppEnv>(async (c, next) => {
 app.onError((err, c) => {
   // Auth and bootstrap catch their own errors and answer 404; anything reaching here happened
   // after the caller was authenticated, so a JSON 500 is safe and useful.
-  console.log(JSON.stringify({ evt: "error", path: c.req.path, message: String(err), stack: (err as Error).stack }));
+  console.log(
+    JSON.stringify({
+      evt: "error",
+      path: c.req.path,
+      message: String(err),
+      stack: (err as Error).stack,
+    }),
+  );
   return c.json({ error: "internal" }, 500);
 });
 
@@ -129,7 +136,8 @@ type Parsed<T> = { ok: true; data: T } | { ok: false; res: Response };
 /** Parse the already-read (and already-authenticated) body as JSON against a strict schema. */
 function parseJson<T>(c: Ctx, schema: ZodMiniType<T>, maxBytes: number): Parsed<T> {
   const raw = c.get("body");
-  if (raw.length > maxBytes) return { ok: false, res: c.json({ error: "too_large", max_bytes: maxBytes }, 413) };
+  if (raw.length > maxBytes)
+    return { ok: false, res: c.json({ error: "too_large", max_bytes: maxBytes }, 413) };
   let json: unknown;
   try {
     json = JSON.parse(new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(raw));
@@ -138,7 +146,14 @@ function parseJson<T>(c: Ctx, schema: ZodMiniType<T>, maxBytes: number): Parsed<
   }
   const r = schema.safeParse(json);
   if (!r.success) {
-    return { ok: false, res: bad(c, "invalid_request", r.error.issues.map((i) => ({ path: i.path, message: i.message }))) };
+    return {
+      ok: false,
+      res: bad(
+        c,
+        "invalid_request",
+        r.error.issues.map((i) => ({ path: i.path, message: i.message })),
+      ),
+    };
   }
   return { ok: true, data: r.data };
 }
@@ -161,9 +176,21 @@ const noBody = (c: Ctx) => (c.get("body").length === 0 ? null : bad(c, "unexpect
 /** Importing the key is what validates it: it must be a real point on the curve / valid Ed25519 key. */
 async function validDeviceKeys(d: DeviceRegistration): Promise<boolean> {
   try {
-    await crypto.subtle.importKey("raw", b64urlDecode(d.sig_pubkey), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+    await crypto.subtle.importKey(
+      "raw",
+      b64urlDecode(d.sig_pubkey),
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["verify"],
+    );
     // enc_pubkey is only ever used by clients (ECIES), but it must at least be a valid P-256 point.
-    await crypto.subtle.importKey("raw", b64urlDecode(d.enc_pubkey), { name: "ECDH", namedCurve: "P-256" }, false, []);
+    await crypto.subtle.importKey(
+      "raw",
+      b64urlDecode(d.enc_pubkey),
+      { name: "ECDH", namedCurve: "P-256" },
+      false,
+      [],
+    );
     return true;
   } catch {
     return false;
@@ -183,13 +210,31 @@ async function validRecoveryKeys(sigPub: string, encPub: string): Promise<boolea
   }
 }
 
-function insertDevice(db: D1Database, boxId: string, d: DeviceRegistration, now: number, epoch: number, activatesAt: number | null = null) {
+function insertDevice(
+  db: D1Database,
+  boxId: string,
+  d: DeviceRegistration,
+  now: number,
+  epoch: number,
+  activatesAt: number | null = null,
+) {
   return db
     .prepare(
       `INSERT INTO devices (id, box_id, name, kind, sig_alg, sig_pubkey, enc_pubkey, envelope, envelope_epoch, created_at, activates_at)
        VALUES (?1, ?2, ?3, ?4, 'p256', ?5, ?6, ?7, ?8, ?9, ?10)`,
     )
-    .bind(d.id, boxId, d.name, d.kind, d.sig_pubkey, d.enc_pubkey, d.envelope, epoch, now, activatesAt);
+    .bind(
+      d.id,
+      boxId,
+      d.name,
+      d.kind,
+      d.sig_pubkey,
+      d.enc_pubkey,
+      d.envelope,
+      epoch,
+      now,
+      activatesAt,
+    );
 }
 
 const retentionSeconds = (env: Env) => (Number(env.HISTORY_RETENTION_DAYS) || 30) * 86400;
@@ -218,9 +263,18 @@ async function validAdminKey(pub: string): Promise<boolean> {
   }
 }
 
-function insertEvent(db: D1Database, boxId: string, now: number, deviceId: string | null, type: string, subject: string | null) {
+function insertEvent(
+  db: D1Database,
+  boxId: string,
+  now: number,
+  deviceId: string | null,
+  type: string,
+  subject: string | null,
+) {
   return db
-    .prepare("INSERT INTO events (box_id, ts, device_id, type, subject_id) VALUES (?1, ?2, ?3, ?4, ?5)")
+    .prepare(
+      "INSERT INTO events (box_id, ts, device_id, type, subject_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
     .bind(boxId, now, deviceId, type, subject);
 }
 
@@ -229,14 +283,19 @@ function insertEvent(db: D1Database, boxId: string, now: number, deviceId: strin
  * CHECK on `assertions`. The condition is evaluated inside the transaction, so it cannot race.
  */
 function assertThat(db: D1Database, condition: string, ...binds: unknown[]) {
-  return db.prepare(`INSERT INTO assertions SELECT CASE WHEN ${condition} THEN 1 ELSE 0 END`).bind(...binds);
+  return db
+    .prepare(`INSERT INTO assertions SELECT CASE WHEN ${condition} THEN 1 ELSE 0 END`)
+    .bind(...binds);
 }
 const clearAssertions = (db: D1Database) => db.prepare("DELETE FROM assertions");
 const isAssertionFailure = (err: unknown) => /CHECK constraint/i.test(String(err));
 const isUnique = (err: unknown) => /UNIQUE/i.test(String(err));
 
 async function metaState(db: D1Database, boxId: string) {
-  return (await db.prepare("SELECT epoch, head_seq FROM boxes WHERE id = ?1").bind(boxId).first<{ epoch: number; head_seq: number }>())!;
+  return (await db
+    .prepare("SELECT epoch, head_seq FROM boxes WHERE id = ?1")
+    .bind(boxId)
+    .first<{ epoch: number; head_seq: number }>())!;
 }
 
 interface ItemRow {
@@ -252,7 +311,8 @@ const ITEM_COLS = "id, rev, seq, deleted, blob, updated_at";
 /** Items one box may hold (live and tombstones): open sign-up must not be a free file store. */
 const maxItemsPerBox = (env: Env) => Math.max(1, Number(env.MAX_ITEMS_PER_BOX) || 5000);
 /** Characters of item blob (base64url text) one box may store, and the same bound on its retained history. */
-const maxBytesPerBox = (env: Env) => Math.max(1, Math.floor(Number(env.MAX_BOX_BYTES)) || 64 * 1024 * 1024);
+const maxBytesPerBox = (env: Env) =>
+  Math.max(1, Math.floor(Number(env.MAX_BOX_BYTES)) || 64 * 1024 * 1024);
 
 /** Keeps a box's retained history under its byte quota by dropping the oldest rows first (a thief rewriting items cannot fill the database). */
 function pruneBoxHistory(env: Env, boxId: string) {
@@ -262,7 +322,8 @@ function pruneBoxHistory(env: Env, boxId: string) {
   ).bind(boxId, maxBytesPerBox(env));
 }
 
-const DEVICE_PUBLIC_COLS = "id, name, kind, sig_pubkey, enc_pubkey, created_at, last_seen_at, revoked_at, activates_at";
+const DEVICE_PUBLIC_COLS =
+  "id, name, kind, sig_pubkey, enc_pubkey, created_at, last_seen_at, revoked_at, activates_at";
 
 // ---------------------------------------------------------------------------------------------
 // POST /v1/bootstrap  (one time; shared-secret auth, not signed)
@@ -283,8 +344,16 @@ app.post("/v1/bootstrap", async (c) => {
     const connectCode = req.headers.get("x-bisel-connect");
     if (connectCode !== null) {
       // An approved device-code request: the person signed in on the dashboard and approved this Mac.
-      const request = DEVICE_CODE.test(connectCode) ? await connectByDeviceCode(env, connectCode) : null;
-      if (!request || request.status !== "approved" || request.kind !== "create" || request.expires_at <= now || !request.account_id) {
+      const request = DEVICE_CODE.test(connectCode)
+        ? await connectByDeviceCode(env, connectCode)
+        : null;
+      if (
+        !request ||
+        request.status !== "approved" ||
+        request.kind !== "create" ||
+        request.expires_at <= now ||
+        !request.account_id
+      ) {
         await decoyVerify("device", new Uint8Array(64), new Uint8Array(32));
         await recordFailure(env, req, now, "bad_connect_code");
         return deny();
@@ -316,7 +385,8 @@ app.post("/v1/bootstrap", async (c) => {
   c.set("body", body);
   const parsed = parseJson(c, BootstrapSchema, BODY_LIMITS.bootstrap);
   if (!parsed.ok) return parsed.res;
-  const { device, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey } = parsed.data;
+  const { device, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey } =
+    parsed.data;
   if (
     !(await validDeviceKeys(device)) ||
     !(await validRecoveryKeys(recovery_pubkey, recovery_enc_pubkey)) ||
@@ -330,25 +400,58 @@ app.post("/v1/bootstrap", async (c) => {
   try {
     await db.batch([
       // A connect request redeems exactly once: the box, its first device and the request's end are one transaction.
-      ...(owner ? [assertThat(db, "EXISTS (SELECT 1 FROM connect_requests WHERE id = ?1 AND status = 'approved' AND expires_at > ?2)", owner.requestId, now)] : []),
+      ...(owner
+        ? [
+            assertThat(
+              db,
+              "EXISTS (SELECT 1 FROM connect_requests WHERE id = ?1 AND status = 'approved' AND expires_at > ?2)",
+              owner.requestId,
+              now,
+            ),
+          ]
+        : []),
       db
         .prepare(
           `INSERT INTO boxes (id, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, head_seq, epoch, created_at, owner_id)
            VALUES (?1, 'ed25519', ?2, ?3, ?4, ?5, 0, 1, ?6, ?7)`,
         )
-        .bind(boxId, recovery_pubkey, recovery_enc_pubkey, recovery_envelope, admin_pubkey, now, owner?.accountId ?? null),
+        .bind(
+          boxId,
+          recovery_pubkey,
+          recovery_enc_pubkey,
+          recovery_envelope,
+          admin_pubkey,
+          now,
+          owner?.accountId ?? null,
+        ),
       insertDevice(db, boxId, device, now, 1),
       insertEvent(db, boxId, now, device.id, "bootstrap", device.id),
-      ...(owner ? [db.prepare("UPDATE connect_requests SET status = 'consumed' WHERE id = ?1").bind(owner.requestId), clearAssertions(db)] : []),
+      ...(owner
+        ? [
+            db
+              .prepare("UPDATE connect_requests SET status = 'consumed' WHERE id = ?1")
+              .bind(owner.requestId),
+            clearAssertions(db),
+          ]
+        : []),
     ]);
   } catch (err) {
     // The account already owns a box (it is told, it is the one who holds the approval).
     if (owner && /boxes\.owner_id/.test(String(err))) return c.json({ error: "box_exists" }, 409);
     // The device id is already registered (in this or another box), or the approval was just used: same refusal as any other bootstrap failure.
-    console.log(JSON.stringify({ evt: "auth_fail", reason: "bootstrap_conflict", message: String(err) }));
+    console.log(
+      JSON.stringify({ evt: "auth_fail", reason: "bootstrap_conflict", message: String(err) }),
+    );
     return deny();
   }
-  console.log(JSON.stringify({ evt: "bootstrap", box: boxId.slice(0, 8), device: device.id, via: owner ? "account" : "token" }));
+  console.log(
+    JSON.stringify({
+      evt: "bootstrap",
+      box: boxId.slice(0, 8),
+      device: device.id,
+      via: owner ? "account" : "token",
+    }),
+  );
   return c.json({ device_id: device.id, box_id: boxId, head_seq: 0, epoch: 1 }, 201);
 });
 
@@ -370,11 +473,21 @@ app.get("/v1/sync", deviceAuth, async (c) => {
   const { events_since } = q.data;
   const boxId = boxOf(c);
   const [itemsRes, metaRes, devicesRes, eventsRes] = await db.batch([
-    db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE box_id = ?3 AND seq > ?1 ORDER BY seq ASC LIMIT ?2`).bind(since, limit + 1, boxId),
     db
-      .prepare("SELECT head_seq, epoch, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope FROM boxes WHERE id = ?1")
+      .prepare(
+        `SELECT ${ITEM_COLS} FROM items WHERE box_id = ?3 AND seq > ?1 ORDER BY seq ASC LIMIT ?2`,
+      )
+      .bind(since, limit + 1, boxId),
+    db
+      .prepare(
+        "SELECT head_seq, epoch, recovery_alg, recovery_pubkey, recovery_enc_pubkey, recovery_envelope FROM boxes WHERE id = ?1",
+      )
       .bind(boxId),
-    db.prepare(`SELECT ${DEVICE_PUBLIC_COLS} FROM devices WHERE box_id = ?1 ORDER BY created_at ASC, id ASC`).bind(boxId),
+    db
+      .prepare(
+        `SELECT ${DEVICE_PUBLIC_COLS} FROM devices WHERE box_id = ?1 ORDER BY created_at ASC, id ASC`,
+      )
+      .bind(boxId),
     events_since === undefined
       ? db
           .prepare(
@@ -382,7 +495,9 @@ app.get("/v1/sync", deviceAuth, async (c) => {
           )
           .bind(boxId)
       : db
-          .prepare("SELECT id, ts, device_id, type, subject_id FROM events WHERE box_id = ?2 AND id > ?1 ORDER BY id ASC LIMIT 100")
+          .prepare(
+            "SELECT id, ts, device_id, type, subject_id FROM events WHERE box_id = ?2 AND id > ?1 ORDER BY id ASC LIMIT 100",
+          )
           .bind(events_since, boxId),
   ]);
   const rows = itemsRes!.results as unknown as ItemRow[];
@@ -429,7 +544,8 @@ app.put("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
   const parsed = parseJson(c, PutItemSchema, BODY_LIMITS.item);
   if (!parsed.ok) return parsed.res;
   const { base_rev, blob, epoch } = parsed.data;
-  if (b64urlByteLength(blob) > MAX_BLOB_BYTES) return c.json({ error: "too_large", max_bytes: MAX_BLOB_BYTES }, 413);
+  if (b64urlByteLength(blob) > MAX_BLOB_BYTES)
+    return c.json({ error: "too_large", max_bytes: MAX_BLOB_BYTES }, 413);
   // wrapped item key (60) + the body's nonce and tag (28): anything shorter is not a sealed item (it would also stall rotation).
   if (b64urlByteLength(blob) < MIN_BLOB_BYTES) return bad(c, "invalid_blob");
 
@@ -445,7 +561,11 @@ app.put("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
     `((EXISTS (SELECT 1 FROM items WHERE box_id = ?6 AND id = ?1) OR (SELECT item_count FROM boxes WHERE id = ?6) < ${maxItems})` +
     ` AND (SELECT stored_bytes FROM boxes WHERE id = ?6) - COALESCE((SELECT length(blob) FROM items WHERE box_id = ?6 AND id = ?1), 0) + ${blob.length} <= ${maxBytes})`;
   const [bump, , , current, state] = await db.batch([
-    db.prepare(`UPDATE boxes SET head_seq = head_seq + 1 WHERE id = ?6 AND epoch = ?3 AND ${ROOM} AND ${REV_GUARD}`).bind(id, base_rev, epoch, null, null, boxId),
+    db
+      .prepare(
+        `UPDATE boxes SET head_seq = head_seq + 1 WHERE id = ?6 AND epoch = ?3 AND ${ROOM} AND ${REV_GUARD}`,
+      )
+      .bind(id, base_rev, epoch, null, null, boxId),
     // The state being replaced stays recoverable for the retention period (same guard as the write).
     db
       .prepare(
@@ -473,8 +593,10 @@ app.put("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
     const st = state!.results[0] as { epoch: number; item_count: number; stored_bytes: number };
     // The blob's item key is wrapped under a vault key that has since been rotated: refuse, the client re-wraps.
     if (st.epoch !== epoch) return c.json({ error: "stale_epoch", epoch: st.epoch }, 409);
-    if (!row && st.item_count >= maxItems) return c.json({ error: "box_full", max_items: maxItems }, 409);
-    if (st.stored_bytes - (row?.blob.length ?? 0) + blob.length > maxBytes) return c.json({ error: "box_full", max_bytes: maxBytes }, 409);
+    if (!row && st.item_count >= maxItems)
+      return c.json({ error: "box_full", max_items: maxItems }, 409);
+    if (st.stored_bytes - (row?.blob.length ?? 0) + blob.length > maxBytes)
+      return c.json({ error: "box_full", max_bytes: maxBytes }, 409);
     return c.json({ error: "conflict", current: row ? itemJson(row) : null }, 409);
   }
   return c.json({ item: itemJson(row!) });
@@ -493,9 +615,12 @@ app.delete("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
   const db = c.env.DB;
   const now = c.get("now");
   const boxId = boxOf(c);
-  const guard = "EXISTS (SELECT 1 FROM items WHERE box_id = ?6 AND id = ?1 AND rev = ?2 AND deleted = 0) AND (SELECT epoch FROM boxes WHERE id = ?6) = ?3";
+  const guard =
+    "EXISTS (SELECT 1 FROM items WHERE box_id = ?6 AND id = ?1 AND rev = ?2 AND deleted = 0) AND (SELECT epoch FROM boxes WHERE id = ?6) = ?3";
   const [bump, , , current, state] = await db.batch([
-    db.prepare(`UPDATE boxes SET head_seq = head_seq + 1 WHERE id = ?6 AND ${guard}`).bind(id, base_rev, epoch, null, null, boxId),
+    db
+      .prepare(`UPDATE boxes SET head_seq = head_seq + 1 WHERE id = ?6 AND ${guard}`)
+      .bind(id, base_rev, epoch, null, null, boxId),
     db
       .prepare(
         `INSERT INTO item_history (box_id, item_id, rev, kind, blob, deleted, epoch, replaced_at)
@@ -577,7 +702,8 @@ app.post("/v1/devices", deviceAuth, adminAuth, async (c) => {
       clearAssertions(db),
     ]);
   } catch (err) {
-    if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db, boxId)).epoch }, 409);
+    if (isAssertionFailure(err))
+      return c.json({ error: "stale_epoch", epoch: (await metaState(db, boxId)).epoch }, 409);
     if (isUnique(err)) return c.json({ error: "exists" }, 409);
     throw err;
   }
@@ -598,17 +724,24 @@ app.delete("/v1/devices/:id", deviceAuth, adminAuth, async (c) => {
   if (!nq.ok) return nq.res;
   const db = c.env.DB;
   const boxId = boxOf(c);
-  const target = await db.prepare("SELECT id, revoked_at FROM devices WHERE id = ?1 AND box_id = ?2").bind(id, boxId).first<{
-    id: string;
-    revoked_at: number | null;
-  }>();
+  const target = await db
+    .prepare("SELECT id, revoked_at FROM devices WHERE id = ?1 AND box_id = ?2")
+    .bind(id, boxId)
+    .first<{
+      id: string;
+      revoked_at: number | null;
+    }>();
   if (!target) return c.json({ error: "not_found" }, 404);
   if (target.revoked_at != null) return c.json({ id, revoked_at: target.revoked_at });
   const p = c.get("principal");
   const now = c.get("now");
   // Wipe the envelope too: a revoked device has no reason to keep a server-side copy of VK-to-it.
   await db.batch([
-    db.prepare("UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND box_id = ?3 AND revoked_at IS NULL").bind(now, id, boxId),
+    db
+      .prepare(
+        "UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND box_id = ?3 AND revoked_at IS NULL",
+      )
+      .bind(now, id, boxId),
     insertEvent(db, boxId, now, p.kind === "device" ? p.id : null, "revoke", id),
   ]);
   return c.json({ id, revoked_at: now, rotated: false });
@@ -626,12 +759,33 @@ app.post("/v1/box/claim", deviceAuth, adminAuth, async (c) => {
   if (!nq.ok) return nq.res;
   const p = c.get("principal");
   const db = c.env.DB;
-  const box = await db.prepare("SELECT owner_id FROM boxes WHERE id = ?1").bind(p.boxId).first<{ owner_id: string | null }>();
+  const box = await db
+    .prepare("SELECT owner_id FROM boxes WHERE id = ?1")
+    .bind(p.boxId)
+    .first<{ owner_id: string | null }>();
   if (box?.owner_id) return c.json({ error: "already_linked" }, 409);
-  const device = await db.prepare("SELECT name FROM devices WHERE id = ?1").bind(p.kind === "device" ? p.id : "").first<{ name: string }>();
+  const device = await db
+    .prepare("SELECT name FROM devices WHERE id = ?1")
+    .bind(p.kind === "device" ? p.id : "")
+    .first<{ name: string }>();
   // One live claim per box: a new request replaces any earlier pending one.
-  await db.prepare("DELETE FROM connect_requests WHERE box_id = ?1 AND kind = 'claim' AND status = 'pending'").bind(p.boxId).run();
-  return c.json(await createConnectRequest(c.env, c.req.raw, c.get("now"), "claim", device?.name ?? "This device", p.boxId), 201);
+  await db
+    .prepare(
+      "DELETE FROM connect_requests WHERE box_id = ?1 AND kind = 'claim' AND status = 'pending'",
+    )
+    .bind(p.boxId)
+    .run();
+  return c.json(
+    await createConnectRequest(
+      c.env,
+      c.req.raw,
+      c.get("now"),
+      "claim",
+      device?.name ?? "This device",
+      p.boxId,
+    ),
+    201,
+  );
 });
 
 app.get("/v1/envelope", deviceAuth, async (c) => {
@@ -645,7 +799,11 @@ app.get("/v1/envelope", deviceAuth, async (c) => {
   )
     .bind(p.kind === "device" ? p.id : "", p.boxId)
     .first<{ envelope: string; epoch: number }>();
-  return c.json({ device_id: p.kind === "device" ? p.id : null, envelope: row?.envelope ?? "", epoch: row?.epoch ?? 0 });
+  return c.json({
+    device_id: p.kind === "device" ? p.id : null,
+    envelope: row?.envelope ?? "",
+    epoch: row?.epoch ?? 0,
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -667,7 +825,8 @@ app.post("/v1/rotate", deviceAuth, adminAuth, async (c) => {
   const callerId = p.kind === "device" ? p.id : "";
   if (r.revoke === callerId) return bad(c, "cannot_revoke_self");
   if (!r.devices.some((d) => d.id === callerId)) return bad(c, "caller_not_in_devices");
-  if (r.revoke && r.devices.some((d) => d.id === r.revoke)) return bad(c, "revoked_device_in_devices");
+  if (r.revoke && r.devices.some((d) => d.id === r.revoke))
+    return bad(c, "revoked_device_in_devices");
   if (!(await validAdminKey(r.new_admin_pubkey))) return bad(c, "invalid_key");
 
   const db = c.env.DB;
@@ -683,12 +842,25 @@ app.post("/v1/rotate", deviceAuth, adminAuth, async (c) => {
   const boxId = p.boxId;
   try {
     await db.batch([
-      assertThat(db, "EXISTS (SELECT 1 FROM boxes WHERE id = ?3 AND epoch = ?1 AND head_seq = ?2)", r.base_epoch, r.base_seq, boxId),
+      assertThat(
+        db,
+        "EXISTS (SELECT 1 FROM boxes WHERE id = ?3 AND epoch = ?1 AND head_seq = ?2)",
+        r.base_epoch,
+        r.base_seq,
+        boxId,
+      ),
       ...(r.revoke
         ? [
-            assertThat(db, "EXISTS (SELECT 1 FROM devices WHERE id = ?1 AND box_id = ?2 AND revoked_at IS NULL)", r.revoke, boxId),
+            assertThat(
+              db,
+              "EXISTS (SELECT 1 FROM devices WHERE id = ?1 AND box_id = ?2 AND revoked_at IS NULL)",
+              r.revoke,
+              boxId,
+            ),
             db
-              .prepare("UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND box_id = ?3 AND revoked_at IS NULL")
+              .prepare(
+                "UPDATE devices SET revoked_at = ?1, envelope = '' WHERE id = ?2 AND box_id = ?3 AND revoked_at IS NULL",
+              )
               .bind(now, r.revoke, boxId),
           ]
         : []),
@@ -720,7 +892,9 @@ app.post("/v1/rotate", deviceAuth, adminAuth, async (c) => {
         .bind(envelopes, newEpoch, boxId),
       // The admin key moves with VK; this request was authorised by the old one.
       db
-        .prepare("UPDATE boxes SET epoch = ?1, head_seq = head_seq + ?2, recovery_envelope = ?3, admin_pubkey = ?4 WHERE id = ?5")
+        .prepare(
+          "UPDATE boxes SET epoch = ?1, head_seq = head_seq + ?2, recovery_envelope = ?3, admin_pubkey = ?4 WHERE id = ?5",
+        )
         .bind(newEpoch, n + t, r.recovery_envelope, r.new_admin_pubkey, boxId),
       // Every live item and tombstone was rotated (none omitted, none at another rev, none appeared) and every active device got its envelope.
       assertThat(
@@ -745,12 +919,35 @@ app.post("/v1/rotate", deviceAuth, adminAuth, async (c) => {
   } catch (err) {
     if (!isAssertionFailure(err)) throw err;
     const state = await metaState(db, boxId);
-    console.log(JSON.stringify({ evt: "rotate_conflict", device: callerId.slice(0, 8), base_epoch: r.base_epoch, epoch: state.epoch }));
+    console.log(
+      JSON.stringify({
+        evt: "rotate_conflict",
+        device: callerId.slice(0, 8),
+        base_epoch: r.base_epoch,
+        epoch: state.epoch,
+      }),
+    );
     return c.json({ error: "conflict", epoch: state.epoch, head_seq: state.head_seq }, 409);
   }
   await pruneHistory(c.env, now).run();
-  console.log(JSON.stringify({ evt: "rotate", device: callerId.slice(0, 8), epoch: newEpoch, items: n, tombstones: t, devices: m, revoked: !!r.revoke }));
-  return c.json({ epoch: newEpoch, head_seq: r.base_seq + n + t, rotated_items: n, rotated_tombstones: t, revoked: r.revoke });
+  console.log(
+    JSON.stringify({
+      evt: "rotate",
+      device: callerId.slice(0, 8),
+      epoch: newEpoch,
+      items: n,
+      tombstones: t,
+      devices: m,
+      revoked: !!r.revoke,
+    }),
+  );
+  return c.json({
+    epoch: newEpoch,
+    head_seq: r.base_seq + n + t,
+    rotated_items: n,
+    rotated_tombstones: t,
+    revoked: r.revoke,
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -782,7 +979,8 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
       )
       .bind(now, boxId)
       .first<{ active: number; pending: number }>();
-    if (load!.pending >= MAX_PENDING_RECOVERY_DEVICES || load!.active >= MAX_ACTIVE_DEVICES) return c.json({ error: "too_many_devices" }, 409);
+    if (load!.pending >= MAX_PENDING_RECOVERY_DEVICES || load!.active >= MAX_ACTIVE_DEVICES)
+      return c.json({ error: "too_many_devices" }, 409);
     try {
       await db.batch([
         assertThat(db, "EXISTS (SELECT 1 FROM boxes WHERE id = ?2 AND epoch = ?1)", epoch, boxId),
@@ -791,7 +989,8 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
         clearAssertions(db),
       ]);
     } catch (err) {
-      if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db, boxId)).epoch }, 409);
+      if (isAssertionFailure(err))
+        return c.json({ error: "stale_epoch", epoch: (await metaState(db, boxId)).epoch }, 409);
       if (isUnique(err)) return c.json({ error: "exists" }, 409);
       throw err;
     }
@@ -813,7 +1012,17 @@ app.post("/v1/recovery/session", recoveryAuth, async (c) => {
     recovery_envelope: meta!.recovery_envelope,
     head_seq: meta!.head_seq,
     epoch: meta!.epoch,
-    ...(device ? { device: { id: device.id, name: device.name, kind: device.kind, created_at: now, activates_at: activatesAt } } : {}),
+    ...(device
+      ? {
+          device: {
+            id: device.id,
+            name: device.name,
+            kind: device.kind,
+            created_at: now,
+            activates_at: activatesAt,
+          },
+        }
+      : {}),
   });
 });
 
@@ -821,7 +1030,8 @@ app.post("/v1/recovery/rotate", deviceAuth, adminAuth, async (c) => {
   const parsed = parseJson(c, RecoveryRotateSchema, BODY_LIMITS.small);
   if (!parsed.ok) return parsed.res;
   const { recovery_pubkey, recovery_enc_pubkey, recovery_envelope, epoch } = parsed.data;
-  if (!(await validRecoveryKeys(recovery_pubkey, recovery_enc_pubkey))) return bad(c, "invalid_key");
+  if (!(await validRecoveryKeys(recovery_pubkey, recovery_enc_pubkey)))
+    return bad(c, "invalid_key");
   const p = c.get("principal");
   const now = c.get("now");
   const db = c.env.DB;
@@ -830,13 +1040,16 @@ app.post("/v1/recovery/rotate", deviceAuth, adminAuth, async (c) => {
     await db.batch([
       assertThat(db, "EXISTS (SELECT 1 FROM boxes WHERE id = ?2 AND epoch = ?1)", epoch, boxId),
       db
-        .prepare("UPDATE boxes SET recovery_pubkey = ?1, recovery_enc_pubkey = ?2, recovery_envelope = ?3 WHERE id = ?4")
+        .prepare(
+          "UPDATE boxes SET recovery_pubkey = ?1, recovery_enc_pubkey = ?2, recovery_envelope = ?3 WHERE id = ?4",
+        )
         .bind(recovery_pubkey, recovery_enc_pubkey, recovery_envelope, boxId),
       insertEvent(db, boxId, now, p.kind === "device" ? p.id : null, "recovery_rotate", null),
       clearAssertions(db),
     ]);
   } catch (err) {
-    if (isAssertionFailure(err)) return c.json({ error: "stale_epoch", epoch: (await metaState(db, boxId)).epoch }, 409);
+    if (isAssertionFailure(err))
+      return c.json({ error: "stale_epoch", epoch: (await metaState(db, boxId)).epoch }, 409);
     throw err;
   }
   return c.json({ ok: true });

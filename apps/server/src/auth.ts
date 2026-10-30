@@ -3,7 +3,9 @@ import { b64urlDecode, hex } from "./encoding";
 import { MAX_BODY_BYTES } from "./schemas";
 
 /** Every principal belongs to exactly one box; handlers take the box from here and never from the request. */
-export type Principal = { kind: "device"; id: string; boxId: string } | { kind: "recovery"; boxId: string };
+export type Principal =
+  | { kind: "device"; id: string; boxId: string }
+  | { kind: "recovery"; boxId: string };
 
 /** The box that existed before accounts. Recovery requests without X-Bisel-Box resolve to it (drop once clients send the header). */
 export const LEGACY_BOX_ID = "legacy_box_00000000";
@@ -36,7 +38,8 @@ const RE_BOX = /^[A-Za-z0-9_-]{16,64}$/;
 export const RECOVERY_DEVICE_HEADER = "recovery";
 
 /** Valid public keys of nobody: a request for an unknown principal is verified against these, so it costs the same. */
-const DECOY_P256 = "BFwYlCzVcbNbUVVo4ctkabccqBVuxOtyodh8L3rYyRb7R0CZVFOQ3O6zObTDzem4a4dRPevWwd_uGdj23vg0RWU";
+const DECOY_P256 =
+  "BFwYlCzVcbNbUVVo4ctkabccqBVuxOtyodh8L3rYyRb7R0CZVFOQ3O6zObTDzem4a4dRPevWwd_uGdj23vg0RWU";
 const DECOY_ED25519 = "_Edh-W08o87bHVUnuXATeul30lxytWOt0FrBE-W36P8";
 
 export function clientIp(req: Request): string {
@@ -46,17 +49,25 @@ export function clientIp(req: Request): string {
 
 /** RFC 3986 percent-encoding: everything except A-Z a-z 0-9 - . _ ~ is escaped (UTF-8 bytes). */
 function pct(s: string): string {
-  return encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+  return encodeURIComponent(s).replace(
+    /[!'()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
 }
 
 /** Query params sorted by name then value (code-unit order), each as pct(k)=pct(v), joined with &. */
 export function canonicalQuery(url: URL): string {
   const pairs = [...url.searchParams.entries()].map(([k, v]) => [pct(k), pct(v)] as const);
-  pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+  pairs.sort((a, b) =>
+    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0,
+  );
   return pairs.map(([k, v]) => `${k}=${v}`).join("&");
 }
 
-export async function readBodyCapped(req: Request, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
+export async function readBodyCapped(
+  req: Request,
+  limit: number,
+): Promise<Uint8Array<ArrayBuffer> | null> {
   const declared = req.headers.get("content-length");
   if (declared !== null && !(Number(declared) <= limit)) return null; // also catches NaN
   if (!req.body) return new Uint8Array(0);
@@ -110,7 +121,13 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  * Counts one failure for the caller's address and, if the address is over budget, delays the answer.
  * One upsert: past the limit its WHERE clause makes it a no-op (no row written, nothing returned).
  */
-export async function recordFailure(env: Env, req: Request, now: number, reason: string, extra: object = {}) {
+export async function recordFailure(
+  env: Env,
+  req: Request,
+  now: number,
+  reason: string,
+  extra: object = {},
+) {
   const ip = clientIp(req);
   const { limit, window, backoffMs } = limits(env);
   let overBudget = false;
@@ -171,11 +188,22 @@ interface PrincipalRow {
 type Mode = "device" | "recovery";
 
 /** Verifies `sig` over `message`; any import/verify error counts as "invalid". Never throws. */
-async function verifySignature(alg: string, pubkeyB64: string, sig: Uint8Array<ArrayBuffer>, message: Uint8Array<ArrayBuffer>) {
+async function verifySignature(
+  alg: string,
+  pubkeyB64: string,
+  sig: Uint8Array<ArrayBuffer>,
+  message: Uint8Array<ArrayBuffer>,
+) {
   try {
     const raw = b64urlDecode(pubkeyB64);
     if (alg === "p256") {
-      const key = await crypto.subtle.importKey("raw", raw, { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+      const key = await crypto.subtle.importKey(
+        "raw",
+        raw,
+        { name: "ECDSA", namedCurve: "P-256" },
+        false,
+        ["verify"],
+      );
       return await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, sig, message);
     }
     if (alg === "ed25519") {
@@ -189,8 +217,17 @@ async function verifySignature(alg: string, pubkeyB64: string, sig: Uint8Array<A
 }
 
 /** The same verification an unknown principal's request goes through, with a key nobody holds. */
-export async function decoyVerify(mode: Mode, sig: Uint8Array<ArrayBuffer>, message: Uint8Array<ArrayBuffer>) {
-  await verifySignature(mode === "device" ? "p256" : "ed25519", mode === "device" ? DECOY_P256 : DECOY_ED25519, sig, message);
+export async function decoyVerify(
+  mode: Mode,
+  sig: Uint8Array<ArrayBuffer>,
+  message: Uint8Array<ArrayBuffer>,
+) {
+  await verifySignature(
+    mode === "device" ? "p256" : "ed25519",
+    mode === "device" ? DECOY_P256 : DECOY_ED25519,
+    sig,
+    message,
+  );
 }
 
 /**
@@ -221,7 +258,8 @@ export function authenticate(mode: Mode) {
       }
       // Only recovery requests name their box (a device's box is its row); absent = the pre-accounts box.
       const boxHeader = req.headers.get("x-bisel-box");
-      if (boxHeader !== null && (mode !== "recovery" || !RE_BOX.test(boxHeader))) return await fail("malformed_headers");
+      if (boxHeader !== null && (mode !== "recovery" || !RE_BOX.test(boxHeader)))
+        return await fail("malformed_headers");
       const recoveryBox = boxHeader ?? LEGACY_BOX_ID;
       let sig: Uint8Array<ArrayBuffer>;
       try {
@@ -234,20 +272,23 @@ export function authenticate(mode: Mode) {
       const body = await readBodyCapped(req, MAX_BODY_BYTES);
       if (!body) return await fail("body_too_large");
 
-      const row = await (mode === "device"
-        ? env.DB.prepare(
-            `SELECT d.id, d.box_id, d.sig_alg, d.sig_pubkey, d.revoked_at, d.last_seen_at, d.activates_at, b.disabled_at
+      const row = await (
+        mode === "device"
+          ? env.DB.prepare(
+              `SELECT d.id, d.box_id, d.sig_alg, d.sig_pubkey, d.revoked_at, d.last_seen_at, d.activates_at, b.disabled_at
              FROM devices d JOIN boxes b ON b.id = d.box_id WHERE d.id = ?1`,
-          ).bind(deviceId)
-        : env.DB.prepare(
-            `SELECT id AS box_id, recovery_alg AS sig_alg, recovery_pubkey AS sig_pubkey, NULL AS revoked_at, NULL AS last_seen_at, disabled_at
+            ).bind(deviceId)
+          : env.DB.prepare(
+              `SELECT id AS box_id, recovery_alg AS sig_alg, recovery_pubkey AS sig_pubkey, NULL AS revoked_at, NULL AS last_seen_at, disabled_at
              FROM boxes WHERE id = ?1`,
-          ).bind(recoveryBox)
+            ).bind(recoveryBox)
       ).first<PrincipalRow>();
 
       const url = new URL(req.url);
       const signed = new TextEncoder().encode(
-        [req.method, url.pathname, canonicalQuery(url), await sha256Hex(body), ts, nonce].join("\n"),
+        [req.method, url.pathname, canonicalQuery(url), await sha256Hex(body), ts, nonce].join(
+          "\n",
+        ),
       ) as Uint8Array<ArrayBuffer>;
 
       let valid = false;
@@ -255,19 +296,25 @@ export function authenticate(mode: Mode) {
       else await decoyVerify(mode, sig, signed);
 
       // Evaluated only after the verification so every outcome did the same work.
-      if (!row) return await fail(mode === "device" ? "unknown_device" : "not_bootstrapped", { device: deviceId });
+      if (!row)
+        return await fail(mode === "device" ? "unknown_device" : "not_bootstrapped", {
+          device: deviceId,
+        });
       if (row.revoked_at != null) return await fail("revoked_device", { device: deviceId });
       if (row.disabled_at != null) return await fail("box_disabled", { device: deviceId });
-      if (row.activates_at != null && row.activates_at > now) return await fail("pending_activation", { device: deviceId });
-      if (Math.abs(now - Number(ts)) > MAX_SKEW_SECONDS) return await fail("clock_skew", { device: deviceId, skew: now - Number(ts) });
+      if (row.activates_at != null && row.activates_at > now)
+        return await fail("pending_activation", { device: deviceId });
+      if (Math.abs(now - Number(ts)) > MAX_SKEW_SECONDS)
+        return await fail("clock_skew", { device: deviceId, skew: now - Number(ts) });
       if (!valid) return await fail("bad_signature", { device: deviceId });
 
       const [ins] = await env.DB.batch([
-        env.DB.prepare("INSERT INTO nonces (nonce, ts) VALUES (?1, ?2) ON CONFLICT(nonce) DO NOTHING").bind(nonce, now),
-        env.DB.prepare("DELETE FROM nonces WHERE nonce IN (SELECT nonce FROM nonces WHERE ts < ?1 LIMIT ?2)").bind(
-          now - NONCE_TTL_SECONDS,
-          PRUNE_BATCH,
-        ),
+        env.DB.prepare(
+          "INSERT INTO nonces (nonce, ts) VALUES (?1, ?2) ON CONFLICT(nonce) DO NOTHING",
+        ).bind(nonce, now),
+        env.DB.prepare(
+          "DELETE FROM nonces WHERE nonce IN (SELECT nonce FROM nonces WHERE ts < ?1 LIMIT ?2)",
+        ).bind(now - NONCE_TTL_SECONDS, PRUNE_BATCH),
         // Failure counters of quiet addresses (the owner's own, after a clock-skew slip) do not linger in the database.
         env.DB.prepare(
           "DELETE FROM auth_failures WHERE ip IN (SELECT ip FROM auth_failures WHERE window_start <= ?1 - ?2 LIMIT ?3)",
@@ -277,10 +324,17 @@ export function authenticate(mode: Mode) {
 
       // "Last seen" is kept to the hour: enough for a device list, little for traffic analysis.
       if (mode === "device" && (row.last_seen_at ?? 0) < now - 3600) {
-        await env.DB.prepare("UPDATE devices SET last_seen_at = ?1 WHERE id = ?2").bind(now - (now % 3600), deviceId).run();
+        await env.DB.prepare("UPDATE devices SET last_seen_at = ?1 WHERE id = ?2")
+          .bind(now - (now % 3600), deviceId)
+          .run();
       }
 
-      c.set("principal", mode === "device" ? { kind: "device", id: deviceId, boxId: row.box_id } : { kind: "recovery", boxId: row.box_id });
+      c.set(
+        "principal",
+        mode === "device"
+          ? { kind: "device", id: deviceId, boxId: row.box_id }
+          : { kind: "recovery", boxId: row.box_id },
+      );
       c.set("body", body);
       c.set("now", now);
       c.set("signed", new TextDecoder().decode(signed));
@@ -331,7 +385,9 @@ export function requireAdmin() {
       ok = false;
     }
     if (!ok) {
-      console.log(JSON.stringify({ evt: "admin_refused", path: c.req.path, who: c.get("principal").kind }));
+      console.log(
+        JSON.stringify({ evt: "admin_refused", path: c.req.path, who: c.get("principal").kind }),
+      );
       return refuse();
     }
     await next();

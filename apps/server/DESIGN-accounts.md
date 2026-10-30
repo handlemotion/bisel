@@ -4,7 +4,7 @@ Status: **approved 2026-10-29** (with the recommendations on §10). All three sl
 
 ## 1. What changes, in one paragraph
 
-Today one Worker + one D1 = one box, created once with `BOOTSTRAP_TOKEN`. After this: one Worker + one D1 = many boxes. A **box** is the unit that already exists (items, devices, recovery keys, epoch). An **account** (passkey login on the web) *owns* at most one box. Devices still authenticate exactly as now (P-256 signature, vault-admin signature on destructive routes, uniform empty 404s); the only new thing on the signed path is that a device's row says which box it belongs to. Encryption stays on the clients. The account never holds, derives or receives any key: it decides who may *create storage* and who sees the dashboard.
+Today one Worker + one D1 = one box, created once with `BOOTSTRAP_TOKEN`. After this: one Worker + one D1 = many boxes. A **box** is the unit that already exists (items, devices, recovery keys, epoch). An **account** (passkey login on the web) _owns_ at most one box. Devices still authenticate exactly as now (P-256 signature, vault-admin signature on destructive routes, uniform empty 404s); the only new thing on the signed path is that a device's row says which box it belongs to. Encryption stays on the clients. The account never holds, derives or receives any key: it decides who may _create storage_ and who sees the dashboard.
 
 ## 2. Principles (what must not regress)
 
@@ -20,14 +20,14 @@ Shared D1, `box_id` on every box-scoped table. Rejected alternatives: a D1 datab
 
 ### 0004_accounts.sql: box scoping (table rebuilds, SQLite cannot alter a primary key)
 
-| Table | Change |
-|---|---|
-| `meta` (single row, `id = 1`) | becomes **`boxes`**: `id TEXT PRIMARY KEY` (box id, `[A-Za-z0-9_-]{16,64}`), same columns as `meta`, plus `owner_id TEXT UNIQUE` (NULL = unowned; UNIQUE gives one box per account, SQLite allows many NULLs), `item_count INTEGER` (kept by an `AFTER INSERT ON items` trigger; the write guard compares it with `MAX_ITEMS_PER_BOX`), `disabled_at INTEGER`. Drops `CHECK (id = 1)`. |
-| `devices` | `+ box_id TEXT NOT NULL`, index `(box_id)`. Device `id` stays globally unique (it is the auth lookup key). |
-| `items` | `+ box_id`, primary key becomes **`(box_id, id)`**, `UNIQUE (box_id, seq)`. This is the important one: today `ON CONFLICT(id)` is global, so two tenants sharing an item id would overwrite each other. |
-| `item_history` | `+ box_id`, index `(box_id, item_id, id)` |
-| `events` | `+ box_id`, index `(box_id, id)` |
-| `nonces`, `auth_failures`, `assertions` | unchanged (global on purpose: replay and flood protection span tenants) |
+| Table                                   | Change                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `meta` (single row, `id = 1`)           | becomes **`boxes`**: `id TEXT PRIMARY KEY` (box id, `[A-Za-z0-9_-]{16,64}`), same columns as `meta`, plus `owner_id TEXT UNIQUE` (NULL = unowned; UNIQUE gives one box per account, SQLite allows many NULLs), `item_count INTEGER` (kept by an `AFTER INSERT ON items` trigger; the write guard compares it with `MAX_ITEMS_PER_BOX`), `disabled_at INTEGER`. Drops `CHECK (id = 1)`. |
+| `devices`                               | `+ box_id TEXT NOT NULL`, index `(box_id)`. Device `id` stays globally unique (it is the auth lookup key).                                                                                                                                                                                                                                                                             |
+| `items`                                 | `+ box_id`, primary key becomes **`(box_id, id)`**, `UNIQUE (box_id, seq)`. This is the important one: today `ON CONFLICT(id)` is global, so two tenants sharing an item id would overwrite each other.                                                                                                                                                                                |
+| `item_history`                          | `+ box_id`, index `(box_id, item_id, id)`                                                                                                                                                                                                                                                                                                                                              |
+| `events`                                | `+ box_id`, index `(box_id, id)`                                                                                                                                                                                                                                                                                                                                                       |
+| `nonces`, `auth_failures`, `assertions` | unchanged (global on purpose: replay and flood protection span tenants)                                                                                                                                                                                                                                                                                                                |
 
 New table:
 
@@ -61,13 +61,15 @@ Migration 0004 is pure SQL, no data leaves D1:
 3. Row counts before and after are asserted in the migration's own verification script (`scripts/verify-0004.sql`, run against a copy).
 
 What keeps working with **no client update**:
+
 - Every device-signed request: the box comes from the device row. Headers and canonical string are unchanged.
 - Recovery requests from a client that does not send `X-Bisel-Box`: they resolve to `legacy_box_00000000` (a constant in code, to be deleted once the Mac app sends the header; see §5).
-- The bootstrap token path: `POST /v1/bootstrap` with `X-Bisel-Bootstrap` still works (now creating an *unowned* box instead of "once ever"). After migration the prod `BOOTSTRAP_TOKEN` secret should be deleted; the route then answers the uniform 404 for everyone.
+- The bootstrap token path: `POST /v1/bootstrap` with `X-Bisel-Bootstrap` still works (now creating an _unowned_ box instead of "once ever"). After migration the prod `BOOTSTRAP_TOKEN` secret should be deleted; the route then answers the uniform 404 for everyone.
 
-**Becoming Rodrigo's account:** after deploy he signs up on the dashboard (empty account), then on the Mac (already synced to box.bisel.app) chooses *Link to account*. The Mac calls `POST /v1/box/claim` signed by the device **and** by the vault-admin key (so Touch ID is required and a bare device key cannot link the box). That returns a user code; the Mac opens `/connect?code=…`; he approves while signed in; `boxes.owner_id` is set. The same mechanism lets any pre-account box be linked later.
+**Becoming Rodrigo's account:** after deploy he signs up on the dashboard (empty account), then on the Mac (already synced to box.bisel.app) chooses _Link to account_. The Mac calls `POST /v1/box/claim` signed by the device **and** by the vault-admin key (so Touch ID is required and a bare device key cannot link the box). That returns a user code; the Mac opens `/connect?code=…`; he approves while signed in; `boxes.owner_id` is set. The same mechanism lets any pre-account box be linked later.
 
 **Production steps, all needing Rodrigo's explicit go (none done):**
+
 1. `wrangler d1 export bisel --remote` to a local file (backup; D1 Time Travel also covers 30 days).
 2. Rehearse 0004 on a copy of that export locally; run `verify-0004.sql`.
 3. Set secrets: `BETTER_AUTH_SECRET`; deploy; apply migrations `--remote`. Ordering: the new schema and new code are not compatible with each other's opposite (old code has no `box_id`), so migrate then deploy back to back. Rodrigo's single box sees a few seconds of 404/500 on sync, which clients already retry.
@@ -125,34 +127,34 @@ Mac (onboarding, sync step)            Server                          Browser (
 
 ### 6.4 Dashboard (first slice)
 
-Signed-out: sign in / create account. Signed-in: account name, passkeys (add / remove, keep at least one), the box (created date, items count, epoch) and its **devices** (name, kind, added, last seen, revoked), read-only, from the same columns `GET /v1/devices` exposes. One write: **Delete box** (fresh passkey re-authentication, typed confirmation, removes all rows of that `box_id`). Revoking a device is *not* in the dashboard: a safe revoke rotates the vault key client-side. Sign out.
+Signed-out: sign in / create account. Signed-in: account name, passkeys (add / remove, keep at least one), the box (created date, items count, epoch) and its **devices** (name, kind, added, last seen, revoked), read-only, from the same columns `GET /v1/devices` exposes. One write: **Delete box** (fresh passkey re-authentication, typed confirmation, removes all rows of that `box_id`). Revoking a device is _not_ in the dashboard: a safe revoke rotates the vault key client-side. Sign out.
 
 ## 7. Mac app (apple/)
 
 - `SyncClient`: `connectStart`, `connectPoll`, bootstrap with `X-Bisel-Connect`, send `X-Bisel-Box` on recovery requests.
 - `LocalIdentity` stores `boxID` (nil for legacy; recovery then omits the header).
-- Onboarding: after the recovery phrase, a new **sync step**: "Sync with box.bisel.app" opens the browser to `/connect?code=…`, shows the code and waits (poll), then calls `connectServer` with the connect credential instead of a token; "Skip, keep it on this Mac" stays. Settings gets the same flow and *Link to account* (claim) for the existing box. The token field disappears for end users (stays under Debug for dev servers).
+- Onboarding: after the recovery phrase, a new **sync step**: "Sync with box.bisel.app" opens the browser to `/connect?code=…`, shows the code and waits (poll), then calls `connectServer` with the connect credential instead of a token; "Skip, keep it on this Mac" stays. Settings gets the same flow and _Link to account_ (claim) for the existing box. The token field disappears for end users (stays under Debug for dev servers).
 - Core change is small: `connectServer(_:bootstrapToken:)` gets a credential enum `.token(String) | .connect(deviceCode)`.
 
 ## 8. Threat model
 
-| Threat | Handling |
-|---|---|
-| Cross-tenant read/write through a missed `box_id` | All queries take `boxId` from the authenticated principal, never from input; flow tests run two boxes against every route and assert no read/write crosses. The `(box_id, id)` key removes the id-collision overwrite. Residual risk is a forgotten `WHERE`, which is why the isolation tests are mandatory, not optional. |
-| Device-id squatting / probing across tenants | Ids are 128-bit random; `exists` on register is the only signal and needs an authenticated or connect-approved call. Negligible. |
-| Stolen passkey / session | Cannot read vault content, cannot add a device to an existing box. Can delete the box (clients keep local copies) or squat an empty account's `create`. Fresh passkey re-auth for delete; sessions short. |
-| Phishing a victim into approving the attacker's connect code | Attacker gets storage under the victim's account, not data. Mitigated by the on-page "does your Mac show this code?" confirmation, device name and country, and by the dashboard showing the device list. Residual: a careless approve on an empty account. |
-| Device-code brute force / interception | 256-bit device code, hashed at rest, single-use, 10 min, TLS. User code alone is not a credential. |
-| CSRF on approve / delete | `Origin` check + custom header + `SameSite=Lax`, no CORS. |
-| Open sign-up abuse (storage fill, flood) | Per-box item and device caps now; Turnstile and a per-box byte cap as follow-ups; D1 total (10 GB) is the scaling ceiling that triggers the Durable-Object move. `boxes.disabled_at` is the operator kill switch. |
-| Account enumeration | No email, display names are not unique-checked publicly; sign-in is discoverable-credential, so no "does this user exist" oracle. |
-| Operator (Rodrigo) reading data | Unchanged: ciphertext only. The dashboard API cannot return key material because none is stored. |
-| Dashboard XSS | Strict CSP, no inline script, no third-party script, no `innerHTML` with server strings (device names are shown with `textContent`; server already strips control/bidi characters). |
-| Availability: Better Auth outage / bug | Isolated to `/api/*` and `/connect`; `/v1` does not call it. |
+| Threat                                                       | Handling                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cross-tenant read/write through a missed `box_id`            | All queries take `boxId` from the authenticated principal, never from input; flow tests run two boxes against every route and assert no read/write crosses. The `(box_id, id)` key removes the id-collision overwrite. Residual risk is a forgotten `WHERE`, which is why the isolation tests are mandatory, not optional. |
+| Device-id squatting / probing across tenants                 | Ids are 128-bit random; `exists` on register is the only signal and needs an authenticated or connect-approved call. Negligible.                                                                                                                                                                                           |
+| Stolen passkey / session                                     | Cannot read vault content, cannot add a device to an existing box. Can delete the box (clients keep local copies) or squat an empty account's `create`. Fresh passkey re-auth for delete; sessions short.                                                                                                                  |
+| Phishing a victim into approving the attacker's connect code | Attacker gets storage under the victim's account, not data. Mitigated by the on-page "does your Mac show this code?" confirmation, device name and country, and by the dashboard showing the device list. Residual: a careless approve on an empty account.                                                                |
+| Device-code brute force / interception                       | 256-bit device code, hashed at rest, single-use, 10 min, TLS. User code alone is not a credential.                                                                                                                                                                                                                         |
+| CSRF on approve / delete                                     | `Origin` check + custom header + `SameSite=Lax`, no CORS.                                                                                                                                                                                                                                                                  |
+| Open sign-up abuse (storage fill, flood)                     | Per-box item and device caps now; Turnstile and a per-box byte cap as follow-ups; D1 total (10 GB) is the scaling ceiling that triggers the Durable-Object move. `boxes.disabled_at` is the operator kill switch.                                                                                                          |
+| Account enumeration                                          | No email, display names are not unique-checked publicly; sign-in is discoverable-credential, so no "does this user exist" oracle.                                                                                                                                                                                          |
+| Operator (Rodrigo) reading data                              | Unchanged: ciphertext only. The dashboard API cannot return key material because none is stored.                                                                                                                                                                                                                           |
+| Dashboard XSS                                                | Strict CSP, no inline script, no third-party script, no `innerHTML` with server strings (device names are shown with `textContent`; server already strips control/bidi characters).                                                                                                                                        |
+| Availability: Better Auth outage / bug                       | Isolated to `/api/*` and `/connect`; `/v1` does not call it.                                                                                                                                                                                                                                                               |
 
 ## 9. Build plan (the smallest slice, after approval)
 
-1. **Server core**: migration 0004, `boxId` through auth and all queries, bootstrap `box_id`, `X-Bisel-Box` on recovery. Extend `tests/flow.spec.ts` with a two-box isolation flow over every route. *Gate: existing 24 flows still pass unchanged against a migrated copy of a legacy DB.*
+1. **Server core**: migration 0004, `boxId` through auth and all queries, bootstrap `box_id`, `X-Bisel-Box` on recovery. Extend `tests/flow.spec.ts` with a two-box isolation flow over every route. _Gate: existing 24 flows still pass unchanged against a migrated copy of a legacy DB._
 2. **Accounts**: Better Auth + passkey + migration 0005, static assets, sign-up/sign-in/dashboard, `/api/box`. Flow test drives a real browser with Playwright's virtual authenticator (CDP WebAuthn): sign up, sign in, see devices, delete.
 3. **Connect**: `/v1/connect*`, bootstrap via connect code, `/connect` page, claim route. Flow test: script plays the Mac against a local server while Playwright plays the browser. Then Swift side and a run of the real Mac app against `pnpm dev`.
 4. Docs: README, SPEC §6, DEPLOY.md (new secret, migration order).

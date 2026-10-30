@@ -5,7 +5,8 @@ import type { APIRequestContext, APIResponse } from "@playwright/test";
 
 const subtle = webcrypto.subtle;
 
-export const b64u = (b: Uint8Array | ArrayBuffer) => Buffer.from(b instanceof ArrayBuffer ? new Uint8Array(b) : b).toString("base64url");
+export const b64u = (b: Uint8Array | ArrayBuffer) =>
+  Buffer.from(b instanceof ArrayBuffer ? new Uint8Array(b) : b).toString("base64url");
 export const unb64u = (s: string) => new Uint8Array(Buffer.from(s, "base64url"));
 export const randomId = () => b64u(randomBytes(16));
 
@@ -21,12 +22,22 @@ export interface TestDevice extends Principal {
   sigPub: string;
   encPub: string;
   envelope: string;
-  registration(): { id: string; name: string; kind: string; sig_pubkey: string; enc_pubkey: string; envelope: string };
+  registration(): {
+    id: string;
+    name: string;
+    kind: string;
+    sig_pubkey: string;
+    enc_pubkey: string;
+    envelope: string;
+  };
 }
 
 /** A fresh software "device": P-256 signing key, P-256 encryption pubkey, random opaque envelope. */
 export async function newDevice(name: string, kind = "mac"): Promise<TestDevice> {
-  const sig = await subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+  const sig = await subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+    "sign",
+    "verify",
+  ]);
   const enc = await subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
   const sigPub = b64u(await subtle.exportKey("raw", sig.publicKey)); // X9.63 uncompressed, 65 bytes
   const encPub = b64u(await subtle.exportKey("raw", enc.publicKey));
@@ -40,7 +51,10 @@ export async function newDevice(name: string, kind = "mac"): Promise<TestDevice>
     encPub,
     envelope,
     // WebCrypto ECDSA emits raw r||s (64 bytes), which is also what CryptoKit's rawRepresentation is.
-    sign: async (m) => new Uint8Array(await subtle.sign({ name: "ECDSA", hash: "SHA-256" }, sig.privateKey, Buffer.from(m))),
+    sign: async (m) =>
+      new Uint8Array(
+        await subtle.sign({ name: "ECDSA", hash: "SHA-256" }, sig.privateKey, Buffer.from(m)),
+      ),
     registration: () => ({ id, name, kind, sig_pubkey: sigPub, enc_pubkey: encPub, envelope }),
   };
   return d;
@@ -54,7 +68,13 @@ const PKCS8_ED25519_PREFIX = Buffer.from("302e020100300506032b657004220420", "he
 
 /** Ed25519 recovery key from a 32-byte seed (the spec derives the seed with HKDF from the phrase). */
 export async function recoveryKeyFromSeed(seed: Uint8Array): Promise<RecoveryKey> {
-  const priv = await subtle.importKey("pkcs8", new Uint8Array(Buffer.concat([PKCS8_ED25519_PREFIX, seed])), { name: "Ed25519" }, true, ["sign"]);
+  const priv = await subtle.importKey(
+    "pkcs8",
+    new Uint8Array(Buffer.concat([PKCS8_ED25519_PREFIX, seed])),
+    { name: "Ed25519" },
+    true,
+    ["sign"],
+  );
   const jwk = await subtle.exportKey("jwk", priv);
   return {
     id: "recovery",
@@ -65,7 +85,9 @@ export async function recoveryKeyFromSeed(seed: Uint8Array): Promise<RecoveryKey
 
 /** Raw 32-byte X25519 public key (the server only checks that it imports). */
 export async function randomX25519Pub(): Promise<string> {
-  const k = (await subtle.generateKey({ name: "X25519" }, true, ["deriveBits"])) as unknown as { publicKey: webcrypto.CryptoKey };
+  const k = (await subtle.generateKey({ name: "X25519" }, true, ["deriveBits"])) as unknown as {
+    publicKey: webcrypto.CryptoKey;
+  };
   return b64u(await subtle.exportKey("raw", k.publicKey));
 }
 
@@ -88,20 +110,29 @@ export const MANIFEST_ID = "bisel-manifest-v1-reserved";
 /** Routes that need the second (vault-admin) signature. */
 export function needsAdmin(method: string, path: string): boolean {
   return (
-    (method === "POST" && (path === "/v1/rotate" || path === "/v1/devices" || path === "/v1/recovery/rotate" || path === "/v1/box/claim")) ||
+    (method === "POST" &&
+      (path === "/v1/rotate" ||
+        path === "/v1/devices" ||
+        path === "/v1/recovery/rotate" ||
+        path === "/v1/box/claim")) ||
     (method === "DELETE" && path.startsWith("/v1/devices/")) ||
     ((method === "PUT" || method === "DELETE") && path === `/v1/items/${MANIFEST_ID}`)
   );
 }
 
 export function pct(s: string): string {
-  return encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase());
+  return encodeURIComponent(s).replace(
+    /[!'()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase(),
+  );
 }
 
 export function canonicalQuery(query: Record<string, string | number>): string {
   return Object.entries(query)
     .map(([k, v]) => [pct(k), pct(String(v))] as const)
-    .sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : a[0] < b[0] ? -1 : 1))
+    .sort((a, b) =>
+      a[0] === b[0] ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) : a[0] < b[0] ? -1 : 1,
+    )
     .map(([k, v]) => `${k}=${v}`)
     .join("&");
 }
@@ -132,14 +163,23 @@ export async function prepare(
   } & SignOptions = {},
 ): Promise<Prepared> {
   const query = opts.query ?? {};
-  const body = opts.rawBody ?? (opts.json === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(opts.json)));
+  const body =
+    opts.rawBody ??
+    (opts.json === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(opts.json)));
   const ts = opts.ts ?? Math.floor(Date.now() / 1000);
   const nonce = opts.nonce ?? b64u(randomBytes(16));
   const bodyHash = createHash("sha256").update(body).digest("hex");
   const signed = [method, path, canonicalQuery(query), bodyHash, String(ts), nonce].join("\n");
   const sig = await principal.sign(new TextEncoder().encode(signed));
-  const adminKey = opts.admin === false ? null : (opts.admin ?? (needsAdmin(method, path) ? adminState.key : null));
-  const adminSig = adminKey ? b64u(await adminKey.sign(new TextEncoder().encode(`bisel-admin/v1\n${principal.id}\n${signed}`))) : null;
+  const adminKey =
+    opts.admin === false
+      ? null
+      : (opts.admin ?? (needsAdmin(method, path) ? adminState.key : null));
+  const adminSig = adminKey
+    ? b64u(
+        await adminKey.sign(new TextEncoder().encode(`bisel-admin/v1\n${principal.id}\n${signed}`)),
+      )
+    : null;
   return {
     method,
     path,
@@ -186,7 +226,12 @@ export class Bisel {
   }
 
   /** Unsigned request (bootstrap). */
-  async raw(method: string, path: string, headers: Record<string, string>, json?: unknown): Promise<APIResponse> {
+  async raw(
+    method: string,
+    path: string,
+    headers: Record<string, string>,
+    json?: unknown,
+  ): Promise<APIResponse> {
     return this.api.fetch(path, {
       method,
       headers: { ...headers, ...this.extraHeaders },

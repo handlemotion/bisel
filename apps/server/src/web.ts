@@ -38,7 +38,13 @@ web.get("/box", async (c) => {
     "SELECT id, created_at, epoch, head_seq, item_count FROM boxes WHERE owner_id = ?1",
   )
     .bind(s.user.id)
-    .first<{ id: string; created_at: number; epoch: number; head_seq: number; item_count: number }>();
+    .first<{
+      id: string;
+      created_at: number;
+      epoch: number;
+      head_seq: number;
+      item_count: number;
+    }>();
   const devices = box
     ? (
         await c.env.DB.prepare(
@@ -57,12 +63,16 @@ web.delete("/box", async (c) => {
   const s = await session(c);
   if (!s) return c.json({ error: "unauthenticated" }, 401);
   const signedInAt = new Date(s.session.createdAt).getTime() / 1000;
-  if (Date.now() / 1000 - signedInAt > REAUTH_WINDOW_SECONDS) return c.json({ error: "reauth_required" }, 403);
+  if (Date.now() / 1000 - signedInAt > REAUTH_WINDOW_SECONDS)
+    return c.json({ error: "reauth_required" }, 403);
   const body = (await c.req.json().catch(() => null)) as { confirm?: unknown } | null;
   if (body?.confirm !== "delete") return c.json({ error: "confirmation_required" }, 400);
 
   const db = c.env.DB;
-  const box = await db.prepare("SELECT id FROM boxes WHERE owner_id = ?1").bind(s.user.id).first<{ id: string }>();
+  const box = await db
+    .prepare("SELECT id FROM boxes WHERE owner_id = ?1")
+    .bind(s.user.id)
+    .first<{ id: string }>();
   if (!box) return c.json({ error: "no_box" }, 404);
   await db.batch([
     db.prepare("DELETE FROM items WHERE box_id = ?1").bind(box.id),
@@ -84,13 +94,16 @@ web.delete("/box", async (c) => {
 async function pendingByCode(c: Ctx, raw: unknown): Promise<ConnectRow | null> {
   const code = typeof raw === "string" ? normalizeUserCode(raw) : null;
   if (!code) return null;
-  return c.env.DB.prepare(`SELECT ${CONNECT_COLS} FROM connect_requests WHERE user_code = ?1 AND status = 'pending' AND expires_at > ?2`)
+  return c.env.DB.prepare(
+    `SELECT ${CONNECT_COLS} FROM connect_requests WHERE user_code = ?1 AND status = 'pending' AND expires_at > ?2`,
+  )
     .bind(code, Math.floor(Date.now() / 1000))
     .first<ConnectRow>();
 }
 
 const ownsBox = async (c: Ctx, userId: string) =>
-  (await c.env.DB.prepare("SELECT id FROM boxes WHERE owner_id = ?1").bind(userId).first()) !== null;
+  (await c.env.DB.prepare("SELECT id FROM boxes WHERE owner_id = ?1").bind(userId).first()) !==
+  null;
 
 web.get("/connect", async (c) => {
   const s = await session(c);
@@ -118,18 +131,30 @@ web.post("/connect/approve", async (c) => {
 
   if (row.kind === "create") {
     // With a box already, approving only lets the Mac learn that (poll: account_has_box); it cannot create a second one.
-    await db.prepare("UPDATE connect_requests SET status = 'approved', account_id = ?2 WHERE id = ?1 AND status = 'pending'").bind(row.id, s.user.id).run();
+    await db
+      .prepare(
+        "UPDATE connect_requests SET status = 'approved', account_id = ?2 WHERE id = ?1 AND status = 'pending'",
+      )
+      .bind(row.id, s.user.id)
+      .run();
     return c.json({ ok: true, kind: "create", account_has_box: hasBox });
   }
 
   // claim: link the existing, unowned box to this account.
   if (hasBox) {
-    await db.prepare("UPDATE connect_requests SET status = 'denied', account_id = ?2 WHERE id = ?1 AND status = 'pending'").bind(row.id, s.user.id).run();
+    await db
+      .prepare(
+        "UPDATE connect_requests SET status = 'denied', account_id = ?2 WHERE id = ?1 AND status = 'pending'",
+      )
+      .bind(row.id, s.user.id)
+      .run();
     return c.json({ error: "box_exists" }, 409);
   }
   try {
     const [link] = await db.batch([
-      db.prepare("UPDATE boxes SET owner_id = ?1 WHERE id = ?2 AND owner_id IS NULL").bind(s.user.id, row.box_id),
+      db
+        .prepare("UPDATE boxes SET owner_id = ?1 WHERE id = ?2 AND owner_id IS NULL")
+        .bind(s.user.id, row.box_id),
       db
         .prepare(
           `UPDATE connect_requests SET status = 'consumed', account_id = ?1
@@ -152,6 +177,10 @@ web.post("/connect/deny", async (c) => {
   const body = (await c.req.json().catch(() => null)) as { code?: unknown } | null;
   const row = await pendingByCode(c, body?.code);
   if (!row) return c.json({ error: "not_found" }, 404);
-  await c.env.DB.prepare("UPDATE connect_requests SET status = 'denied', account_id = ?2 WHERE id = ?1 AND status = 'pending'").bind(row.id, s.user.id).run();
+  await c.env.DB.prepare(
+    "UPDATE connect_requests SET status = 'denied', account_id = ?2 WHERE id = ?1 AND status = 'pending'",
+  )
+    .bind(row.id, s.user.id)
+    .run();
   return c.json({ ok: true });
 });
