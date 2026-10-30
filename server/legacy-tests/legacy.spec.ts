@@ -39,8 +39,11 @@ test("the old box moved to box legacy_box_00000000 with every row", async () => 
   expect(sql("SELECT box_id, COUNT(*) AS n FROM items GROUP BY box_id")).toEqual([{ box_id: LEGACY_BOX, n: 2 }]);
   expect(sql("SELECT box_id, COUNT(*) AS n FROM item_history GROUP BY box_id")).toEqual([{ box_id: LEGACY_BOX, n: 1 }]);
   expect(sql("SELECT box_id, COUNT(*) AS n FROM events GROUP BY box_id")).toEqual([{ box_id: LEGACY_BOX, n: 2 }]);
-  // The new item_count trigger exists and the rebuilt tables carry the per-box keys.
-  expect(sql("SELECT name FROM sqlite_master WHERE type = 'trigger'")).toEqual([{ name: "items_count_insert" }]);
+  // The item_count and stored_bytes triggers exist, and 0008 backfilled the byte count of the box's blobs.
+  expect(sql("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name").map((r: any) => r.name)).toEqual([
+    "items_bytes_delete", "items_bytes_insert", "items_bytes_update", "items_count_insert",
+  ]);
+  expect(sql("SELECT stored_bytes = (SELECT SUM(length(blob)) FROM items) AS ok, stored_bytes > 0 AS some FROM boxes")).toEqual([{ ok: 1, some: 1 }]);
 });
 
 test("the legacy device keeps working with no change to its requests", async ({ request }) => {
