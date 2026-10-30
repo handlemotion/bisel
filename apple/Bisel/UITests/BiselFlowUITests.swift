@@ -1,16 +1,22 @@
 import XCTest
 
-/// Flow tests on the real app against a real local server (`wrangler dev`, fresh D1). They need:
-///   BISEL_TEST_SERVER  (default http://localhost:8790)   BISEL_TEST_TOKEN  (default dev-bootstrap-token)
-/// passed as TEST_RUNNER_BISEL_TEST_SERVER / TEST_RUNNER_BISEL_TEST_TOKEN to xcodebuild, and an un-bootstrapped server.
-/// Biometrics are bypassed by the Debug-only BISEL_DEV_SKIP_BIOMETRIC. Only Bisel's own windows are driven.
+/// Flow tests on the real app (BiselDev build: software keys, Debug hooks) with a throwaway store. No server: "Create a box"
+/// makes a local-only box, which is the first-run path. Run with
+///   cd apple && xcodegen generate --spec project.dev.yml
+///   xcodebuild test -project BiselDev.xcodeproj -scheme Bisel -only-testing:BiselUITests -destination 'platform=macOS' \
+///     CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=
+/// Each test launches with its own BISEL_DATA_DIR and the Debug-only BISEL_DEV_SKIP_BIOMETRIC, and only drives Bisel's own windows.
+/// Identifiers a test needs that the views do not have yet are listed in NEEDED-IDS.md; those steps use labels and say so.
 final class BiselFlowUITests: XCTestCase {
-    private let server = ProcessInfo.processInfo.environment["BISEL_TEST_SERVER"] ?? "http://localhost:8790"
-    private let token = ProcessInfo.processInfo.environment["BISEL_TEST_TOKEN"] ?? "dev-bootstrap-token"
     private var dirs: [URL] = []
+    private var apps: [XCUIApplication] = []
 
     override func setUp() { continueAfterFailure = false }
-    override func tearDown() { dirs.forEach { try? FileManager.default.removeItem(at: $0) } }
+    override func tearDown() {
+        apps.forEach { $0.terminate() }
+        dirs.forEach { try? FileManager.default.removeItem(at: $0) }
+        apps = []; dirs = []
+    }
 
     private func freshDir() -> URL {
         let d = FileManager.default.temporaryDirectory.appendingPathComponent("bisel-ui-\(UUID().uuidString)")
@@ -18,18 +24,12 @@ final class BiselFlowUITests: XCTestCase {
         return d
     }
 
-    private func launch(_ dir: URL, extra: [String: String] = [:]) -> XCUIApplication {
+    private func launch(_ dir: URL) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchEnvironment = ["BISEL_DATA_DIR": dir.path, "BISEL_DEV_SKIP_BIOMETRIC": "1"].merging(extra) { $1 }
+        app.launchEnvironment = ["BISEL_DATA_DIR": dir.path, "BISEL_DEV_SKIP_BIOMETRIC": "1"]
         app.launch()
+        apps.append(app)
         return app
-    }
-
-    private func type(_ app: XCUIApplication, _ id: String, _ text: String, secure: Bool = false) {
-        let field = secure ? app.secureTextFields[id] : app.textFields[id]
-        XCTAssertTrue(field.waitForExistence(timeout: 10), "missing field \(id)")
-        field.click()
-        field.typeText(text)
     }
 
     @discardableResult
@@ -39,97 +39,147 @@ final class BiselFlowUITests: XCTestCase {
         return ok
     }
 
-    /// Set-up → recovery phrase gate → unlocked vault. Returns the phrase.
-    private func onboard(_ app: XCUIApplication) -> String {
-        exists(app.textFields["setup-server"], 20, "setup screen on first run")
-        type(app, "setup-server", server)
-        type(app, "setup-token", token, secure: true)
-        // device name is pre-filled
-        app.buttons["setup-go"].click()
-        exists(app.staticTexts["phrase-word-24"], 30, "24-word phrase")
-        let words = (1...24).map { app.staticTexts["phrase-word-\($0)"].label }
-        XCTAssertFalse(app.buttons["phrase-continue"].isEnabled, "Continue must be gated behind the confirmation")
-        app.checkBoxes["phrase-stored"].click()
-        XCTAssertTrue(app.buttons["phrase-continue"].isEnabled)
+    private func gone(_ el: XCUIElement, _ timeout: TimeInterval = 10, _ msg: String = "") {
+        let predicate = NSPredicate(format: "exists == false")
+        let result = XCTWaiter().wait(for: [expectation(for: predicate, evaluatedWith: el)], timeout: timeout)
+        XCTAssertEqual(result, .completed, "expected \(el) to go away \(msg)")
+    }
+
+    /// The 24 words on the recovery phrase screen.
+    private func words(_ app: XCUIApplication) -> [String] {
+        exists(app.staticTexts["phrase-word-24"], 20, "24-word phrase")
+        return (1...24).map { app.staticTexts["phrase-word-\($0)"].label }
+    }
+
+    /// Welcome → Create a box → recovery phrase on screen.
+    private func createBox(_ app: XCUIApplication) -> [String] {
+        let create = app.buttons["setup-go"]
+        exists(create, 30, "welcome screen on first run")
+        XCTAssertEqual(create.label, "Create a box")
+        create.click()
+        return words(app)
+    }
+
+    /// Welcome → phrase → Continue → import step → Skip for now. The window closes afterwards.
+    private func onboard(_ app: XCUIApplication) {
+        _ = createBox(app)
         app.buttons["phrase-continue"].click()
-        exists(app.buttons["nav-General"].firstMatch.exists ? app.buttons["nav-General"] : app.staticTexts["General"], 15, "settings window after set-up")
-        return words.joined(separator: " ")
+        exists(app.buttons["import-finish"], 15, "import step after the phrase")
+        app.buttons["import-finish"].click()
+        gone(app.buttons["import-finish"], 15, "after Skip for now")
     }
 
-    private func addLogin(_ app: XCUIApplication, title: String, user: String, password: String) {
-        app.menuButtons["browser-add"].click()
-        app.menuItems["Login"].click()
-        type(app, "editor-title", title)
-        type(app, "editor-username", user)
-        type(app, "editor-password", password, secure: true)
-        app.buttons["editor-save"].click()
-        exists(app.staticTexts["detail-title"], 10, "detail after save")
+    /// The window is closed after onboarding; "Open Bisel" in the menu-bar item brings the settings window back.
+    private func openSettingsWindow(_ app: XCUIApplication) {
+        let item = app.statusItems.firstMatch
+        exists(item, 10, "menu-bar item")
+        item.click()
+        let open = app.menuItems["Open Bisel"]
+        exists(open, 5, "Open Bisel in the menu-bar menu")
+        open.click()
+        exists(app.buttons["nav-General"].firstMatch, 15, "settings window")
     }
 
-    func testOnboardingAddEditLockUnlockPersistRecoverImport() throws {
-        // 1. onboarding against the real server
-        let dir1 = freshDir()
-        var app = launch(dir1)
-        let phrase = onboard(app)
-        XCTAssertEqual(phrase.split(separator: " ").count, 24)
+    // MARK: first run
 
-        // 2. add an item; it appears in the list and the detail shows the username
-        addLogin(app, title: "Acme Flow Test", user: "flow.user@acme.test", password: "Fl0w-Pass-123")
-        exists(app.staticTexts["row-Acme Flow Test"].firstMatch.exists ? app.staticTexts["row-Acme Flow Test"] : app.cells.containing(.staticText, identifier: "row-Acme Flow Test").firstMatch)
-        XCTAssertEqual(app.staticTexts["value-user"].label, "flow.user@acme.test")
-        // password is masked until revealed (no extra prompt in the default mode)
-        XCTAssertNotEqual(app.staticTexts["value-pass"].label, "Fl0w-Pass-123")
-        app.buttons["reveal-pass"].click()
-        XCTAssertEqual(app.staticTexts["value-pass"].label, "Fl0w-Pass-123")
+    func testWelcomeShowsCreateABoxAndIAlreadyHaveOne() {
+        let app = launch(freshDir())
+        exists(app.buttons["setup-go"], 30, "Create a box")
+        XCTAssertTrue(app.buttons["setup-mode-recover"].exists, "I already have one")
+        XCTAssertFalse(app.buttons["phrase-continue"].exists)
+    }
 
-        // 3. sync indicator reaches "Synced"
-        let status = app.staticTexts["sync-status"]
-        exists(status)
-        let deadline = Date().addingTimeInterval(25)
-        while !status.label.hasPrefix("Synced") && Date() < deadline { Thread.sleep(forTimeInterval: 0.5) }
-        XCTAssertTrue(status.label.hasPrefix("Synced"), "sync status was: \(status.label)")
+    func testRecoveryPhraseBackSaveMenuContinue() {
+        let app = launch(freshDir())
+        let first = createBox(app)
+        XCTAssertEqual(Set(first).count > 1, true)
+        XCTAssertTrue(app.buttons["phrase-back"].exists, "Back is offered on a fresh box")
 
-        // 4. lock → unlock
-        app.buttons["lock-button"].click()
-        exists(app.buttons["unlock-button"], 10, "locked screen")
-        XCTAssertFalse(app.staticTexts["detail-title"].exists, "no vault content while locked")
-        app.buttons["unlock-button"].click()
-        exists(app.buttons["lock-button"], 10, "unlocked again")
+        // Save is a menu with Copy and Download…
+        let save = app.menuButtons["phrase-save"].exists ? app.menuButtons["phrase-save"] : app.buttons["phrase-save"]
+        exists(save, 5, "Save")
+        save.click()
+        exists(app.menuItems["Copy"], 5, "Copy in the Save menu")
+        XCTAssertTrue(app.menuItems["Download…"].exists, "Download… in the Save menu")
+        app.typeKey(.escape, modifierFlags: [])
+        gone(app.menuItems["Copy"], 5, "after closing the Save menu")
 
-        // 5. relaunch: still configured, starts locked, data persisted
-        app.terminate()
-        app = launch(dir1)
-        app.activate()
-        exists(app.buttons["unlock-button"], 20, "locked on relaunch")
-        app.buttons["unlock-button"].click()
-        exists(app.buttons["lock-button"])
-        exists(app.staticTexts["Acme Flow Test"].firstMatch, 10, "item persisted across relaunch")
-        app.terminate()
-
-        // 6. recovery on a fresh store from the phrase (items come back from the server)
-        let dir2 = freshDir()
-        app = launch(dir2)
-        exists(app.textFields["setup-server"], 20)
-        app.radioButtons["Recover"].click()
-        type(app, "setup-server", server)
-        let phraseField = app.textViews["setup-phrase"]
-        exists(phraseField)
-        phraseField.click()
-        phraseField.typeText(phrase)
+        // Back discards the box: the welcome screen returns, and a new box gets a different phrase.
+        app.buttons["phrase-back"].click()
+        exists(app.buttons["setup-go"], 15, "welcome after Back")
+        XCTAssertFalse(app.staticTexts["phrase-word-1"].exists, "no phrase while on the welcome screen")
         app.buttons["setup-go"].click()
-        exists(app.buttons["lock-button"], 30, "vault after recovery")
-        exists(app.staticTexts["Acme Flow Test"].firstMatch, 20, "item restored from server after recovery")
+        let second = words(app)
+        XCTAssertNotEqual(first, second, "a discarded box must not come back with the same phrase")
 
-        // 7. import a generated fake 1pux
-        if let path = ProcessInfo.processInfo.environment["BISEL_TEST_1PUX"] {
-            app.buttons["nav-Import"].click()
-            type(app, "import-debug-path", path + "\n")
-            exists(app.staticTexts["import-summary"], 10)
-            app.buttons["import-run"].click()
-            exists(app.staticTexts["import-done"], 30)
-            app.buttons["nav-General"].click()
-            exists(app.staticTexts["Acme Mail (FAKE)"].firstMatch, 10, "imported login in list")
-        }
+        // Continue leaves the phrase screen for the import step.
+        app.buttons["phrase-continue"].click()
+        exists(app.buttons["import-finish"], 15, "import step")
+        XCTAssertEqual(app.buttons["import-finish"].label, "Skip for now")
+        XCTAssertTrue(app.buttons["import-choose"].exists, "Choose file…")
+        XCTAssertFalse(app.staticTexts["phrase-word-1"].exists, "the phrase is shown once")
+    }
+
+    func testSkipImportClosesTheWindow() {
+        let app = launch(freshDir())
+        onboard(app)
+        XCTAssertFalse(app.buttons["setup-go"].exists)
+        XCTAssertFalse(app.buttons["phrase-continue"].exists)
+    }
+
+    // MARK: settings window
+
+    func testSettingsWindowSections() {
+        let app = launch(freshDir())
+        onboard(app)
+        openSettingsWindow(app)
+
+        // General: the settings form of a local-only box.
+        let general = app.buttons["nav-General"].firstMatch
+        let devices = app.buttons["nav-Devices"].firstMatch
+        let importer = app.buttons["nav-Import"].firstMatch
+        exists(devices, 5); exists(importer, 5)
+        general.click()
+        exists(app.buttons["settings-export"], 10, "General section (Export backup…)")
+        XCTAssertTrue(app.buttons["settings-new-phrase"].exists, "New recovery phrase…")
+
+        devices.click()
+        exists(app.buttons["devices-refresh"], 10, "Devices section")
+        XCTAssertFalse(app.buttons["settings-export"].exists, "General content is gone")
+
+        importer.click()
+        exists(app.buttons["import-choose"], 10, "Import section")
+        XCTAssertFalse(app.buttons["devices-refresh"].exists, "Devices content is gone")
+
+        general.click()
+        exists(app.buttons["settings-export"], 10, "back on General")
+
+        // Lock from the sidebar: the window turns into the lock screen.
+        app.buttons["lock-button"].click()
+        exists(app.buttons["unlock-button"], 10, "lock screen")
+        XCTAssertFalse(app.buttons["settings-export"].exists, "nothing from the box while locked")
+        app.buttons["unlock-button"].click()   // Touch ID is bypassed by BISEL_DEV_SKIP_BIOMETRIC
+        exists(app.buttons["lock-button"], 10, "unlocked again")
+    }
+
+    // MARK: persistence
+
+    func testRelaunchKeepsTheBoxAndStartsLocked() {
+        let dir = freshDir()
+        var app = launch(dir)
+        onboard(app)
         app.terminate()
+
+        app = launch(dir)
+        // An existing box does not show the welcome screen again.
+        let item = app.statusItems.firstMatch
+        exists(item, 20, "menu-bar item")
+        XCTAssertFalse(app.buttons["setup-go"].exists, "the box survived the relaunch")
+        item.click()
+        exists(app.menuItems["Open Bisel"], 5).self
+        app.menuItems["Open Bisel"].click()
+        exists(app.buttons["unlock-button"], 15, "locked on relaunch")
+        app.buttons["unlock-button"].click()
+        exists(app.buttons["nav-General"].firstMatch, 15, "settings after unlock")
     }
 }

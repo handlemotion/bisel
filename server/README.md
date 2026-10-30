@@ -29,7 +29,7 @@ node scripts/smoke.ts   # manual walk through bootstrap/put/conflict/delete/appr
 From the repo root (`bisel/`), no untracked file needed (`server/.dev.vars` is created from the example), nothing touches Cloudflare, Doppler or production:
 
 ```sh
-scripts/check-all.sh            # server + core + app, then a PASS/FAIL summary with timings (about 11 min cold)
+scripts/check-all.sh            # server + core + app, then a PASS/FAIL summary with timings (about 8 min)
 scripts/check-all.sh --server   # pnpm install --frozen-lockfile, typecheck (worker + dashboard), pnpm test, pnpm test:legacy
 scripts/check-all.sh --core     # BiselCore Swift flow suite: swift test --traits SoftwareKeys (starts its own wrangler dev servers)
 scripts/check-all.sh --app      # xcodegen with project.dev.yml, then a Debug build of the Mac app (software keys)
