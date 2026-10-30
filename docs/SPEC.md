@@ -312,7 +312,7 @@ All visuals come from a `Theme` token set (colors, radii, spacing, fonts, row de
 
 1. **No unit tests.** No tests that assert what the code obviously does, mirror the implementation, snapshot copy or text, check layout/placement/colors, or pass by construction. If a test would not fail when the real feature is broken, do not write it.
 2. Only **flow tests** that exercise real behavior through the public interface, using a proper test library:
-   - Server: Playwright Test (`request` fixture) against a real `wrangler dev` with a local D1. Flows: bootstrap→sync→edit→conflict→revoke→recovery; replay and bad-signature rejection (all 404); size limits.
+   - Server: vitest with plain `fetch` against a real `wrangler dev` with a local D1 (started by a globalSetup on a free port). Flows: bootstrap→sync→edit→conflict→revoke→recovery; replay and bad-signature rejection (all 404); size limits.
    - Core: Swift Testing or XCTest _flow_ tests driving the `bisel-dev` CLI or the package against the real local server with the software key store: two simulated devices, encrypt on one, decrypt on the other, revoke, recover from phrase, backup/restore.
    - Mac app: XCUITest (or equivalent real-UI driving) for the critical paths only: onboarding, unlock, search and copy, fill into a real target app, lock on sleep trigger.
 3. **Tests are never the only verification.** Every agent must also run the real thing: start the server, launch the built app, drive it, look at screenshots, and read logs. Report what was actually observed. A task is not done because tests are green.
@@ -322,7 +322,7 @@ All visuals come from a `Theme` token set (colors, radii, spacing, fonts, row de
 
 Prefer CLIs and libraries to hand-written code.
 
-- Server: `pnpm`, `wrangler`, Hono, Zod, Playwright.
+- Server: `pnpm`, `wrangler`, Hono, Zod, vitest.
 - Apple: `xcodegen`, `xcodebuild`, SwiftPM, `KeyboardShortcuts`, a BIP-39 package, an OTP package, GRDB (or SQLite.swift), a fuzzy-match package, `swift-format`.
 - Do not vendor or copy library code; pin versions.
 - Environment notes: Xcode 27.1; no code-signing identity found on the dev machine yet, so signed Secure Enclave runs may need the user to sign in to Xcode. Agents must report this rather than work around it silently.

@@ -176,4 +176,4 @@ Nothing is deployed and prod D1 is not touched at any point without a separate a
 - **Sign-up abuse**: no Turnstile yet. The Worker-wide limiter, Better Auth's per-route limiter (D1-backed) and the per-address cap on pending connect requests are the only brakes.
 - **Passkey removal** is enforced in the UI only (the Remove button is disabled for the last passkey); the server-side guard is a follow-up.
 - **No events** are written when a box is linked to an account (the Mac client would show an unknown event type as a foreign event).
-- **Tests**: `tests/tenancy.spec.ts` (isolation, cap, kill switch), `tests/web.spec.ts` (passkeys in a real browser), `tests/webconnect.spec.ts` (connect and claim), `legacy-tests/` (migration 0004 on a seeded pre-accounts database).
+- **Tests**: `tests/tenancy.test.ts` (isolation, cap, kill switch), `tests/accounts.test.ts` (dashboard API and connect/claim with signed-in sessions), `tests/browser/passkey.spec.ts` (the passkey ceremony in a real browser, opt-in), `legacy-tests/` (migration 0004 on a seeded pre-accounts database).

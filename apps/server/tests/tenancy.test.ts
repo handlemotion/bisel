@@ -1,11 +1,12 @@
-import { expect, test, type APIResponse } from "@playwright/test";
-import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { TEST_BOOTSTRAP_TOKEN } from "../playwright.config";
+import { expect, inject, test } from "vitest";
+import { BOOTSTRAP_TOKEN, sql } from "./support/server";
 import {
   b64u,
-  Bisel,
   boxState,
+  clientAt,
+  prepare,
+  type Bisel,
   newAdminKey,
   newDevice,
   randomId,
@@ -16,9 +17,7 @@ import {
 } from "./support/client";
 
 // Two (and then more) boxes on one server: nothing one box does may be visible to, or change, another.
-test.describe.configure({ mode: "serial" });
-
-const json = async (res: APIResponse) => (await res.json()) as any;
+const json = async (res: Response) => (await res.json()) as any;
 const blob = (n = 200) => b64u(randomBytes(n));
 
 interface TestBox {
@@ -37,7 +36,7 @@ async function createBox(api: Bisel, label: string): Promise<TestBox> {
   const res = await api.raw(
     "POST",
     "/v1/bootstrap",
-    { "X-Bisel-Bootstrap": TEST_BOOTSTRAP_TOKEN },
+    { "X-Bisel-Bootstrap": BOOTSTRAP_TOKEN },
     {
       device: device.registration(),
       recovery_pubkey: recovery.pub,
@@ -46,7 +45,7 @@ async function createBox(api: Bisel, label: string): Promise<TestBox> {
       admin_pubkey: admin.pub,
     },
   );
-  expect(res.status()).toBe(201);
+  expect(res.status).toBe(201);
   return { id: (await json(res)).box_id, device, admin, recovery, envelope };
 }
 
@@ -65,8 +64,8 @@ let A: TestBox;
 let B: TestBox;
 const shared = randomId(); // the very same item id, used in both boxes
 
-test("two boxes can use the same item id without touching each other", async ({ request }) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.9.0.1" });
+test("two boxes can use the same item id without touching each other", async () => {
+  const api = clientAt("10.9.0.1");
   A = await createBox(api, "alice");
   B = await createBox(api, "bob");
   expect(A.id).not.toBe(B.id);
@@ -79,8 +78,8 @@ test("two boxes can use the same item id without touching each other", async ({ 
   const putB = await api.call(B.device, "PUT", `/v1/items/${shared}`, {
     json: { base_rev: 0, epoch: 1, blob: blobB },
   });
-  expect(putA.status()).toBe(200);
-  expect(putB.status(), "bob's create is not a conflict with alice's row").toBe(200);
+  expect(putA.status).toBe(200);
+  expect(putB.status, "bob's create is not a conflict with alice's row").toBe(200);
 
   // Alice edits hers; bob's row keeps its rev and blob.
   const blobA2 = blob();
@@ -89,7 +88,7 @@ test("two boxes can use the same item id without touching each other", async ({ 
       await api.call(A.device, "PUT", `/v1/items/${shared}`, {
         json: { base_rev: 1, epoch: 1, blob: blobA2 },
       })
-    ).status(),
+    ).status,
   ).toBe(200);
 
   const syncA = await json(await api.call(A.device, "GET", "/v1/sync"));
@@ -119,15 +118,15 @@ test("two boxes can use the same item id without touching each other", async ({ 
   ).toEqual([B.device.id]);
 });
 
-test("deleting, revoking and approving reach only the caller's own box", async ({ request }) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.9.0.2" });
+test("deleting, revoking and approving reach only the caller's own box", async () => {
+  const api = clientAt("10.9.0.2");
 
   // Alice tombstones her copy; bob's is still live at rev 1.
   const del = await api.call(A.device, "DELETE", `/v1/items/${shared}`, {
     query: { base_rev: 2 },
     json: { epoch: 1, marker: blob(32) },
   });
-  expect(del.status()).toBe(200);
+  expect(del.status).toBe(200);
   const syncB = await json(await api.call(B.device, "GET", "/v1/sync"));
   expect(syncB.items[0]).toMatchObject({ id: shared, rev: 1, deleted: false });
 
@@ -135,15 +134,15 @@ test("deleting, revoking and approving reach only the caller's own box", async (
   const revoke = await api.call(A.device, "DELETE", `/v1/devices/${B.device.id}`, {
     admin: A.admin,
   });
-  expect(revoke.status()).toBe(404);
-  expect((await api.call(B.device, "GET", "/v1/sync")).status()).toBe(200);
+  expect(revoke.status).toBe(404);
+  expect((await api.call(B.device, "GET", "/v1/sync")).status).toBe(200);
 
   // Registering a device id that already lives in another box is refused, and moves nothing.
   const clash = await api.call(A.device, "POST", "/v1/devices", {
     admin: A.admin,
     json: { ...B.device.registration(), epoch: 1 },
   });
-  expect(clash.status()).toBe(409);
+  expect(clash.status).toBe(409);
   const syncA = await json(await api.call(A.device, "GET", "/v1/sync"));
   expect(syncA.devices.map((d: any) => d.id)).toEqual([A.device.id]);
   expect(
@@ -151,15 +150,13 @@ test("deleting, revoking and approving reach only the caller's own box", async (
   ).toBeNull();
 });
 
-test("a recovery key opens only its own box, and the box header cannot be used to probe", async ({
-  request,
-}) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.9.0.3" });
+test("a recovery key opens only its own box, and the box header cannot be used to probe", async () => {
+  const api = clientAt("10.9.0.3");
   expect(
-    (await aimedAt(A.id, () => api.call(A.recovery, "POST", "/v1/recovery/session"))).status(),
+    (await aimedAt(A.id, () => api.call(A.recovery, "POST", "/v1/recovery/session"))).status,
   ).toBe(200);
   expect(
-    (await aimedAt(B.id, () => api.call(B.recovery, "POST", "/v1/recovery/session"))).status(),
+    (await aimedAt(B.id, () => api.call(B.recovery, "POST", "/v1/recovery/session"))).status,
   ).toBe(200);
   // Right key, wrong box; unknown box; no box (falls back to a legacy box that does not exist here): all the same bare 404.
   const wrongBox = await aimedAt(B.id, () => api.call(A.recovery, "POST", "/v1/recovery/session"));
@@ -168,25 +165,21 @@ test("a recovery key opens only its own box, and the box header cannot be used t
   );
   const none = await aimedAt(null, () => api.call(A.recovery, "POST", "/v1/recovery/session"));
   for (const r of [wrongBox, unknown, none]) {
-    expect(r.status()).toBe(404);
+    expect(r.status).toBe(404);
     expect(await r.text()).toBe("");
   }
   // Only recovery requests may carry the header; on a device request it is malformed.
-  const prepared = await import("./support/client").then((m) =>
-    m.prepare(A.device, "GET", "/v1/sync"),
-  );
+  const prepared = await prepare(A.device, "GET", "/v1/sync");
   prepared.headers["X-Bisel-Box"] = A.id;
-  expect((await api.send(prepared)).status()).toBe(404);
+  expect((await api.send(prepared)).status).toBe(404);
   // A malformed box id is the same refusal.
   expect(
-    (await aimedAt("short", () => api.call(A.recovery, "POST", "/v1/recovery/session"))).status(),
+    (await aimedAt("short", () => api.call(A.recovery, "POST", "/v1/recovery/session"))).status,
   ).toBe(404);
 });
 
-test("rotating one box leaves the other's epoch, items, devices and keys untouched", async ({
-  request,
-}) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.9.0.4" });
+test("rotating one box leaves the other's epoch, items, devices and keys untouched", async () => {
+  const api = clientAt("10.9.0.4");
   const before = await json(await api.call(B.device, "GET", "/v1/sync"));
   const sA = await json(await api.call(A.device, "GET", "/v1/sync"));
   const newAdmin = await newAdminKey();
@@ -206,7 +199,7 @@ test("rotating one box leaves the other's epoch, items, devices and keys untouch
     recovery_envelope: b64u(randomBytes(60)),
   };
   const rot = await api.call(A.device, "POST", "/v1/rotate", { json: body, admin: A.admin });
-  expect(rot.status()).toBe(200);
+  expect(rot.status).toBe(200);
   expect((await json(rot)).epoch).toBe(2);
 
   const after = await json(await api.call(B.device, "GET", "/v1/sync"));
@@ -219,10 +212,8 @@ test("rotating one box leaves the other's epoch, items, devices and keys untouch
   expect((await json(await api.call(A.device, "GET", "/v1/sync"))).epoch).toBe(2);
 });
 
-test("a box holds at most MAX_ITEMS_PER_BOX items; another box is unaffected", async ({
-  request,
-}) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.9.0.5" });
+test("a box holds at most MAX_ITEMS_PER_BOX items; another box is unaffected", async () => {
+  const api = clientAt("10.9.0.5");
   const C = await createBox(api, "carol");
   const D = await createBox(api, "dave");
   const ids = Array.from({ length: 40 }, () => randomId());
@@ -234,12 +225,12 @@ test("a box holds at most MAX_ITEMS_PER_BOX items; another box is unaffected", a
         }),
       ),
     );
-    expect(res.map((r) => r.status())).toEqual(Array(res.length).fill(200));
+    expect(res.map((r) => r.status)).toEqual(Array(res.length).fill(200));
   }
   const over = await api.call(C.device, "PUT", `/v1/items/${randomId()}`, {
     json: { base_rev: 0, epoch: 1, blob: blob(100) },
   });
-  expect(over.status()).toBe(409);
+  expect(over.status).toBe(409);
   expect(await json(over)).toMatchObject({ error: "box_full", max_items: 40 });
   // The refusal consumed no seq, existing items can still be edited, and a tombstone still counts as an item.
   const state = await json(await api.call(C.device, "GET", "/v1/sync", { query: { limit: 200 } }));
@@ -247,18 +238,18 @@ test("a box holds at most MAX_ITEMS_PER_BOX items; another box is unaffected", a
   const edit = await api.call(C.device, "PUT", `/v1/items/${ids[0]}`, {
     json: { base_rev: 1, epoch: 1, blob: blob(100) },
   });
-  expect(edit.status()).toBe(200);
+  expect(edit.status).toBe(200);
   const del = await api.call(C.device, "DELETE", `/v1/items/${ids[1]}`, {
     query: { base_rev: 1 },
     json: { epoch: 1, marker: blob(32) },
   });
-  expect(del.status()).toBe(200);
+  expect(del.status).toBe(200);
   expect(
     (
       await api.call(C.device, "PUT", `/v1/items/${randomId()}`, {
         json: { base_rev: 0, epoch: 1, blob: blob(100) },
       })
-    ).status(),
+    ).status,
   ).toBe(409);
   // Dave is untouched by carol being full.
   expect(
@@ -266,14 +257,12 @@ test("a box holds at most MAX_ITEMS_PER_BOX items; another box is unaffected", a
       await api.call(D.device, "PUT", `/v1/items/${randomId()}`, {
         json: { base_rev: 0, epoch: 1, blob: blob(100) },
       })
-    ).status(),
+    ).status,
   ).toBe(200);
 });
 
-test("a box stores at most MAX_BOX_BYTES of blobs and keeps its history under the same bound; another box is unaffected", async ({
-  request,
-}) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.9.0.8" });
+test("a box stores at most MAX_BOX_BYTES of blobs and keeps its history under the same bound; another box is unaffected", async () => {
+  const api = clientAt("10.9.0.8");
   const F = await createBox(api, "frank");
   const G = await createBox(api, "gina");
   const big = () => blob(256 * 1024); // 349,526 characters; the test server allows 1,000,000 per box
@@ -283,15 +272,15 @@ test("a box stores at most MAX_BOX_BYTES of blobs and keeps its history under th
     });
   const one = randomId(),
     two = randomId();
-  expect((await put(F, one, 0, big())).status()).toBe(200);
-  expect((await put(F, two, 0, big())).status()).toBe(200);
+  expect((await put(F, one, 0, big())).status).toBe(200);
+  expect((await put(F, two, 0, big())).status).toBe(200);
   const over = await put(F, randomId(), 0, big());
-  expect(over.status()).toBe(409);
+  expect(over.status).toBe(409);
   expect(await json(over)).toMatchObject({ error: "box_full", max_bytes: 1_000_000 });
   // The refusal consumed no seq; a small item and a same-size replacement still fit.
   expect((await json(await api.call(F.device, "GET", "/v1/sync"))).head_seq).toBe(2);
-  expect((await put(F, randomId(), 0, blob(100))).status()).toBe(200);
-  for (let rev = 1; rev <= 5; rev++) expect((await put(F, one, rev, big())).status()).toBe(200);
+  expect((await put(F, randomId(), 0, blob(100))).status).toBe(200);
+  for (let rev = 1; rev <= 5; rev++) expect((await put(F, one, rev, big())).status).toBe(200);
   // Five replaced blobs were retained, but only as many as the quota holds.
   const history = (await json(await api.call(F.device, "GET", "/v1/history"))).entries as {
     item_id: string;
@@ -305,39 +294,24 @@ test("a box stores at most MAX_BOX_BYTES of blobs and keeps its history under th
         query: { base_rev: 1 },
         json: { epoch: 1, marker: blob(32) },
       })
-    ).status(),
+    ).status,
   ).toBe(200);
-  expect((await put(F, randomId(), 0, big())).status()).toBe(200);
+  expect((await put(F, randomId(), 0, big())).status).toBe(200);
   // Gina is untouched by frank being full.
-  expect((await put(G, randomId(), 0, big())).status()).toBe(200);
+  expect((await put(G, randomId(), 0, big())).status).toBe(200);
 });
 
-test("a disabled box answers like a revoked device, and only that box", async ({ request }) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.9.0.6" });
+test("a disabled box answers like a revoked device, and only that box", async () => {
+  const api = clientAt("10.9.0.6");
   const E = await createBox(api, "erin");
-  expect((await api.call(E.device, "GET", "/v1/sync")).status()).toBe(200);
+  expect((await api.call(E.device, "GET", "/v1/sync")).status).toBe(200);
   // The operator kill switch is a column; flip it the way an operator would (no route sets it).
-  execFileSync(
-    "pnpm",
-    [
-      "exec",
-      "wrangler",
-      "d1",
-      "execute",
-      "bisel",
-      "--local",
-      "--persist-to",
-      ".wrangler/test-state",
-      "--command",
-      `UPDATE boxes SET disabled_at = 1 WHERE id = '${E.id}'`,
-    ],
-    { stdio: "ignore" },
-  );
+  sql(inject("server").stateDir, `UPDATE boxes SET disabled_at = 1 WHERE id = '${E.id}'`);
   const dead = await api.call(E.device, "GET", "/v1/sync");
-  expect(dead.status()).toBe(404);
+  expect(dead.status).toBe(404);
   expect(await dead.text()).toBe("");
   expect(
-    (await aimedAt(E.id, () => api.call(E.recovery, "POST", "/v1/recovery/session"))).status(),
+    (await aimedAt(E.id, () => api.call(E.recovery, "POST", "/v1/recovery/session"))).status,
   ).toBe(404);
-  expect((await api.call(B.device, "GET", "/v1/sync")).status()).toBe(200);
+  expect((await api.call(B.device, "GET", "/v1/sync")).status).toBe(200);
 });

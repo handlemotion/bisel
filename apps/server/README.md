@@ -16,9 +16,10 @@ pnpm install            # first time
 pnpm dev                # creates .dev.vars if missing, applies local D1 migrations, serves http://localhost:8787
 pnpm migrate            # apply migrations to the local D1 only (pnpm dev already does this)
 pnpm reset              # stop `pnpm dev` first, then wipe local D1 state (.wrangler/state): the next `pnpm dev` is a fresh, un-bootstrapped server
-pnpm test               # Playwright flow tests; starts its own wrangler dev on :8788 with a throwaway D1 (AUTH_BACKOFF_MS=400).
-                        # Includes two-box isolation, the dashboard in a real browser (virtual passkeys) and the device-code connect flow.
+pnpm test               # vitest flow tests over HTTP; a globalSetup starts its own wrangler dev on a free port with a throwaway D1.
+                        # Includes two-box isolation, the dashboard API with signed-in sessions and the device-code connect flow.
 pnpm test:legacy        # builds a pre-accounts database (migrations 0001-0003 + seed), applies 0004+ on top and checks the old box still works
+pnpm test:browser       # opt-in, not in `pnpm test`: the passkey sign-up/sign-in in real Chromium (Playwright, virtual authenticator; port 8788)
 pnpm build:web          # bundles web/app.ts into public/app.js (wrangler dev and deploy run it themselves)
 pnpm check-types
 node scripts/smoke.ts   # manual walk through bootstrap/put/conflict/delete/approve/revoke/recovery against :8787
@@ -40,7 +41,7 @@ scripts/check-all.sh -v         # stream each step's output; flags combine, e.g.
 
 `scripts/check-release-hooks.sh` builds Release and fails if any `BISEL_DEV_` string (the Debug-only hooks) is in the shipped bundle;
 `--control` also builds Debug and requires the strings there, so a broken grep cannot pass silently.
-Every step runs in its own process group that is killed when the step ends, so no dev server survives the script. `pnpm test` needs `:8788` free.
+Every step runs in its own process group that is killed when the step ends, so no dev server survives the script.
 
 Local dev bootstrap token (from `.dev.vars`, created from `.dev.vars.example`): `dev-bootstrap-token`.
 The server holds **many boxes** (one per account, plus unowned ones made with the operator token). `POST /v1/bootstrap` with the token
@@ -362,7 +363,7 @@ src/auth.ts        signed-request middleware, canonical query, failed-auth backo
 src/schemas.ts     Zod schemas
 src/encoding.ts    base64url / hex
 migrations/        D1 migrations (wrangler d1 migrations)
-tests/             Playwright flow tests + tests/support/client.ts (signing client)
+tests/             vitest flow tests, tests/support/ (signing client, server and session helpers), tests/browser/ (the opt-in passkey test)
 scripts/smoke.ts   manual end-to-end script
 scripts/wipe-data.sql  empties every table (throwaway data after the first deploy check, DEPLOY.md step 10)
 ```

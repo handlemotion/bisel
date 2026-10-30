@@ -31,6 +31,7 @@ Repo-wide rules only. App-level docs: `apps/server/README.md` and `DEPLOY.md` (t
 ## Commands
 
 - `pnpm install`, then `pnpm check` (oxfmt + oxlint), `pnpm check-types`, `pnpm test`, `pnpm build`.
+- `pnpm test` runs the server vitest flows (its own `wrangler dev`, free port, local D1). Also `pnpm --filter bisel-server test:legacy` (migration test) and, opt-in, `pnpm --filter bisel-server test:browser` (the one Playwright passkey test).
 - `scripts/check-all.sh` runs everything including the Swift flow suite and the app build; `scripts/check-release-hooks.sh` fails if debug hooks leak into Release.
 - Swift formatting is advisory for now: `xcrun swift-format lint --configuration apps/mac/.swift-format`.
 

@@ -1,19 +1,19 @@
-import { expect, test, type APIResponse } from "@playwright/test";
-import { execFileSync } from "node:child_process";
 import { webcrypto } from "node:crypto";
-import { LEGACY_STATE } from "../playwright.legacy.config";
+import { expect, inject, test } from "vitest";
 import {
   b64u,
-  Bisel,
   boxState,
+  clientAt,
+  newAdminKey,
+  newDevice,
+  randomX25519Pub,
   recoveryKeyFromSeed,
   type Principal,
 } from "../tests/support/client";
+import { sql as run } from "../tests/support/server";
 
 // The database was built by migrations 0001-0003, seeded with one box (legacy-tests/seed.sql), then migrated by 0004.
-test.describe.configure({ mode: "serial" });
-
-const json = async (res: APIResponse) => (await res.json()) as any;
+const json = async (res: Response) => (await res.json()) as any;
 const LEGACY_BOX = "legacy_box_00000000";
 
 async function legacyDevice(): Promise<Principal> {
@@ -39,28 +39,7 @@ async function legacyDevice(): Promise<Principal> {
   };
 }
 
-const sql = (query: string) =>
-  JSON.parse(
-    execFileSync(
-      "pnpm",
-      [
-        "exec",
-        "wrangler",
-        "d1",
-        "execute",
-        "bisel",
-        "--local",
-        "--persist-to",
-        LEGACY_STATE,
-        "--json",
-        "--command",
-        query,
-      ],
-      {
-        encoding: "utf8",
-      },
-    ).replace(/^[^[]*/, ""),
-  )[0].results as any[];
+const sql = (query: string) => run(inject("server").stateDir, query);
 
 test("the old box moved to box legacy_box_00000000 with every row", async () => {
   expect(sql("SELECT id, owner_id, head_seq, epoch, item_count, disabled_at FROM boxes")).toEqual([
@@ -96,8 +75,8 @@ test("the old box moved to box legacy_box_00000000 with every row", async () => 
   ).toEqual([{ ok: 1, some: 1 }]);
 });
 
-test("the legacy device keeps working with no change to its requests", async ({ request }) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.8.0.1" });
+test("the legacy device keeps working with no change to its requests", async () => {
+  const api = clientAt("10.8.0.1");
   const dev = await legacyDevice();
 
   const sync = await json(await api.call(dev, "GET", "/v1/sync"));
@@ -121,7 +100,7 @@ test("the legacy device keeps working with no change to its requests", async ({ 
       blob: b64u(Buffer.alloc(100, 7)) /* sealed items are at least 88 bytes */,
     },
   });
-  expect(edit.status()).toBe(200);
+  expect(edit.status).toBe(200);
   expect((await json(edit)).item).toMatchObject({ rev: 3, seq: 4 });
   const fresh = await api.call(dev, "PUT", "/v1/items/legacy-item-00000000003", {
     json: { base_rev: 0, epoch: 2, blob: b64u(Buffer.alloc(100, 8)) },
@@ -140,30 +119,27 @@ test("the legacy device keeps working with no change to its requests", async ({ 
   // A revoked legacy device is still revoked.
   const old = await legacyDevice();
   expect(
-    (await api.call({ ...old, id: "legacy-device-0000000002" }, "GET", "/v1/sync")).status(),
+    (await api.call({ ...old, id: "legacy-device-0000000002" }, "GET", "/v1/sync")).status,
   ).toBe(404);
 });
 
-test("a recovery request without X-Bisel-Box still reaches the legacy box", async ({ request }) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.8.0.2" });
+test("a recovery request without X-Bisel-Box still reaches the legacy box", async () => {
+  const api = clientAt("10.8.0.2");
   const recovery = await recoveryKeyFromSeed(
     new Uint8Array(Buffer.from("XKfsWBcnjI5_rqPc65Zb90-HFm85SbfCVDg-6CAx9go", "base64url")),
   );
   boxState.id = null;
   const res = await api.call(recovery, "POST", "/v1/recovery/session");
-  expect(res.status()).toBe(200);
+  expect(res.status).toBe(200);
   expect(await json(res)).toMatchObject({ epoch: 2, head_seq: 5 });
   // Naming the box explicitly works too.
   boxState.id = LEGACY_BOX;
-  expect((await api.call(recovery, "POST", "/v1/recovery/session")).status()).toBe(200);
+  expect((await api.call(recovery, "POST", "/v1/recovery/session")).status).toBe(200);
   boxState.id = null;
 });
 
-test("a second box can be created beside it and never sees the legacy data", async ({
-  request,
-}) => {
-  const api = new Bisel(request, { "CF-Connecting-IP": "10.8.0.3" });
-  const { newAdminKey, newDevice, randomX25519Pub } = await import("../tests/support/client");
+test("a second box can be created beside it and never sees the legacy data", async () => {
+  const api = clientAt("10.8.0.3");
   const device = await newDevice("newcomer");
   const created = await api.raw(
     "POST",
@@ -177,7 +153,7 @@ test("a second box can be created beside it and never sees the legacy data", asy
       admin_pubkey: (await newAdminKey()).pub,
     },
   );
-  expect(created.status()).toBe(201);
+  expect(created.status).toBe(201);
   const sync = await json(await api.call(device, "GET", "/v1/sync"));
   expect(sync.items).toEqual([]);
   expect(sync.devices.map((d: any) => d.id)).toEqual([device.id]);

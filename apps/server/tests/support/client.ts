@@ -1,7 +1,7 @@
 // A tiny independent implementation of the client side of the signed-request protocol
 // (see README "How a client signs requests"), using only Node's WebCrypto.
 import { createHash, randomBytes, webcrypto } from "node:crypto";
-import type { APIRequestContext, APIResponse } from "@playwright/test";
+import { inject } from "vitest";
 
 const subtle = webcrypto.subtle;
 
@@ -198,21 +198,26 @@ export async function prepare(
 }
 
 export class Bisel {
-  readonly api: APIRequestContext;
-  readonly extraHeaders: Record<string, string>;
-  constructor(api: APIRequestContext, extraHeaders: Record<string, string> = {}) {
-    this.api = api;
-    this.extraHeaders = extraHeaders;
+  constructor(
+    readonly baseURL: string,
+    readonly extraHeaders: Record<string, string> = {},
+  ) {}
+
+  fetch(path: string, init: RequestInit & { headers?: Record<string, string> } = {}) {
+    return fetch(this.baseURL + path, {
+      redirect: "manual",
+      ...init,
+      headers: { ...init.headers, ...this.extraHeaders },
+    });
   }
 
   /** Send an already-prepared (signed) request. Re-sending the same Prepared is a replay. */
-  async send(p: Prepared): Promise<APIResponse> {
-    return this.api.fetch(p.path, {
+  send(p: Prepared): Promise<Response> {
+    const q = canonicalQuery(p.query);
+    return this.fetch(q ? `${p.path}?${q}` : p.path, {
       method: p.method,
-      params: Object.keys(p.query).length ? (p.query as Record<string, string>) : undefined,
-      headers: { ...p.headers, ...this.extraHeaders },
-      data: p.body.length ? p.body : undefined,
-      maxRedirects: 0,
+      headers: p.headers,
+      body: p.body.length ? p.body : undefined,
     });
   }
 
@@ -221,22 +226,24 @@ export class Bisel {
     method: string,
     path: string,
     opts: Parameters<typeof prepare>[3] = {},
-  ): Promise<APIResponse> {
+  ): Promise<Response> {
     return this.send(await prepare(principal, method, path, opts));
   }
 
   /** Unsigned request (bootstrap). */
-  async raw(
+  raw(
     method: string,
     path: string,
     headers: Record<string, string>,
     json?: unknown,
-  ): Promise<APIResponse> {
-    return this.api.fetch(path, {
+  ): Promise<Response> {
+    return this.fetch(path, {
       method,
-      headers: { ...headers, ...this.extraHeaders },
-      data: json === undefined ? undefined : Buffer.from(JSON.stringify(json)),
-      maxRedirects: 0,
+      headers,
+      body: json === undefined ? undefined : JSON.stringify(json),
     });
   }
 }
+
+/** A client of the test server that the Worker sees as coming from `ip` (each test file keeps to its own range). */
+export const clientAt = (ip: string) => new Bisel(inject("server").url, { "CF-Connecting-IP": ip });

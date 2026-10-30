@@ -12,7 +12,7 @@
 # Flags combine (--server --core). Needs only tracked files: apps/server/.dev.vars is created from the example when missing.
 # Local only: wrangler dev with a throwaway D1 on localhost; no Cloudflare login, no Doppler, no deploy command.
 # Every step runs in its own process group, which is killed when the step ends and on Ctrl-C, so no dev server outlives the script.
-# pnpm test needs :8788 free (the Swift flow tests pick random free ports).
+# The server tests and the Swift flow tests each start their own wrangler dev on random free ports.
 set -u
 set -o pipefail
 
@@ -74,29 +74,17 @@ step() {
   return $rc
 }
 
-# Fails the step when something is already listening where a test server is about to start.
-port_free() { ! lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
-leftovers() {
-  if ! port_free 8788; then echo "a server is still listening on :8788 after the tests" >&2; return 1; fi
-}
-
 echo "bisel check-all  (logs: $LOGS)"
 echo
 
 SERVER_OK=1
 if (( RUN_SERVER )); then
   echo "server"
-  if ! port_free 8788; then
-    echo "  :8788 is in use (a leftover wrangler dev?). Stop it and rerun." >&2
-    NAMES+=("server: port 8788 free"); RESULTS+=("FAIL"); TIMES+=(0); SERVER_OK=0
-  else
-    step "server: pnpm install --frozen-lockfile" bash -c "cd '$ROOT' && pnpm install --frozen-lockfile" || SERVER_OK=0
-    if (( SERVER_OK )); then
-      step "server: typecheck (worker + dashboard)" bash -c "cd '$ROOT/apps/server' && pnpm check-types"
-      step "server: pnpm test" bash -c "cd '$ROOT/apps/server' && pnpm test"
-      step "server: pnpm test:legacy" bash -c "cd '$ROOT/apps/server' && pnpm test:legacy"
-      step "server: no dev server left behind" bash -c "$(declare -f port_free leftovers); leftovers"
-    fi
+  step "server: pnpm install --frozen-lockfile" bash -c "cd '$ROOT' && pnpm install --frozen-lockfile" || SERVER_OK=0
+  if (( SERVER_OK )); then
+    step "server: typecheck (worker + dashboard)" bash -c "cd '$ROOT/apps/server' && pnpm check-types"
+    step "server: pnpm test" bash -c "cd '$ROOT/apps/server' && pnpm test"
+    step "server: pnpm test:legacy" bash -c "cd '$ROOT/apps/server' && pnpm test:legacy"
   fi
   echo
 fi

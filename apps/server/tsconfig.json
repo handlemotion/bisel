@@ -16,7 +16,8 @@
     "tests",
     "legacy-tests",
     "playwright.config.ts",
-    "playwright.legacy.config.ts",
+    "vitest.config.ts",
+    "vitest.legacy.config.ts",
     "worker-configuration.d.ts"
   ]
 }

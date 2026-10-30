@@ -12,9 +12,9 @@
     "reset": "rm -rf .wrangler/state",
     "types": "wrangler types",
     "deploy:prod": "wrangler deploy --env prod",
-    "test": "playwright test",
-    "test:legacy": "playwright test -c playwright.legacy.config.ts",
-    "test:report": "playwright show-report",
+    "test": "vitest run",
+    "test:legacy": "vitest run -c vitest.legacy.config.ts",
+    "test:browser": "playwright test",
     "check-types": "tsc --noEmit && tsc --noEmit -p web",
     "build": "node scripts/build-web.mjs"
   },
@@ -29,6 +29,7 @@
     "@types/node": "26.6.5",
     "esbuild": "0.28.2",
     "typescript": "7.0.2",
+    "vitest": "5.0.5",
     "wrangler": "4.154.0"
   }
 }
