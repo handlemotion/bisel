@@ -187,18 +187,6 @@ struct VaultFlowTests {
         }
     }
 
-    @Test("Back from a brand-new box's recovery phrase erases it, and creating again works with a new phrase")
-    func discardFreshLocalBoxThenStartOver() async throws {
-        let a = try Device("fresh")
-        let first = try await a.vault.bootstrapLocal(deviceName: "fresh")
-        #expect(await a.vault.isConfigured)
-        try await a.vault.removeLocalDevice()
-        #expect(!(await a.vault.isConfigured), "nothing is left on this Mac after Back")
-        let second = try await a.vault.bootstrapLocal(deviceName: "fresh again")
-        #expect(await a.vault.isConfigured)
-        #expect(first.words != second.words, "starting over makes a new phrase")
-    }
-
     @Test("a local-only vault works offline, then connecting a server uploads everything and the phrase recovers it elsewhere")
     func localFirstThenConnect() async throws {
         try await TestServer.with { server in

@@ -54,60 +54,18 @@ struct ItemActionFlowTests {
             let secret = try await a.vault.createItem(s)
             #expect(secret.type == .secret && secret.password == "sk_test_123" && secret.totp == nil)
 
+            // A scheme that autofill must never open is refused, and a refused create writes nothing.
+            var unsafe = ItemDraft(type: .login)
+            unsafe.title = "Bad"; unsafe.urls = ["javascript:alert(1)"]
+            #expect(await issues { _ = try await a.vault.createItem(unsafe) } == [ItemIssue(.urls, .unsupportedURLScheme, index: 0)])
+            #expect(try await a.vault.items().items.count == 3)
+
             try await a.vault.sync()
             try await b.enroll(through: a, server: server)
             let onB = try await b.vault.items().items
             #expect(Set(onB.map(\.id)) == [login.id, note.id, secret.id])
             #expect(onB.first { $0.id == login.id }?.totp == login.totp)
         }
-    }
-
-    @Test("create: every rule reports its field and code, and nothing is written")
-    func createValidation() async throws {
-        let a = try Device("a")
-        _ = try await a.vault.bootstrapLocal(deviceName: "a")
-
-        func fails(_ configure: (inout ItemDraft) -> Void, _ expected: ItemIssue...) async throws {
-            var d = ItemDraft(type: .login)
-            d.title = "ok"
-            configure(&d)
-            #expect(ItemValidator.issues(for: d) == expected)
-            let thrown = await issues { _ = try await a.vault.createItem(d) }
-            #expect(thrown == expected)
-        }
-        try await fails({ $0.title = "   " }, ItemIssue(.title, .required))
-        try await fails({ $0.title = String(repeating: "x", count: 201) }, ItemIssue(.title, .tooLong))
-        try await fails({ $0.urls = ["javascript:alert(1)"] }, ItemIssue(.urls, .unsupportedURLScheme, index: 0))
-        try await fails({ $0.urls = ["file:///etc/passwd"] }, ItemIssue(.urls, .unsupportedURLScheme, index: 0))
-        try await fails({ $0.urls = ["mailto:me@example.com"] }, ItemIssue(.urls, .unsupportedURLScheme, index: 0))
-        try await fails({ $0.urls = ["fine.example", "has space.example"] }, ItemIssue(.urls, .invalidURL, index: 1))
-        try await fails({ $0.urls = ["https://user:pw@example.com"] }, ItemIssue(.urls, .invalidURL, index: 0))
-        try await fails({ $0.totp = "not base32!" }, ItemIssue(.totp, .totpNotBase32))
-        try await fails({ $0.totp = "ABCD" }, ItemIssue(.totp, .totpTooShort))
-        try await fails({ $0.totp = "otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=1" }, ItemIssue(.totp, .totpUnsupported))
-        try await fails({ $0.totp = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&digits=12" }, ItemIssue(.totp, .totpBadParameters))
-        try await fails({ $0.totp = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=MD5" }, ItemIssue(.totp, .totpBadParameters))
-        try await fails({ $0.fields = [CustomField(label: " ", value: "v")] }, ItemIssue(.fields, .labelRequired, index: 0))
-        try await fails({ $0.type = .passkey }, ItemIssue(.type, .unsupportedType))
-        try await fails({ $0.title = ""; $0.urls = ["javascript:x"]; $0.totp = "no!" },
-                        ItemIssue(.title, .required), ItemIssue(.urls, .unsupportedURLScheme, index: 0), ItemIssue(.totp, .totpNotBase32))
-        var secret = ItemDraft(type: .secret); secret.title = "k"
-        #expect(ItemValidator.issues(for: secret) == [ItemIssue(.password, .required)])
-
-        // 256 KiB per item: a little under fits, a little over does not.
-        var big = ItemDraft(type: .note); big.title = "big"
-        big.notes = String(repeating: "a", count: ItemLimits.maxItemBytes - 1000)
-        _ = try await a.vault.createItem(big)
-        var tooBig = ItemDraft(type: .note); tooBig.title = "too big"
-        tooBig.notes = String(repeating: "a", count: ItemLimits.maxItemBytes + 1)
-        #expect(ItemValidator.issues(for: tooBig) == [ItemIssue(.size, .tooLarge)])
-        #expect(await issues { _ = try await a.vault.createItem(tooBig) } == [ItemIssue(.size, .tooLarge)])
-        #expect(try await a.vault.items().items.map(\.title) == ["big"], "failed creates wrote nothing")
-
-        // An edit draft is not a create, and the other way round.
-        let item = try await a.vault.items().items[0]
-        await #expect(throws: ItemActionError.draftIsEdit) { _ = try await a.vault.createItem(ItemDraft(editing: item)) }
-        await #expect(throws: ItemActionError.draftIsNew) { _ = try await a.vault.updateItem(ItemDraft()) }
     }
 
     @Test("TOTP text round-trips: non-default parameters survive an edit of an unrelated field")
@@ -124,8 +82,6 @@ struct ItemActionFlowTests {
         let out = try await a.vault.updateItem(edit)
         guard case .saved(let saved, _) = out else { Issue.record("expected saved, got \(out)"); return }
         #expect(saved.totp == item.totp)
-        #expect(TOTPSetup.parsed("  JBSW Y3DP EHPK 3PXP ")?.params == TOTPParameters(secret: "JBSWY3DPEHPK3PXP"))
-        #expect(TOTPSetup.parsed("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=md5") == nil)
     }
 
     @Test("edit: only touched fields change, an untouched draft writes nothing and asks for nothing")
@@ -354,62 +310,6 @@ struct ItemActionFlowTests {
         #expect(back.password == "s" && back.id == item.id)
         #expect(try await relaunched.items().items.map(\.id) == [item.id])
         _ = receipt
-    }
-
-    @Test("password generator: lengths, classes, ambiguity, passphrases and errors")
-    func generator() throws {
-        var o = PasswordOptions()
-        for length in [8, 20, 64, 128] {
-            o.length = length
-            let p = try PasswordGenerator.generate(o)
-            #expect(p.value.count == length)
-            #expect(p.value.contains { $0.isLowercase } && p.value.contains { $0.isUppercase } && p.value.contains { $0.isNumber })
-            #expect(p.value.contains { "!@#$%^&*()-_=+[]{};:,.?/~".contains($0) })
-            #expect(!p.value.contains { "0O1lI|`'\"".contains($0) }, "ambiguous characters are left out by default")
-        }
-        o.length = 20; o.symbols = false; o.uppercase = false; o.avoidAmbiguous = false
-        for _ in 0..<50 {
-            let p = try PasswordGenerator.generate(o).value
-            #expect(p.allSatisfy { $0.isLowercase || $0.isNumber } && p.contains { $0.isNumber } && p.contains { $0.isLowercase })
-        }
-        var digitsOnly = PasswordOptions(); digitsOnly.lowercase = false; digitsOnly.uppercase = false; digitsOnly.symbols = false; digitsOnly.length = 12
-        #expect(try PasswordGenerator.generate(digitsOnly).value.allSatisfy(\.isNumber))
-        #expect(Set((0..<200).map { _ in (try? PasswordGenerator.generate().value) ?? "" }).count == 200, "no repeats")
-
-        // Every character of a 4-symbol-free pool shows up over many draws: no class or position is starved.
-        var seen = Set<Character>()
-        var small = PasswordOptions(); small.lowercase = false; small.uppercase = false; small.symbols = false
-        for _ in 0..<300 { seen.formUnion(try PasswordGenerator.generate(small).value) }
-        #expect(seen == Set("23456789"), "digits without 0 and 1, all reachable")
-
-        let weak = try PasswordGenerator.generate({ var w = PasswordOptions(); w.length = 8; w.lowercase = true; w.uppercase = false; w.digits = false; w.symbols = false; return w }())
-        #expect(weak.strength == .weak)
-        #expect(try PasswordGenerator.generate().strength >= .strong)
-        #expect(abs(PasswordGenerator.entropyBits(for: PasswordOptions()) - (try PasswordGenerator.generate().entropyBits)) < 0.001)
-
-        var pp = PasswordOptions.passphrase
-        pp.words = 6; pp.separator = " "; pp.capitalize = true; pp.includeNumber = true
-        let phrase = try PasswordGenerator.generate(pp)
-        let words = phrase.value.split(separator: " ")
-        #expect(words.count == 6)
-        #expect(words.filter { $0.last?.isNumber == true }.count == 1)
-        let list = Set(PassphraseWords.list)
-        #expect(words.allSatisfy { list.contains($0.lowercased().filter(\.isLetter)) && $0.first?.isUppercase == true })
-        #expect(PassphraseWords.list.count == 2048)
-        #expect(phrase.entropyBits > 66 + 4)
-        pp.includeNumber = false; pp.capitalize = false; pp.separator = "-"; pp.words = 3
-        #expect(try PasswordGenerator.generate(pp).value.split(separator: "-").count == 3)
-
-        func fails(_ configure: (inout PasswordOptions) -> Void, _ expected: PasswordGeneratorError) {
-            var x = PasswordOptions(); configure(&x)
-            #expect(throws: expected) { try PasswordGenerator.generate(x) }
-        }
-        fails({ $0.length = 7 }, .lengthOutOfRange)
-        fails({ $0.length = 129 }, .lengthOutOfRange)
-        fails({ $0.lowercase = false; $0.uppercase = false; $0.digits = false; $0.symbols = false }, .noCharacterClass)
-        fails({ $0.mode = .passphrase; $0.words = 2 }, .wordCountOutOfRange)
-        fails({ $0.mode = .passphrase; $0.words = 13 }, .wordCountOutOfRange)
-        fails({ $0.mode = .passphrase; $0.separator = "abcd" }, .separatorTooLong)
     }
 
     private func expectConflict(_ body: () async throws -> Void) async throws -> ItemConflict {

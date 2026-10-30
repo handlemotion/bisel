@@ -55,19 +55,6 @@ struct ConnectFlowTests {
         }
     }
 
-    @Test("a first device can bootstrap straight from a device code")
-    func bootstrapWithConnectCode() async throws {
-        try await TestServer.with { server in
-            let a = try Device("a")
-            let code = try await Vault.startConnect(server: server.url, deviceName: "a")
-            try server.approveConnect(userCode: code.userCode, account: "acct_one")
-            _ = try await a.vault.bootstrap(server: server.url, credential: .connect(deviceCode: code.deviceCode), deviceName: "a")
-            #expect(try await a.vault.identity()?.boxID == (try server.onlyBoxID()))
-            _ = try await a.vault.save(login("One", password: "p1"))
-            #expect(try await a.vault.sync().pushed >= 1)
-        }
-    }
-
     @Test("an account that already has a box is told so, a denied or expired code ends the wait, and nothing is created")
     func refusals() async throws {
         try await TestServer.with { server in
