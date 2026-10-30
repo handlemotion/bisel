@@ -78,7 +78,7 @@ A test client can send its own value to get an isolated rate-limit bucket.
   parameter or a body on GET/DELETE is `400`.
 - **Limits.** Item `blob` max **262144 bytes decoded** (256 KiB). Hard cap on any request body **4 MiB** (above that you get the
   uniform 404); after authentication each route has its own cap and answers `413 too_large` (item PUT 400 KiB, device/recovery
-  routes 32 KiB, rotate 4 MiB, bootstrap 64 KiB). Rotation takes up to 20 000 items and 64 devices. `GET /v1/sync` `limit` 1..500, default 200.
+  routes 32 KiB, rotate 4 MiB, bootstrap 64 KiB). Rotation takes up to 12 000 items and 64 devices. `GET /v1/sync` `limit` 1..500, default 200.
 
 ## How a client signs requests
 

@@ -1,11 +1,12 @@
--- Empties every table the Worker writes to and leaves the schema and the migration history alone,
--- so the next POST /v1/bootstrap starts a brand-new box. DESTROYS ALL DATA in the database it runs against.
--- Used once, to remove the throwaway data of the post-deploy check (DEPLOY.md step 9). No foreign keys exist.
+-- Empties every box table the Worker writes to (boxes, devices, items, history, events, connect requests, counters) and leaves the
+-- schema, the migration history and the dashboard accounts (Better Auth tables) alone. DESTROYS EVERY BOX in the database it runs
+-- against: for a throwaway database only, never for one that holds a real box (use a Time Travel restore there, see DEPLOY.md).
 DELETE FROM item_history;
 DELETE FROM items;
 DELETE FROM devices;
 DELETE FROM events;
+DELETE FROM connect_requests;
 DELETE FROM nonces;
 DELETE FROM auth_failures;
 DELETE FROM assertions;
-DELETE FROM meta;
+DELETE FROM boxes;
