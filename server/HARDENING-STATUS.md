@@ -1,7 +1,7 @@
 # Hardening status (security, durability, performance and Mac-app audits of 2026-10-29)
 
 Compared against origin/main on 2026-10-30. "Fixed in" names the commit subject's area and hash. Decision: **now** = done in this batch, **later** = real work, not started,
-**won't** = deliberately not done (reason given), **UI** = needs views or copy, owned by Rodrigo. Hashes marked `*` are this batch (they are the ones on main after the push).
+**won't** = deliberately not done (reason given), **UI** = needs views or copy, owned by Rodrigo. Hashes marked `*` are this batch.
 
 ## Security audit #2
 
@@ -9,15 +9,15 @@ Compared against origin/main on 2026-10-30. "Fixed in" names the commit subject'
 |---|---|---|---|---|
 | S1 | The Mac app surfaces none of the core's alarms | High | Fixed in c0a7874 (banners for foreign events, held-back devices, forged deletes, changed recovery keys, post-revoke list). Trash/history restore screens and "make a new phrase after a recovery event" prompt not verified | UI |
 | S2 | A stolen device-signing key overwrites the reserved manifest | Med | Server fixed in 303f61d (manifest writes need the admin signature) and db9833b (minimum blob length). The client-side "tampered manifest: stay unlocked and republish" is not done: only a hostile server can serve a garbage manifest, and it can deny service anyway | won't |
-| S3 | Recovery/rotation adoption accepts a server-supplied vault key and pushes before verifying | Med | Fixed in 378336d* (the key is checked against the box's manifest, or an item the box held, before any upload; two flow tests with a lying server). Corner left: after a rotation adoption a tiny box whose manifest and every item are still pending cannot be confirmed and stays unsynced until it can | now |
+| S3 | Recovery/rotation adoption accepts a server-supplied vault key and pushes before verifying | Med | Fixed in 50ed133* (the key is checked against the box's manifest, or an item the box held, before any upload; two flow tests with a lying server). Corner left: after a rotation adoption a tiny box whose manifest and every item are still pending cannot be confirmed and stays unsynced until it can | now |
 | S4 | Fill types into whatever site is in front | Med | Enter/⌥Enter refuse on a site mismatch (a0bdee0). TOTP/username typing and the `aria-roledescription` heuristic are not covered | UI (fill engine) |
 | S5 | Rotation seals the new key to unpinned recovery keys | Med | Fixed in e65fac3 | |
-| S6 | `.biometryCurrentSet` lock-out has no way out | Med | Core path added in a2a58a9*: `recoverLocal(phrase:)` for local-only boxes, `removeLocalDevice` refuses while it holds items that exist nowhere else; connected devices recover through the server. No app screen calls them yet | UI |
+| S6 | `.biometryCurrentSet` lock-out has no way out | Med | Core path added in f41f975*: `recoverLocal(phrase:)` for local-only boxes, `removeLocalDevice` refuses while it holds items that exist nowhere else; connected devices recover through the server. No app screen calls them yet | UI |
 | S7 | The runnable build keeps DK-enc in a plaintext file | Med | Operational: needs a Developer ID / team id | won't (owner) |
-| S8 | Server keeps old wrapped item keys for 30 days after a rotation | Low | Fixed in 8cc1850* (no rotate history; migration 0007 purges existing rows) | now |
-| S9 | Spec drift: public `/healthz`, 429 before auth | Low | SPEC §6 and DEPLOY updated in 6a238f0*. A neighbour on the same egress address can still burn the 300/min limit | won't (accepted, documented) |
+| S8 | Server keeps old wrapped item keys for 30 days after a rotation | Low | Fixed in 48da1b6* (no rotate history; migration 0007 purges existing rows) | now |
+| S9 | Spec drift: public `/healthz`, 429 before auth | Low | SPEC §6 and DEPLOY updated in 25cc778*. A neighbour on the same egress address can still burn the 300/min limit | won't (accepted, documented) |
 | S10 | Recovery session has no device cap, spams events | Low | Fixed in db9833b (3 pending / 16 active, one event per 5 min for the read-only call) | |
-| S11 | History growth and short blobs from a stolen device key | Low | Short blobs fixed in db9833b; unbounded history fixed in 466c41d* (per-box byte quota and history bound) | now |
+| S11 | History growth and short blobs from a stolen device key | Low | Short blobs fixed in db9833b; unbounded history fixed in 067f2c7* (per-box byte quota and history bound) | now |
 | S12 | Fill edge cases (Tab/Return in secrets, TOTP into any field) | Low | Tab/Return fixed in 741cbf4; rest is the fill engine | UI |
 | S13 | Security settings live in UserDefaults | Low | Not changed | UI / later |
 | S14 | Lock path and memory hygiene | Low | Needs a memory read to exploit | won't |
@@ -31,7 +31,7 @@ Compared against origin/main on 2026-10-30. "Fixed in" names the commit subject'
 
 | # | Finding | Sev | Status | Decision |
 |---|---|---|---|---|
-| D1 | A local-only box is unrecoverable once the Secure Enclave key is invalidated | Critical | Backups include unpushed records and restore without a server (35b4550); phrase-only recovery in place and the erase guard added in a2a58a9* | now |
+| D1 | A local-only box is unrecoverable once the Secure Enclave key is invalidated | Critical | Backups include unpushed records and restore without a server (35b4550); phrase-only recovery in place and the erase guard added in f41f975* | now |
 | D2 | Server restore strands newer data; no re-seed path | High | Fixed in ad50dde | |
 | D3 | Edit on the rotating device during its own rotate is overwritten | High | Fixed in 7c85817 | |
 | D4 | Backup can be silently unusable; failed import is half-restored | Med | Fixed in c9aa241 and bcc6ee3 | |
@@ -40,7 +40,7 @@ Compared against origin/main on 2026-10-30. "Fixed in" names the commit subject'
 | D7 | Lost-response duplicates; stale editor overwrites | Med-Low | Duplicates fixed in 6161929. **Stale editor base revision** is not: `Vault.save` carries no revision; needs the editor to pass the revision it loaded | later (needs UI) |
 | D8 | Non-atomic multi-step local changes | Low-Med | Fixed in 6161929 | |
 | D9 | Retention and limits | Low | Rotation cap lowered to 12,000 (fc62e7a). **30-day retention** unchanged (Time Travel 30 days on Paid is the second net). **Quarantine-and-continue rotation** not done: one undecryptable record still blocks revoking a device until it is deleted; needs a decision on what the owner sees | later (needs UI) |
-| D10 | `box_full` was read as a conflict (found while fixing S11, not in the audits) | Med | The client looped through re-seals and never reported it; fixed in f144368* | now |
+| D10 | `box_full` was read as a conflict (found while fixing S11, not in the audits) | Med | The client looped through re-seals and never reported it; fixed in 2f71a27* | now |
 
 ## Performance audit
 
@@ -67,9 +67,9 @@ Everything else (editor sheet height, empty-box layout, accessibility labels, un
 
 | Finding | Status |
 |---|---|
-| One account could fill the shared D1 database (5,000 items × 256 KiB per box, open sign-up) | Fixed in 466c41d* (`MAX_BOX_BYTES`, migration 0008) |
-| `scripts/wipe-data.sql` referenced the dropped `meta` table; `DEPLOY.md` described a pre-accounts, undeployed server and its verify step expected `/` to be a 404 | Fixed in 6a238f0* |
-| `webconnect` claim test polled once right after a click (flaky) | Fixed in 2d79422* |
+| One account could fill the shared D1 database (5,000 items × 256 KiB per box, open sign-up) | Fixed in 067f2c7* (`MAX_BOX_BYTES`, migration 0008) |
+| `scripts/wipe-data.sql` referenced the dropped `meta` table; `DEPLOY.md` described a pre-accounts, undeployed server and its verify step expected `/` to be a 404 | Fixed in 25cc778* |
+| `webconnect` claim test polled once right after a click (flaky) | Fixed in 92049d1* |
 
 ## Left on purpose, in one list
 
