@@ -45,6 +45,8 @@
     "HISTORY_RETENTION_DAYS": "30",
     // Most items (live and tombstones) one box may hold; a new item beyond it is answered 409 box_full.
     "MAX_ITEMS_PER_BOX": "5000",
+    // Characters of item blob (base64url, ~4/3 of the bytes) one box may store; also bounds its retained history. 409 box_full beyond it.
+    "MAX_BOX_BYTES": "67108864",
     // A device registered through the recovery phrase can only sign requests after this delay (0 = immediately).
     "RECOVERY_ACTIVATION_DELAY_SECONDS": "0"
   },
@@ -97,6 +99,7 @@
         "AUTH_BACKOFF_MS": "1000",
         "HISTORY_RETENTION_DAYS": "30",
         "MAX_ITEMS_PER_BOX": "5000",
+        "MAX_BOX_BYTES": "67108864",
         // 24 h: someone who has seen the 24 words once cannot silently take the vault; every enrolled device is
         // told on its next sync and can cancel. Set to "0" to recover instantly.
         "RECOVERY_ACTIVATION_DELAY_SECONDS": "86400"

@@ -253,6 +253,16 @@ const itemJson = (r: ItemRow) => ({ ...r, deleted: r.deleted === 1 });
 const ITEM_COLS = "id, rev, seq, deleted, blob, updated_at";
 /** Items one box may hold (live and tombstones): open sign-up must not be a free file store. */
 const maxItemsPerBox = (env: Env) => Math.max(1, Number(env.MAX_ITEMS_PER_BOX) || 5000);
+/** Characters of item blob (base64url text) one box may store, and the same bound on its retained history. */
+const maxBytesPerBox = (env: Env) => Math.max(1, Math.floor(Number(env.MAX_BOX_BYTES)) || 64 * 1024 * 1024);
+
+/** Keeps a box's retained history under its byte quota by dropping the oldest rows first (a thief rewriting items cannot fill the database). */
+function pruneBoxHistory(env: Env, boxId: string) {
+  return env.DB.prepare(
+    `DELETE FROM item_history WHERE box_id = ?1 AND id IN
+       (SELECT id FROM (SELECT id, SUM(length(blob)) OVER (ORDER BY id DESC) AS running FROM item_history WHERE box_id = ?1) WHERE running > ?2)`,
+  ).bind(boxId, maxBytesPerBox(env));
+}
 
 const DEVICE_PUBLIC_COLS = "id, name, kind, sig_pubkey, enc_pubkey, created_at, last_seen_at, revoked_at, activates_at";
 
@@ -432,7 +442,10 @@ app.put("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
   // room under the per-box cap for a brand-new item (the items trigger keeps item_count current).
   const REV_GUARD = "COALESCE((SELECT rev FROM items WHERE box_id = ?6 AND id = ?1), 0) = ?2";
   const maxItems = maxItemsPerBox(c.env);
-  const ROOM = `(EXISTS (SELECT 1 FROM items WHERE box_id = ?6 AND id = ?1) OR (SELECT item_count FROM boxes WHERE id = ?6) < ${maxItems})`;
+  const maxBytes = maxBytesPerBox(c.env);
+  const ROOM =
+    `((EXISTS (SELECT 1 FROM items WHERE box_id = ?6 AND id = ?1) OR (SELECT item_count FROM boxes WHERE id = ?6) < ${maxItems})` +
+    ` AND (SELECT stored_bytes FROM boxes WHERE id = ?6) - COALESCE((SELECT length(blob) FROM items WHERE box_id = ?6 AND id = ?1), 0) + ${blob.length} <= ${maxBytes})`;
   const [bump, , , current, state] = await db.batch([
     db.prepare(`UPDATE boxes SET head_seq = head_seq + 1 WHERE id = ?6 AND epoch = ?3 AND ${ROOM} AND ${REV_GUARD}`).bind(id, base_rev, epoch, null, null, boxId),
     // The state being replaced stays recoverable for the retention period (same guard as the write).
@@ -452,16 +465,18 @@ app.put("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
       )
       .bind(id, base_rev, blob, now, epoch, boxId),
     db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE box_id = ?2 AND id = ?1`).bind(id, boxId),
-    db.prepare("SELECT epoch, item_count FROM boxes WHERE id = ?1").bind(boxId),
-    // Last, in the same round trip: expired history is pruned with the write that adds to it.
+    db.prepare("SELECT epoch, item_count, stored_bytes FROM boxes WHERE id = ?1").bind(boxId),
+    // Last, in the same round trip: expired history is pruned with the write that adds to it, and a box's history stays under its quota.
     pruneHistory(c.env, now),
+    pruneBoxHistory(c.env, boxId),
   ]);
   const row = current!.results[0] as ItemRow | undefined;
   if (bump!.meta.changes !== 1) {
-    const st = state!.results[0] as { epoch: number; item_count: number };
+    const st = state!.results[0] as { epoch: number; item_count: number; stored_bytes: number };
     // The blob's item key is wrapped under a vault key that has since been rotated: refuse, the client re-wraps.
     if (st.epoch !== epoch) return c.json({ error: "stale_epoch", epoch: st.epoch }, 409);
     if (!row && st.item_count >= maxItems) return c.json({ error: "box_full", max_items: maxItems }, 409);
+    if (st.stored_bytes - (row?.blob.length ?? 0) + blob.length > maxBytes) return c.json({ error: "box_full", max_bytes: maxBytes }, 409);
     return c.json({ error: "conflict", current: row ? itemJson(row) : null }, 409);
   }
   return c.json({ item: itemJson(row!) });
@@ -499,8 +514,9 @@ app.delete("/v1/items/:id", deviceAuth, manifestAdmin, async (c) => {
       .bind(id, base_rev, now, marker, epoch, boxId),
     db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE box_id = ?2 AND id = ?1`).bind(id, boxId),
     db.prepare("SELECT epoch FROM boxes WHERE id = ?1").bind(boxId),
-    // Last, in the same round trip: expired history is pruned with the write that adds to it.
+    // Last, in the same round trip: expired history is pruned with the write that adds to it, and a box's history stays under its quota.
     pruneHistory(c.env, now),
+    pruneBoxHistory(c.env, boxId),
   ]);
   const row = current!.results[0] as ItemRow | undefined;
   if (!row) return c.json({ error: "not_found" }, 404);

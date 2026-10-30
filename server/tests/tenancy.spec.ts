@@ -187,6 +187,34 @@ test("a box holds at most MAX_ITEMS_PER_BOX items; another box is unaffected", a
   expect((await api.call(D.device, "PUT", `/v1/items/${randomId()}`, { json: { base_rev: 0, epoch: 1, blob: blob(100) } })).status()).toBe(200);
 });
 
+test("a box stores at most MAX_BOX_BYTES of blobs and keeps its history under the same bound; another box is unaffected", async ({ request }) => {
+  const api = new Bisel(request, { "CF-Connecting-IP": "10.9.0.8" });
+  const F = await createBox(api, "frank");
+  const G = await createBox(api, "gina");
+  const big = () => blob(256 * 1024); // 349,526 characters; the test server allows 1,000,000 per box
+  const put = (box: TestBox, id: string, baseRev: number, b: string) =>
+    api.call(box.device, "PUT", `/v1/items/${id}`, { json: { base_rev: baseRev, epoch: 1, blob: b } });
+  const one = randomId(), two = randomId();
+  expect((await put(F, one, 0, big())).status()).toBe(200);
+  expect((await put(F, two, 0, big())).status()).toBe(200);
+  const over = await put(F, randomId(), 0, big());
+  expect(over.status()).toBe(409);
+  expect(await json(over)).toMatchObject({ error: "box_full", max_bytes: 1_000_000 });
+  // The refusal consumed no seq; a small item and a same-size replacement still fit.
+  expect((await json(await api.call(F.device, "GET", "/v1/sync"))).head_seq).toBe(2);
+  expect((await put(F, randomId(), 0, blob(100))).status()).toBe(200);
+  for (let rev = 1; rev <= 5; rev++) expect((await put(F, one, rev, big())).status()).toBe(200);
+  // Five replaced blobs were retained, but only as many as the quota holds.
+  const history = (await json(await api.call(F.device, "GET", "/v1/history"))).entries as { item_id: string }[];
+  expect(history.length).toBeGreaterThan(0);
+  expect(history.length).toBeLessThanOrEqual(2);
+  // A delete frees the room the blob held (the tombstone marker is tiny).
+  expect((await api.call(F.device, "DELETE", `/v1/items/${two}`, { query: { base_rev: 1 }, json: { epoch: 1, marker: blob(32) } })).status()).toBe(200);
+  expect((await put(F, randomId(), 0, big())).status()).toBe(200);
+  // Gina is untouched by frank being full.
+  expect((await put(G, randomId(), 0, big())).status()).toBe(200);
+});
+
 test("a disabled box answers like a revoked device, and only that box", async ({ request }) => {
   const api = new Bisel(request, { "CF-Connecting-IP": "10.9.0.6" });
   const E = await createBox(api, "erin");

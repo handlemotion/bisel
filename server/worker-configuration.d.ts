@@ -11,6 +11,7 @@ interface __BaseEnv_Env {
 	AUTH_BACKOFF_MS: "1000";
 	HISTORY_RETENTION_DAYS: "30";
 	MAX_ITEMS_PER_BOX: "5000";
+	MAX_BOX_BYTES: "67108864";
 	RECOVERY_ACTIVATION_DELAY_SECONDS: "86400" | "0";
 	BOOTSTRAP_TOKEN: string;
 	BETTER_AUTH_SECRET: string;
@@ -29,6 +30,7 @@ declare namespace Cloudflare {
 		AUTH_BACKOFF_MS: "1000";
 		HISTORY_RETENTION_DAYS: "30";
 		MAX_ITEMS_PER_BOX: "5000";
+		MAX_BOX_BYTES: "67108864";
 		RECOVERY_ACTIVATION_DELAY_SECONDS: "86400";
 		BOOTSTRAP_TOKEN: string;
 		BETTER_AUTH_SECRET: string;
@@ -40,7 +42,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "PUBLIC_ORIGIN" | "AUTH_FAIL_LIMIT" | "AUTH_FAIL_WINDOW_SECONDS" | "AUTH_BACKOFF_MS" | "HISTORY_RETENTION_DAYS" | "MAX_ITEMS_PER_BOX" | "RECOVERY_ACTIVATION_DELAY_SECONDS" | "BOOTSTRAP_TOKEN" | "BETTER_AUTH_SECRET">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "PUBLIC_ORIGIN" | "AUTH_FAIL_LIMIT" | "AUTH_FAIL_WINDOW_SECONDS" | "AUTH_BACKOFF_MS" | "HISTORY_RETENTION_DAYS" | "MAX_ITEMS_PER_BOX" | "MAX_BOX_BYTES" | "RECOVERY_ACTIVATION_DELAY_SECONDS" | "BOOTSTRAP_TOKEN" | "BETTER_AUTH_SECRET">> {}
 }
 declare module "*.txt" {
 	const value: string;
