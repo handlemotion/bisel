@@ -10,7 +10,7 @@ set -u
 set -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APPLE="$ROOT/apple"
+APPLE="$ROOT/apps/mac"
 BUILD=1 CONTROL=0
 for arg in "$@"; do
   case "$arg" in

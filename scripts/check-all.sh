@@ -9,7 +9,7 @@
 #   scripts/check-all.sh --release       Release build + BISEL_DEV_ strings check (scripts/check-release-hooks.sh); slow, opt-in
 #   scripts/check-all.sh -v              stream every step's output instead of showing the tail of a failed one
 #
-# Flags combine (--server --core). Needs only tracked files: server/.dev.vars is created from the example when missing.
+# Flags combine (--server --core). Needs only tracked files: apps/server/.dev.vars is created from the example when missing.
 # Local only: wrangler dev with a throwaway D1 on localhost; no Cloudflare login, no Doppler, no deploy command.
 # Every step runs in its own process group, which is killed when the step ends and on Ctrl-C, so no dev server outlives the script.
 # pnpm test needs :8788 free (the Swift flow tests pick random free ports).
@@ -90,11 +90,11 @@ if (( RUN_SERVER )); then
     echo "  :8788 is in use (a leftover wrangler dev?). Stop it and rerun." >&2
     NAMES+=("server: port 8788 free"); RESULTS+=("FAIL"); TIMES+=(0); SERVER_OK=0
   else
-    step "server: pnpm install --frozen-lockfile" bash -c "cd '$ROOT/server' && pnpm install --frozen-lockfile" || SERVER_OK=0
+    step "server: pnpm install --frozen-lockfile" bash -c "cd '$ROOT' && pnpm install --frozen-lockfile" || SERVER_OK=0
     if (( SERVER_OK )); then
-      step "server: typecheck (worker + dashboard)" bash -c "cd '$ROOT/server' && pnpm typecheck"
-      step "server: pnpm test" bash -c "cd '$ROOT/server' && pnpm test"
-      step "server: pnpm test:legacy" bash -c "cd '$ROOT/server' && pnpm test:legacy"
+      step "server: typecheck (worker + dashboard)" bash -c "cd '$ROOT/apps/server' && pnpm check-types"
+      step "server: pnpm test" bash -c "cd '$ROOT/apps/server' && pnpm test"
+      step "server: pnpm test:legacy" bash -c "cd '$ROOT/apps/server' && pnpm test:legacy"
       step "server: no dev server left behind" bash -c "$(declare -f port_free leftovers); leftovers"
     fi
   fi
@@ -103,29 +103,29 @@ fi
 
 if (( RUN_CORE )); then
   echo "core"
-  if [[ ! -d "$ROOT/server/node_modules" ]]; then
+  if [[ ! -d "$ROOT/node_modules" ]]; then
     # The Swift flow tests start `wrangler dev` from server/; they need the pinned wrangler.
-    step "core: pnpm install --frozen-lockfile (server)" bash -c "cd '$ROOT/server' && pnpm install --frozen-lockfile" || true
+    step "core: pnpm install --frozen-lockfile (server)" bash -c "cd '$ROOT' && pnpm install --frozen-lockfile" || true
   fi
-  step "core: swift test --traits SoftwareKeys" bash -c "cd '$ROOT/apple/Packages/BiselCore' && swift test --traits SoftwareKeys"
+  step "core: swift test --traits SoftwareKeys" bash -c "cd '$ROOT/apps/mac/Packages/BiselCore' && swift test --traits SoftwareKeys"
   echo
 fi
 
-APP_DD="$ROOT/apple/build-check"
+APP_DD="$ROOT/apps/mac/build-check"
 XCB_ARGS="-project BiselDev.xcodeproj -scheme Bisel -destination 'platform=macOS' -derivedDataPath '$APP_DD' CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="
 
 if (( RUN_APP )); then
   echo "app"
-  step "app: xcodegen (project.dev.yml)" bash -c "cd '$ROOT/apple' && xcodegen generate --spec project.dev.yml" \
-    && step "app: build BiselDev (Debug)" bash -c "cd '$ROOT/apple' && xcodebuild $XCB_ARGS -configuration Debug build" \
-    && step "app: compile UI tests (not run)" bash -c "cd '$ROOT/apple' && xcodebuild $XCB_ARGS -configuration Debug build-for-testing"
+  step "app: xcodegen (project.dev.yml)" bash -c "cd '$ROOT/apps/mac' && xcodegen generate --spec project.dev.yml" \
+    && step "app: build BiselDev (Debug)" bash -c "cd '$ROOT/apps/mac' && xcodebuild $XCB_ARGS -configuration Debug build" \
+    && step "app: compile UI tests (not run)" bash -c "cd '$ROOT/apps/mac' && xcodebuild $XCB_ARGS -configuration Debug build-for-testing"
   echo
 fi
 
 if (( RUN_UI )); then
   echo "ui  (launches the app and drives the screen: leave the Mac alone until it ends)"
-  step "ui: xcodegen (project.dev.yml)" bash -c "cd '$ROOT/apple' && xcodegen generate --spec project.dev.yml" \
-    && step "ui: BiselFlowUITests" bash -c "cd '$ROOT/apple' && xcodebuild $XCB_ARGS -configuration Debug -only-testing:BiselUITests test"
+  step "ui: xcodegen (project.dev.yml)" bash -c "cd '$ROOT/apps/mac' && xcodegen generate --spec project.dev.yml" \
+    && step "ui: BiselFlowUITests" bash -c "cd '$ROOT/apps/mac' && xcodebuild $XCB_ARGS -configuration Debug -only-testing:BiselUITests test"
   echo
 fi
 

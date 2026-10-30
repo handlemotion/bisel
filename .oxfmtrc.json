@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/.wrangler/**",
+    "apps/mac/**",
+    "**/worker-configuration.d.ts",
+    "pnpm-lock.yaml",
+    "**/public/app.js",
+    ".claude/**"
+  ]
+}

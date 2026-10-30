@@ -1,0 +1,11 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Native build scripts allowed to run (moved from apps/server).
+allowBuilds:
+  esbuild: true
+  lefthook: true
+  workerd: true
+
+saveExact: true

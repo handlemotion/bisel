@@ -1,0 +1,30 @@
+{
+  "name": "@bisel/monorepo",
+  "private": true,
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "oxlint .",
+    "format": "oxfmt .",
+    "check-types": "turbo run check-types",
+    "format:check": "oxfmt --check .",
+    "lint:fix": "oxlint --fix .",
+    "check": "oxfmt --check . && oxlint .",
+    "test": "turbo run test",
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "lefthook": "2.2.2",
+    "lint-staged": "17.6.0",
+    "oxfmt": "0.75.0",
+    "oxlint": "1.90.0",
+    "picomatch": "4.0.7",
+    "turbo": "^2.11.10",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  },
+  "packageManager": "pnpm@12.16.1",
+  "engines": {
+    "node": ">=24"
+  }
+}
