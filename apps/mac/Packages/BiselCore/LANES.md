@@ -105,6 +105,6 @@ then the 60 s poll is the only trigger.
 
 ## Backup reminder (D4)
 
-A box only in iCloud has no second copy if the Apple Account is lost. The reminder logic comes with the `.bisel-backup` work (PR #4):
-`backupStatus(policy:)` classifies a `cloudkit://` address as iCloud-only. The integration point is marked in
-`VaultService.performSync` ("D4").
+A box only in iCloud has no second copy if the Apple Account is lost. `Vault.backupStatus(policy:)` classifies a `cloudkit://` address
+as iCloud-only and says when to remind; `VaultService.backupStatus` holds it, refreshed after each sync, reload and export. The API
+and the UI it needs are in [BACKUP.md](BACKUP.md).
