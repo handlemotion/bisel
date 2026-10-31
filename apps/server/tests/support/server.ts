@@ -1,8 +1,9 @@
 // Starts the real Worker (`wrangler dev`, workerd) on a free port with a throwaway local D1. Nothing here can reach Cloudflare.
 // Same idea as apps/mac/Packages/BiselCore/Sources/BiselTestSupport/TestServer.swift.
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -52,22 +53,26 @@ export function migrate(stateDir: string, config?: string) {
   ]);
 }
 
-/** Runs SQL against a server's local database, the way an operator (or a breach) could. Returns the first result set's rows. */
-export function sql(stateDir: string, statement: string, config?: string): any[] {
-  const out = wrangler([
-    "d1",
-    "execute",
-    "bisel",
-    "--local",
-    "--persist-to",
-    stateDir,
-    "--json",
-    "--command",
-    statement,
-    ...(config ? ["-c", config] : []),
-  ]);
-  // wrangler prints a banner before the JSON.
-  return JSON.parse(out.slice(out.indexOf("[")))[0].results;
+/**
+ * Runs SQL against a server's local database, the way an operator (or a breach) could. A SELECT returns its rows.
+ * This is a second SQLite connection on the file the running Worker has open, not a second `wrangler d1 execute`: that one
+ * could lose the race for the write lock with SQLITE_BUSY_SNAPSHOT (seen on CI), where this waits out the Worker's writes
+ * (busy timeout) and takes the write lock up front.
+ */
+export function sql(stateDir: string, statement: string): any[] {
+  const dir = join(stateDir, "v3/d1/miniflare-D1DatabaseObject");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".sqlite") && f !== "metadata.sqlite");
+  const [file] = files;
+  if (!file || files.length !== 1)
+    throw new Error(`expected one D1 database in ${dir}, found ${files}`);
+  const db = new DatabaseSync(join(dir, file), { timeout: 30_000 });
+  try {
+    if (/^\s*(select|with|pragma)\b/i.test(statement)) return db.prepare(statement).all() as any[];
+    db.exec(`BEGIN IMMEDIATE; ${statement}; COMMIT;`);
+    return [];
+  } finally {
+    db.close();
+  }
 }
 
 export async function startServer(options: ServerOptions = {}): Promise<RunningServer> {

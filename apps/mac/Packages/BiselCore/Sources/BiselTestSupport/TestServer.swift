@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Darwin
 
@@ -40,20 +41,17 @@ public final class TestServer: @unchecked Sendable {
     public static func start(serverDirectory: String? = nil, vars: [String: String] = [:]) async throws -> TestServer {
         let dir = serverDirectory ?? ProcessInfo.processInfo.environment["BISEL_SERVER_DIR"] ?? defaultServerDirectory()
         guard FileManager.default.fileExists(atPath: dir + "/wrangler.jsonc") else { throw Failure.serverDirectoryMissing(dir) }
+        // The database comes from a copy of one migrated state, built once per migrations/wrangler version and shared by every server.
         let state = FileManager.default.temporaryDirectory.appendingPathComponent("bisel-test-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
-        let port = try freePort(), inspector = try freePort()
+        try FileManager.default.copyItem(at: try await MigratedState.shared.directory(serverDirectory: dir), to: state)
         let log = state.appendingPathComponent("server.log")
         FileManager.default.createFile(atPath: log.path, contents: nil)
 
         let varArguments = vars.map { "--var '\($0.key):\($0.value)'" }.joined(separator: " ")
-        // A login shell so pnpm/node from mise/nvm/homebrew are on PATH. `.dev.vars` is untracked (it holds the dev bootstrap token the
-        // tests use), so a fresh clone gets it from the example, as `pnpm dev` does.
-        let script = """
-        cd '\(dir)' && { [ -f .dev.vars ] || cp .dev.vars.example .dev.vars; } \
-        && pnpm exec wrangler d1 migrations apply bisel --local --persist-to '\(state.path)' >/dev/null 2>&1 \
-        && exec pnpm exec wrangler dev --port \(port) --inspector-port \(inspector) --persist-to '\(state.path)' \(varArguments)
-        """
+        // Port 0 for both: wrangler binds its own free ports and prints the real one ("Ready on http://localhost:PORT"), so there is no
+        // window between picking a port and binding it for another server (the flow suites run in parallel) to take it.
+        // A login shell so pnpm/node from mise/nvm/homebrew are on PATH.
+        let script = "cd '\(dir)' && exec pnpm exec wrangler dev --port 0 --inspector-port 0 --persist-to '\(state.path)' \(varArguments)"
         let p = Process()
         // setsid() makes the child a process-group leader so `stop()` can take down pnpm, node and workerd together.
         p.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
@@ -63,14 +61,19 @@ public final class TestServer: @unchecked Sendable {
         p.standardError = handle
         try p.run()
 
-        let server = TestServer(url: URL(string: "http://localhost:\(port)")!, process: p, state: state, log: log, directory: dir)
-        for _ in 0..<240 {
-            if !p.isRunning { break }
-            if await server.responds() { return server }
-            try await Task.sleep(for: .milliseconds(250))
+        // Ready is two facts: wrangler says which port it bound, and the Worker answers /healthz 200 (its D1 query ran).
+        // Fail at once if the process dies; otherwise wait up to two minutes for a cold, loaded runner.
+        let deadline = Date().addingTimeInterval(120)
+        var url: URL?
+        while p.isRunning && Date() < deadline {
+            if url == nil { url = readyURL(inLog: log) }
+            if let url, await healthy(url) {
+                return TestServer(url: url, process: p, state: state, log: log, directory: dir)
+            }
+            try await Task.sleep(for: .milliseconds(100))
         }
         let text = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
-        server.stop()
+        TestServer(url: url ?? URL(fileURLWithPath: "/"), process: p, state: state, log: log, directory: dir).stop()
         throw Failure.didNotStart(text)
     }
 
@@ -85,10 +88,9 @@ public final class TestServer: @unchecked Sendable {
     /// The first column of the first row of a `SELECT` (nil when there is no row), as text.
     public func value(_ statement: String) throws -> String? {
         let out = try run(statement, json: true)
-        // wrangler prints a banner first; the JSON starts on a line of its own.
-        guard let start = out.range(of: "\n[\n")?.lowerBound ?? (out.hasPrefix("[\n") ? out.startIndex : nil),
-              let parsed = try JSONSerialization.jsonObject(with: Data(out[start...].utf8)) as? [[String: Any]],
-              let row = (parsed.first?["results"] as? [[String: Any]])?.first, let first = row.values.first, !(first is NSNull) else { return nil }
+        guard !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,   // sqlite3 -json prints nothing for no rows
+              let rows = try JSONSerialization.jsonObject(with: Data(out.utf8)) as? [[String: Any]],
+              let first = rows.first?.values.first, !(first is NSNull) else { return nil }
         return "\(first)"
     }
 
@@ -99,15 +101,27 @@ public final class TestServer: @unchecked Sendable {
         return id
     }
 
+    /// Talks to the database file directly, as a second SQLite connection beside the Worker's own. WAL lets it read while the
+    /// Worker writes; a write waits out the Worker's (busy timeout) and takes the write lock up front (`BEGIN IMMEDIATE`), so it
+    /// cannot fail halfway with SQLITE_BUSY_SNAPSHOT the way a second `wrangler d1 execute` process did.
     private func run(_ statement: String, json: Bool) throws -> String {
-        let escaped = statement.replacingOccurrences(of: "'", with: "'\\''")
+        let database = stateDirectory.appendingPathComponent("v3/d1/miniflare-D1DatabaseObject")
+        let files = ((try? FileManager.default.contentsOfDirectory(atPath: database.path)) ?? [])
+            .filter { $0.hasSuffix(".sqlite") && $0 != "metadata.sqlite" }
+        guard files.count == 1 else { throw Failure.didNotStart("expected one D1 database in \(database.path), found \(files)") }
+        let script = json
+            ? "PRAGMA foreign_keys = ON;\n\(statement)\n;\n"
+            : "PRAGMA foreign_keys = ON;\nBEGIN IMMEDIATE;\n\(statement)\n;\nCOMMIT;\n"
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-lc", "cd '\(serverDirectory)' && pnpm exec wrangler d1 execute bisel --local --persist-to '\(stateDirectory.path)'\(json ? " --json" : "") --command '\(escaped)'"]
-        let out = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        p.arguments = ["-bail", "-cmd", ".timeout 30000"] + (json ? ["-json"] : []) + [database.appendingPathComponent(files[0]).path]
+        let input = Pipe(), out = Pipe()
+        p.standardInput = input
         p.standardOutput = out
         p.standardError = out
         try p.run()
+        input.fileHandleForWriting.write(Data(script.utf8))
+        try input.fileHandleForWriting.close()
         let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         p.waitUntilExit()
         guard p.terminationStatus == 0 else { throw Failure.didNotStart("sql failed: \(text)") }
@@ -153,10 +167,19 @@ public final class TestServer: @unchecked Sendable {
 
     public var log: String { (try? String(contentsOf: logURL, encoding: .utf8)) ?? "" }
 
-    private func responds() async -> Bool {
-        var request = URLRequest(url: url.appendingPathComponent("v1/sync"))
-        request.timeoutInterval = 1
-        return (try? await URLSession.shared.data(for: request)) != nil
+    /// The port wrangler printed once it was listening.
+    private static func readyURL(inLog log: URL) -> URL? {
+        guard let text = try? String(contentsOf: log, encoding: .utf8),
+              let match = text.firstMatch(of: /Ready on http:\/\/(?:localhost|127\.0\.0\.1):(\d+)/) else { return nil }
+        return URL(string: "http://localhost:\(match.1)")
+    }
+
+    /// `/healthz` is 200 only when the Worker ran a query against D1.
+    private static func healthy(_ url: URL) async -> Bool {
+        var request = URLRequest(url: url.appendingPathComponent("healthz"))
+        request.timeoutInterval = 2
+        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return false }
+        return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
     private static func defaultServerDirectory() -> String {
@@ -165,22 +188,65 @@ public final class TestServer: @unchecked Sendable {
         for _ in 0..<6 { url.deleteLastPathComponent() }
         return url.appendingPathComponent("server").path
     }
+}
 
-    private static func freePort() throws -> Int {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        defer { close(fd) }
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        addr.sin_port = 0
-        let bound = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+/// One migrated, empty local D1, built once and copied for every server instead of running `wrangler d1 migrations apply` (about 6 s
+/// of cold wrangler each) per server. Keyed on the migrations, the wrangler config and the installed wrangler version, so a change to
+/// any of them builds a new one; built beside the final name and renamed into place, so concurrent test processes can share it.
+private actor MigratedState {
+    static let shared = MigratedState()
+    private var builds: [String: Task<URL, Error>] = [:]
+
+    func directory(serverDirectory dir: String) async throws -> URL {
+        if let build = builds[dir] { return try await build.value }
+        let build = Task { try await Self.build(serverDirectory: dir) }
+        builds[dir] = build
+        do { return try await build.value } catch { builds[dir] = nil; throw error }
+    }
+
+    private static func build(serverDirectory dir: String) async throws -> URL {
+        let fm = FileManager.default
+        // `.dev.vars` is untracked (it holds the dev bootstrap token the tests use), so a fresh clone gets it from the example, as `pnpm dev` does.
+        if !fm.fileExists(atPath: dir + "/.dev.vars") { try fm.copyItem(atPath: dir + "/.dev.vars.example", toPath: dir + "/.dev.vars") }
+
+        var key = SHA256()
+        let migrations = try fm.contentsOfDirectory(atPath: dir + "/migrations").sorted()
+        for name in migrations { key.update(data: Data(name.utf8)); key.update(data: try Data(contentsOf: URL(fileURLWithPath: dir + "/migrations/" + name))) }
+        key.update(data: try Data(contentsOf: URL(fileURLWithPath: dir + "/wrangler.jsonc")))
+        key.update(data: (try? Data(contentsOf: URL(fileURLWithPath: dir + "/node_modules/wrangler/package.json"))) ?? Data())
+        let name = key.finalize().prefix(8).map { String(format: "%02x", $0) }.joined()
+        let final = fm.temporaryDirectory.appendingPathComponent("bisel-test-migrated-\(name)")
+        if fm.fileExists(atPath: final.path) { return final }
+
+        let building = fm.temporaryDirectory.appendingPathComponent("bisel-test-migrating-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: building) }
+        let (status, output) = try await shell("cd '\(dir)' && pnpm exec wrangler d1 migrations apply bisel --local --persist-to '\(building.path)'")
+        guard status == 0 else { throw TestServer.Failure.didNotStart("migrations failed:\n\(output)") }
+        // Fold the write-ahead log into the database file so the copy is the database alone.
+        for file in try fm.subpathsOfDirectory(atPath: building.path) where file.hasSuffix(".sqlite") {
+            let (code, text) = try await run("/usr/bin/sqlite3", [building.appendingPathComponent(file).path, "PRAGMA wal_checkpoint(TRUNCATE);"])
+            guard code == 0 else { throw TestServer.Failure.didNotStart("checkpoint failed:\n\(text)") }
+            for suffix in ["-wal", "-shm"] { try? fm.removeItem(atPath: building.appendingPathComponent(file + suffix).path) }
         }
-        guard bound == 0 else { throw Failure.didNotStart("could not find a free port") }
-        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        withUnsafeMutablePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { _ = getsockname(fd, $0, &len) }
+        do { try fm.moveItem(at: building, to: final) } catch where fm.fileExists(atPath: final.path) { /* another process won the race */ }
+        return final
+    }
+
+    private static func shell(_ script: String) async throws -> (Int32, String) { try await run("/bin/zsh", ["-lc", script]) }
+
+    private static func run(_ executable: String, _ arguments: [String]) async throws -> (Int32, String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: executable)
+        p.arguments = arguments
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = out
+        let finished = Task.detached { () -> (Int32, String) in
+            try p.run()
+            let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            p.waitUntilExit()
+            return (p.terminationStatus, text)
         }
-        return Int(UInt16(bigEndian: addr.sin_port))
+        return try await finished.value
     }
 }
