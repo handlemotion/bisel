@@ -640,6 +640,12 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         try await vault.approveEnrollment(pending, pairing: try PairingSecret(words: words))
     }
 
+    /// Approving device, after `approve`: the code the new device types to check it holds the same box key.
+    func verificationCode() async throws -> String {
+        guard let vault else { throw BiselVault.VaultError.notConfigured }
+        return try await vault.verificationCode()
+    }
+
     private func subscribeIfICloud(_ address: URL) async {
         #if BISEL_CLOUDKIT
         await CloudBox.subscribe(address)
