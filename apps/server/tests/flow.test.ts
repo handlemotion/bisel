@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { expect, test } from "vitest";
-import { BOOTSTRAP_TOKEN } from "./support/server";
+import { expect, inject, test } from "vitest";
+import { BOOTSTRAP_TOKEN, sql } from "./support/server";
 import {
   MANIFEST_ID,
   adminState,
@@ -915,6 +915,14 @@ test("a leaked recovery phrase cannot bury the owner: pending devices are capped
     ).toBe(200);
     planted.push(d);
   }
+  // The cap counts devices still inside their activation delay, which the test server shortens to 2 s. On a slow
+  // runner the first planted device activates before the fourth request and the cap is never hit, so hold all
+  // three pending explicitly instead of racing the clock.
+  const ids = planted.map((d) => `'${d.id}'`).join(",");
+  sql(
+    inject("server").stateDir,
+    `UPDATE devices SET activates_at = strftime('%s','now') + 3600 WHERE id IN (${ids})`,
+  );
   const extra = await newDevice("planted-extra");
   const refused = await api.call(recovery, "POST", "/v1/recovery/session", {
     json: { device: extra.registration(), epoch },

@@ -12,4 +12,4 @@ Uses port 8790 and its own D1 state dir (never `pnpm dev` on 8787). `axdrive.swi
 accessibility API (needs the screen unlocked and the Accessibility permission of your terminal/host); `postnote.swift` posts
 the distributed notifications (`com.apple.screenIsLocked`, `app.bisel.dev.snapshot`).
 
-XCUITest (`Bisel/UITests`, `xcodebuild test -scheme Bisel`) needs macOS Automation Mode, which asks for admin authentication once.
+The XCUITest sources in `Bisel/UITests` are compiled by `check-all.sh --app` and never run (AGENTS.md forbids UI automation).
