@@ -102,6 +102,9 @@ public struct LaneVerifier: Sendable {
     private func fault(_ r: LaneRecord, currentEpoch: Int) -> LaneQuarantineReason? {
         guard r.blob.count <= Self.maxBlob, !r.id.isEmpty else { return .malformed }
         guard r.rev >= 1, (r.kind == .manifest) == (r.id == ReservedRecord.manifestID) else { return .malformed }
+        // CloudKit names a record by its id alone: an item written under a control record's name (`head`, `recovery`, `stage`,
+        // or any dotted name) takes that record's place on the lane. Item ids are random base64url and never look like one.
+        if r.id.contains(".") || [ControlRecords.headID, ControlRecords.recoveryID, ControlRecords.stageID].contains(r.id) { return .malformed }
         // A write built for a vault-key epoch the box has left: it cannot open under the current key (0: the lane does not say).
         if r.epoch != 0, currentEpoch > 0, r.epoch < currentEpoch { return .staleEpoch }
         return nil
