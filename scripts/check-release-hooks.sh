@@ -22,7 +22,9 @@ for arg in "$@"; do
   esac
 done
 
-LEAKS='BISEL_DEV_[A-Z0-9_]*|BISEL_SOFTWARE_KEYS|BISEL_ALLOW_SOFTWARE_KEYS|software-keys\.json|SoftwareDeviceKeyStore'
+# BISEL_DATA_DIR (points a Debug run at another store), the software gate and file secret store (no Touch ID, plain-file secrets)
+# and the panel fixture (fake vault) are Debug-only too, under names the BISEL_DEV_ pattern does not catch.
+LEAKS='BISEL_DEV_[A-Z0-9_]*|BISEL_DATA_DIR|BISEL_SOFTWARE_KEYS|BISEL_ALLOW_SOFTWARE_KEYS|software-keys\.json|SoftwareDeviceKeyStore|SoftwareGate|FileSecretStore|DevFixtureVault|NOT-A-REAL-PASSWORD'
 
 # Matches in every Mach-O file of the bundle (main executable, frameworks, dylibs), printed one per line as file:string.
 scan() {
