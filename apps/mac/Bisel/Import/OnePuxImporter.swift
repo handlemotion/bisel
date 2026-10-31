@@ -27,8 +27,13 @@ enum OnePuxImporter {
         }
         guard let entry = archive["export.data"], entry.type == .file else { throw ImportError.unreadable("export.data is missing from the archive") }
         guard entry.uncompressedSize <= UInt64(maxExportBytes) else { throw ImportError.unreadable("The export is too large") }
+        // The sizes above are what the zip headers claim. A crafted entry can inflate far past its declared size, so count what
+        // actually comes out and stop at the same limit.
         var data = Data()
-        _ = try archive.extract(entry, skipCRC32: false) { data.append($0) }
+        _ = try archive.extract(entry, skipCRC32: false) { chunk in
+            guard data.count + chunk.count <= maxExportBytes else { throw ImportError.unreadable("The export is too large") }
+            data.append(chunk)
+        }
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let accounts = root["accounts"] as? [[String: Any]] else { throw ImportError.unreadable("export.data isn't a 1Password export") }
         var out = ImportOutcome()
