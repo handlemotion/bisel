@@ -1,7 +1,10 @@
 # bisel server
 
+> **Deferred.** Bisel is macOS-first and CloudKit-first now. This server still works, its tests still run in CI, and it stays here as an
+> optional sync lane, but it is not the default path and is not being developed further for now. See [`DEPLOY.md`](DEPLOY.md) to run your own.
+
 Cloudflare Worker (TypeScript, Hono, Zod, Better Auth) + D1 + static assets (the dashboard). Zero-knowledge sync API: the server stores only
-ciphertext blobs, public keys and opaque envelopes. Contract: [`../SPEC.md`](../SPEC.md) §6.
+ciphertext blobs, public keys and opaque envelopes. Contract: [`../../docs/SPEC.md`](../../docs/SPEC.md) §6.
 This README is the wire-level detail for client implementers.
 
 Everything here runs against `wrangler dev` with a **local** D1. Nothing is deployed and no
@@ -9,7 +12,7 @@ Cloudflare account is touched.
 
 ## Commands
 
-Run from `bisel/server/`. Needs Node 22.18+ (developed on 24; `scripts/smoke.ts` relies on Node's built-in TypeScript stripping) and pnpm.
+Run from `apps/server/`. Needs Node 22.18+ (developed on 24; `scripts/smoke.ts` relies on Node's built-in TypeScript stripping) and pnpm.
 
 ```sh
 pnpm install            # first time
@@ -27,7 +30,7 @@ node scripts/smoke.ts   # manual walk through bootstrap/put/conflict/delete/appr
 
 ### Verify everything with one command
 
-From the repo root (`bisel/`), no untracked file needed (`apps/server/.dev.vars` is created from the example), nothing touches Cloudflare, Doppler or production:
+From the repo root, no untracked file needed (`apps/server/.dev.vars` is created from the example), nothing touches Cloudflare, Doppler or production:
 
 ```sh
 scripts/check-all.sh            # server + core + app, then a PASS/FAIL summary with timings (about 8 min)
@@ -371,4 +374,5 @@ scripts/wipe-data.sql  empties every table (throwaway data after the first deplo
 ## Deploying (not done; only on the user's say-so)
 
 See [`DEPLOY.md`](DEPLOY.md): exact steps, verification, and what the owner has to do. `wrangler.jsonc` has a local default
-environment and an `env.prod` for `box.bisel.app` with one placeholder, the D1 id (`pnpm deploy:prod`).
+environment and an `env.prod` for `box.bisel.app` (`pnpm deploy:prod`). The D1 id in `env.prod` is the maintainer's database; a fork
+deploying its own server replaces it, and the hostname, with its own.
