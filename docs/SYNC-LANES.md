@@ -1,6 +1,6 @@
 # Sync lanes: design and feasibility (CloudKit lane)
 
-Status: design only, nothing here is built. Companion to `SPEC.md` (§4 crypto, §6 server, §7 BiselCore). When a milestone below lands, move the settled parts into `SPEC.md` in the same change.
+Status: design. L1 and L2 are built (what changed from the design: §14); L3 onwards is not. Companion to `SPEC.md` (§4 crypto, §6 server, §7 BiselCore). When a milestone below lands, move the settled parts into `SPEC.md` in the same change.
 
 Today the Bisel server is the only place a box syncs through. A **lane** is a replica location for a box's ciphertext. The goal: a CloudKit private-database lane so a box can live in the owner's iCloud with no Bisel server involved, the server lane kept optional, both able to run at once. Same crypto, same key hierarchy, same recovery phrase.
 
@@ -327,3 +327,43 @@ Avoid:
 - **D6. PAKE**: ship QR/8-word pairing now; add SPAKE2 only if a vetted Swift implementation is found. OK?
 - **D7. Recovery hold-back** is advisory on CloudKit. Acceptable, or should phrase recovery on a CloudKit-only box require a second enrolled device's approval?
 - **D8. Lane UI** (L5) needs your design: where lane state, rotation incompleteness and rollback alarms appear.
+
+## 14. What L1 and L2 built, and how it differs from this design
+
+Code: `apps/mac/Packages/BiselCore`, modules `BiselLane` (types, `SyncLane`, `LaneVerifier`, control records, witness), `BiselSync` (`LaneEngine`, `ServerLane`, `RecordBox`), `BiselTestSupport` (`FakeLane`). One contract suite, `Tests/BiselFlowTests/LaneContractTests.swift`: six flows run on `[FakeLane, local server]`, three hostile-storage cases run on `FakeLane` only (the server cannot be made to misbehave at record level).
+
+**Interface changes**
+
+- `BoxLane: SyncLane` carries the control operations (members, admit, rotate, recovery, `ownEnvelope`, `create`, `attest`). They are not "just records" at the interface: `ServerLane` forwards them to the server endpoints (wire untouched), `RecordBox` implements them as signed records on any `SyncLane`. `AdminSigner`/`WireDevice` live in `BiselSync`, so `BoxLane` does too; `BiselLane` is data plane only.
+- `SyncLane.read(refs)` added (fetch by id): `RecordBox` needs the current head, log tail and a record's tag before it writes. `commit` is used only by `RecordBox.rotate`.
+- `LaneChanges.meta` (epoch, position, members, events, recovery) is what the server reports; for a storage lane the verifier derives it from verified control records (`LaneVerdict.meta`).
+- `LaneCapabilities` gained `headIsCursor` (server: position is the cursor) and `repairs` (a write at any revision is accepted, so a lane that lost state is repaired by uploading the replica).
+- `DeviceInfo`, `ServerEvent`, `RecoveryMaterial` moved from `Wire.swift` to `BiselLane` unchanged (re-exported).
+- `Vault.Configuration.laneProvider` injects a lane; a plain `SyncLane` is wrapped in a `RecordBox`. `Vault.bootstrap(lane:)` and `Vault.recover(lane:…)` are the credential-less entry points. `Vault.sync(audit:)` reads the whole lane.
+
+**Pending state (the one real deviation).** `records.pending`/`base_rev` were **not** replaced by "local rev > acked rev". Revisions are bound into the item AAD and the server computes `rev = base_rev + 1`, so one record cannot sit at different revisions on two lanes. `lane_state`/`lane_ack` exist and are populated (migration `v3-lanes` moves the old cursor, `head_seq`, event cursor and every record's confirmed revision under the key `primary`, which the first lane that syncs adopts), `lane_ack` supplies the compare-and-set tag, and `recordsBehind` (acked rev < local rev, or never acked) drives **repair** on lanes with `repairs`. Running two lanes at once with different revisions per record is therefore still open; it needs lane-independent revisions or a rebase per lane, and belongs with L4's enable-lane flow. Tags are `"<rev>.<order>"` on the server and the fake, opaque on CloudKit.
+
+**Control records (L2).** All JSON, canonical sorted keys, signature over `LaneRecord.canonical` (kind, id, rev, epoch, writer, blob).
+
+| Record             | Signed by               | Content                                                                                 |
+| ------------------ | ----------------------- | --------------------------------------------------------------------------------------- |
+| `head`             | current admin key (AK)  | epoch and the chain of AKs; link _i_ is signed by link _i-1_ (so a rotation hands over) |
+| `log.<n>`          | AK of the entry's epoch | `n`, `prev` (SHA-256 of the previous blob), type, subject, epoch, and the member added  |
+| `<epoch>.<device>` | AK of that epoch        | the device envelope                                                                     |
+| `recovery`         | AK of that epoch        | recovery public keys and envelope, with a `seq` that only goes up                       |
+| `head.<device>`    | that device's DK-sig    | a strictly increasing counter (freshness)                                               |
+
+The verifier pins the AK chain from the first head (anchored on the AK derived from the vault key the device holds, or held back while locked), then checks: signatures against the key of the record's epoch; the log is contiguous, hash-chained and its epochs never go back (out-of-order entries wait in the witness); envelopes and recovery are signed; counters never decrease; item records written for an epoch below the box's are quarantined; hard deletes the lane reports are incidents and the replica is uploaded again. `lane_state.witness` keeps what an incremental fetch cannot show twice; `quarantine` keeps what was refused (newest 200 per lane). Nothing is deleted because of a verdict.
+
+**Freshness.** The signed per-writer counters from §8 are in; `setHash` (withholding detection) is **not**. A silent restore of the whole store keeps its own cursor numbering, so reading only what is new sees nothing: `sync(audit: true)` (full read, compare counters, log tail, and every record this device was told the lane holds) is what finds it, and the app should run one about daily. The server lane keeps its `head_seq` check; both feed the same `IntegrityError.serverRolledBack` and the same `acknowledgeServerReset` + reseed heal.
+
+**Rotation on a storage lane** is one atomic `commit` (items and tombstones re-wrapped, new envelopes, recovery, the `rotate` log entry, the new head), refused if the lane's `atomicBatch` is too small. The staged form of §5 is L4 (CloudKit). `revokeWithoutRotation` does not exist on a storage lane (`LaneError.unsupported`).
+
+**Known limits (left for L4, not hidden)**
+
+- A forged record **overwriting** `head` (or `recovery`) is quarantined, but this device does not yet re-publish the genuine one from its witness, so rotation on that box is blocked until it is. Log slots planted by an attacker are replaced by the next genuine append.
+- The membership log and envelopes are not repaired after a restore; a device approved after the snapshot has to be approved again. Items are healed.
+- `ownEnvelope` does not check the envelope's signature (key confirmation against the manifest, which exists, covers it).
+- A stale-epoch write that slips past the up-front epoch check (a race with a rotation) is quarantined on read, not re-sent by its writer until that writer has adopted the rotation.
+- The window of §5 between a rotation commit and a device noticing is as described there: a revoked device still holding the old AK can write control records an up-to-date device rejects, but a device that has not yet pinned the new chain can be fooled by the first head it sees.
+- `FakeLane` hostile modes: rollback (`restore`), `dropSilently`, `hardDelete`, `replay`, `setReordering`, `inject`, `forgeDelete`. Not modelled: `LaneReset` (token expiry, account change), quota errors, concurrent writers racing inside one fetch.

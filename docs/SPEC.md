@@ -207,7 +207,7 @@ Binary columns are unpadded base64url TEXT (D1 returns BLOBs as number arrays); 
 
 SwiftPM package, Swift 6, macOS 26+ / iOS 26+. No UI.
 
-Module names are prefixed (`BiselCrypto`, `BiselKeyStore`, `BiselVault`, `BiselSync`, `BiselRecovery`, `BiselTOTP`) because a module called `Crypto` collides with swift-crypto's (pulled in by the OTP package) and a module called `Vault` would shadow the public `Vault` type. The umbrella module `BiselCore` re-exports them all and defines the `Vault` facade (an `actor`). `BiselTestSupport` (dev/test only, never linked by apps) starts a throwaway local server for flow tests.
+Module names are prefixed (`BiselCrypto`, `BiselKeyStore`, `BiselVault`, `BiselLane`, `BiselSync`, `BiselRecovery`, `BiselTOTP`) because a module called `Crypto` collides with swift-crypto's (pulled in by the OTP package) and a module called `Vault` would shadow the public `Vault` type. The umbrella module `BiselCore` re-exports them all and defines the `Vault` facade (an `actor`). `BiselLane` is the sync-lane boundary (`SyncLane`, records, verifier); `BiselSync` runs the engine over a lane (`ServerLane` for the server, `RecordBox` for storage-only lanes; see `docs/SYNC-LANES.md` §14). `BiselTestSupport` (dev/test only, never linked by apps) starts a throwaway local server and provides the in-memory `FakeLane` for flow tests.
 
 Modules
 
