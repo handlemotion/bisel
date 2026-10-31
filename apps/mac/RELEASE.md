@@ -121,15 +121,13 @@ record types until you deploy them, and the shipped app cannot save a record unt
 
 Check: `apps/mac/Tools/cloudkit-schema.sh validate --production` reports no drift between Production and the repo file.
 
-### Decision before the first signed release: the keychain access group
+### The keychain access group (decided 2026-10-31: pinned)
 
-`SecureEnclaveDeviceKeyStore` and `KeychainSecretStore` pass `accessGroup: nil`, so device keys and secrets live in the default
-group, the application identifier `ZVGTVNUPVA.app.bisel.mac`. That works for this app alone. A planned AutoFill extension or
-iPhone app could not read them, and moving items to another group later strands the device keys already created (each Mac
-would have to re-enroll). If they should be shared, pin a group such as `$(AppIdentifierPrefix)app.bisel` in
-`keychain-access-groups` in `Bisel.entitlements` **and** pass it as `accessGroup` in `Bisel/Core/Environment.swift` and the
-secret store, before the first Developer ID build reaches a real box. Not done in the release-signing PR because it changes
-app code.
+Device keys and secrets live in `ZVGTVNUPVA.app.bisel`: `keychain-access-groups` in `Bisel.entitlements`, read back at run time
+from `BiselKeychainGroup` in Info.plist (`BiselEnvironment.keychainGroup`), so a later AutoFill extension or iPhone app on the same
+team can share them. `release.sh` refuses a build without it. Never change it once real boxes exist: device keys in the old group
+are stranded and every Mac would have to re-enroll. Signed test builds made before this change kept their keys in the default group;
+reset those throwaway boxes.
 
 ## Each release
 

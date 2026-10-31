@@ -109,6 +109,8 @@ targets:
         NSHumanReadableCopyright: "Personal use."
         NSAppleEventsUsageDescription: "Bisel does not script other apps."
         NSFaceIDUsageDescription: "Bisel uses Touch ID to unlock your box."
+        # The keychain group in Bisel.entitlements, read back at run time (BiselEnvironment.keychainGroup).
+        BiselKeychainGroup: "$(AppIdentifierPrefix)app.bisel"
         # No ATS exception here: Release is https-only. Debug builds get NSAllowsLocalNetworking from the build phase below so the
         # local dev server (http://localhost) works (security review L13).
     settings:
