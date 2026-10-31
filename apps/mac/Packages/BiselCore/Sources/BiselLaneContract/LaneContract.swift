@@ -231,7 +231,11 @@ public enum LaneContract {
             let offline = try await a.vault.save(login("Made on the new account", password: "new-acct"))
             do { try await a.vault.sync(); c.fail("a sync must not run against another account") } catch LaneError.accountChanged {}
             c.expect(try await a.vault.laneStatus() == .accountChanged, "the lane reads as on another account")
-            c.expect(try await rig.records(as: a, c).isEmpty, "nothing reached the other account's storage")
+            // The other account has no zone at all on CloudKit (missing), an empty store on the fake: either way, nothing of ours.
+            let reached = try await { () async throws -> [StoredRecord] in
+                do { return try await rig.records(as: a, c) } catch LaneError.storeMissing { return [] }
+            }()
+            c.expect(reached.isEmpty, "nothing reached the other account's storage")
             let moved = try await a.vault.enableLane(rig.address)
             c.expect(moved.created, "the box is put on the new account's storage")
             c.expect(try await a.vault.laneStatus() == .active, "the lane is active on the new account")

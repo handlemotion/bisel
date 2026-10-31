@@ -514,6 +514,22 @@ the real server; the signed run moves from a second zone instead) with the other
 support: `FlakyLane` (fails or silently drops writes after a budget) and `AccountLane` (signed out / another account, over any
 storage) wrap every rig's storage; `FakeLane.erase` models a deleted zone.
 
+**Evidence on real CloudKit** (this Mac, Development environment, signed Debug app from `project.contract.yml`,
+`apps/mac/Tools/run-cloudkit-contract.sh`; logs `cloudkit-l4-run{1,2,3}.log` in the shared notes folder):
+
+- Run 1: probe 13/13, flows 1–4 passed, then the Mac lost its network (`NSURLErrorDomain -1009`, "offline") and flows 5–14 failed
+  on that, not on the lane.
+- Run 2 (about 11 min): probe 13/13, flows 1–6 and 8–14 PASS: every new storage-only flow except one ran green on CloudKit (deleted
+  zone 72 s, move 85 s, enrollment 35 s and 30 s, the three rotation flows 60–66 s). Flow 7 (accounts) failed with
+  `LaneError.storeMissing`: on CloudKit "another account" has no zone at all, where the fake had an empty store. The lane was right;
+  the flow's "nothing reached the other account" check now reads a missing store as empty.
+- Run 3 (flow 7 only): the first attempt hit a dropped connection (`networkFailure`, `-1005`), which `CloudKitLane` now retries like
+  a rate limit (being offline is still not retried); the second passed (30 s). `RESULT: ALL PASSED`.
+- Each run ended with every `bisel-l3-spike-*` zone deleted (the private database holds only `_defaultZone`). Push registration
+  still fails without the `aps-environment` entitlement and no push arrived (unchanged from §15).
+- `swift test --traits SoftwareKeys`: 59 tests in 6 suites pass, the eight storage-only flows on `FakeLane` (and the move flow
+  against the real local server as the source).
+
 **Not done in L4**
 
 - Two lanes at once with independent revisions (§14): a move switches the box, it does not run both. Devices on another Apple ID

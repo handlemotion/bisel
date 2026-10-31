@@ -360,12 +360,13 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
 
     // MARK: plumbing
 
-    /// Retries what CloudKit asks to be retried (rate limits, a busy zone, a service hiccup), honouring `retryAfterSeconds`.
+    /// Retries what CloudKit asks to be retried (rate limits, a busy zone, a service hiccup, a dropped connection), honouring
+    /// `retryAfterSeconds`. Being offline (`networkUnavailable`) is not retried: the sync fails and the next one tries again.
     private func retrying<T>(_ operation: () async throws -> T) async throws -> T {
         var attempt = 0
         while true {
             do { return try await operation() }
-            catch let error as CKError where attempt < 4 && [.requestRateLimited, .zoneBusy, .serviceUnavailable].contains(error.code) {
+            catch let error as CKError where attempt < 4 && [.requestRateLimited, .zoneBusy, .serviceUnavailable, .networkFailure].contains(error.code) {
                 attempt += 1
                 try await Task.sleep(for: .seconds(error.retryAfterSeconds ?? Double(attempt)))
             }
