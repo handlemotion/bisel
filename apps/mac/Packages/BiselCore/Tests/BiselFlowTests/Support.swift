@@ -10,11 +10,11 @@ struct Device {
     let keyStore: SoftwareDeviceKeyStore
     let gate: RecordingGate
     let vault: Vault
-    let laneProvider: (@Sendable (LocalIdentity, @escaping @Sendable () -> LockedKey?) throws -> any BoxLane)?
+    let laneProvider: (@Sendable (LocalIdentity, @escaping @Sendable () -> LockedKey?) throws -> any SyncLane)?
 
     /// `laneProvider` nil: the device syncs with the Bisel server at its identity's address.
     init(_ name: String, gate: RecordingGate = RecordingGate(), fillWindow: TimeInterval = 300,
-         laneProvider: (@Sendable (LocalIdentity, @escaping @Sendable () -> LockedKey?) throws -> any BoxLane)? = nil) throws {
+         laneProvider: (@Sendable (LocalIdentity, @escaping @Sendable () -> LockedKey?) throws -> any SyncLane)? = nil) throws {
         self.name = name
         self.laneProvider = laneProvider
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bisel-flow-\(name)-\(UUID().uuidString)")

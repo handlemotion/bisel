@@ -136,6 +136,8 @@ public struct LaneState: Sendable, Equatable {
     public var eventCursor = 0
     public var identity: String?
     public var state = "active"
+    /// What the verifier has established about the lane's control records (opaque here; `LaneWitness`).
+    public var witness: Data?
     public init() {}
 }
 
@@ -228,6 +230,20 @@ public final class LocalStore: Sendable {
                     """, arguments: [LaneState.primary])
             }
         }
+        migrator.registerMigration("v4-lane-witness") { db in
+            try db.alter(table: "lane_state") { t in t.add(column: "witness", .blob) }
+            // Records a lane sent that the verifier refused to apply. Kept for diagnostics, newest 200 per lane.
+            try db.create(table: "quarantine") { t in
+                t.autoIncrementedPrimaryKey("key")
+                t.column("lane", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("id", .text).notNull()
+                t.column("rev", .integer).notNull()
+                t.column("reason", .text).notNull()
+                t.column("blob", .blob).notNull()
+                t.column("at", .integer).notNull()
+            }
+        }
         try migrator.migrate(pool)
     }
 
@@ -281,7 +297,7 @@ public final class LocalStore: Sendable {
             guard let row = try Row.fetchOne(db, sql: "SELECT * FROM lane_state WHERE lane = ?", arguments: [lane]) else { return LaneState() }
             var out = LaneState()
             out.cursor = row["cursor"]; out.knownHead = row["known_head"]; out.eventCursor = row["event_cursor"]
-            out.identity = row["identity"]; out.state = row["state"]
+            out.identity = row["identity"]; out.state = row["state"]; out.witness = row["witness"]
             return out
         }
     }
@@ -289,16 +305,73 @@ public final class LocalStore: Sendable {
     public func setLaneState(_ lane: String, _ state: LaneState) throws {
         try pool.write { db in
             try db.execute(sql: """
-                INSERT OR REPLACE INTO lane_state(lane, cursor, known_head, event_cursor, identity, state) VALUES (?, ?, ?, ?, ?, ?)
-                """, arguments: [lane, state.cursor, state.knownHead, state.eventCursor, state.identity, state.state])
+                INSERT OR REPLACE INTO lane_state(lane, cursor, known_head, event_cursor, identity, state, witness) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, arguments: [lane, state.cursor, state.knownHead, state.eventCursor, state.identity, state.state, state.witness])
         }
     }
 
     /// Forgets where the pull stopped and the highest position seen, so the next pull starts again (a lane that was reset).
-    public func resetLanePosition(_ lane: String) throws {
+    /// What was verified about the lane's control records goes too, except the pinned admin keys' continuity, which the caller keeps.
+    public func resetLanePosition(_ lane: String, keepingWitness: Data? = nil) throws {
         var state = try laneState(lane)
-        state.cursor = nil; state.knownHead = 0; state.eventCursor = 0
+        state.cursor = nil; state.knownHead = 0; state.eventCursor = 0; state.witness = keepingWitness
         try setLaneState(lane, state)
+    }
+
+    /// Forgets that the lane holds these records (it lost them): they count as missing there and are uploaded again.
+    public func forgetAcks(_ lane: String, ids: [String]) throws {
+        try pool.write { db in for id in ids { try db.execute(sql: "DELETE FROM lane_ack WHERE lane = ? AND id = ?", arguments: [lane, id]) } }
+    }
+
+    public func ackedIDs(_ lane: String) throws -> Set<String> {
+        try pool.read { db in Set(try String.fetchAll(db, sql: "SELECT id FROM lane_ack WHERE lane = ?", arguments: [lane])) }
+    }
+
+    /// Records the lane holds in an older revision than this device, or not at all, that are not waiting for a push of their own:
+    /// the lane lost them, replayed an old version, or has never seen them (a lane that was just enabled).
+    public func recordsBehind(_ lane: String) throws -> [(record: StoredRecord, ack: LaneAck?)] {
+        try pool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT r.*, a.rev AS ack_rev, a.tag AS ack_tag FROM records r LEFT JOIN lane_ack a ON a.lane = ? AND a.id = r.id
+                WHERE r.pending = 0 AND r.tomb_ok = 1 AND (a.rev IS NULL OR a.rev < r.rev) ORDER BY r.updated_at
+                """, arguments: [lane])
+            return rows.map { row in
+                (StoredRecord(row: row), (row["ack_rev"] as Int?).map { LaneAck(rev: $0, tag: row["ack_tag"]) })
+            }
+        }
+    }
+
+    /// The lane now holds `record` (a repair upload was accepted).
+    public func acknowledge(_ lane: String, _ record: StoredRecord, tag: String) throws {
+        try pool.write { try setAck(lane, record, tag: tag, $0) }
+    }
+
+    // MARK: quarantine
+
+    public struct QuarantinedRecord: Sendable, Equatable {
+        public var kind: String, id: String, rev: Int, reason: String, blob: Data, at: Date
+    }
+
+    public func quarantine(_ lane: String, _ entries: [(kind: String, id: String, rev: Int, reason: String, blob: Data)]) throws {
+        guard !entries.isEmpty else { return }
+        let now = Int(Date().timeIntervalSince1970)
+        try pool.write { db in
+            for e in entries {
+                try db.execute(sql: "INSERT INTO quarantine(lane, kind, id, rev, reason, blob, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               arguments: [lane, e.kind, e.id, e.rev, e.reason, e.blob, now])
+            }
+            try db.execute(sql: "DELETE FROM quarantine WHERE lane = ? AND key NOT IN (SELECT key FROM quarantine WHERE lane = ? ORDER BY key DESC LIMIT 200)",
+                           arguments: [lane, lane])
+        }
+    }
+
+    public func quarantined(_ lane: String) throws -> [QuarantinedRecord] {
+        try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM quarantine WHERE lane = ? ORDER BY key DESC", arguments: [lane]).map {
+                QuarantinedRecord(kind: $0["kind"], id: $0["id"], rev: $0["rev"], reason: $0["reason"], blob: $0["blob"],
+                                  at: Date(timeIntervalSince1970: TimeInterval($0["at"] as Int)))
+            }
+        }
     }
 
     public func laneAck(_ lane: String, id: String) throws -> LaneAck? {
@@ -570,18 +643,22 @@ public final class LocalStore: Sendable {
     /// Applies a rotation this device performed itself: new blobs and seqs for the rotated records, and the new cursor.
     /// `records` are snapshots from before the request: one that was edited (or replaced by a pull) while the request was in
     /// flight no longer matches its row and is left alone; the caller re-wraps pending edits afterwards.
-    public func applyRotation(_ records: [StoredRecord], lane: String, cursor: String, headSeq: Int) throws {
+    public func applyRotation(_ records: [StoredRecord], lane: String, cursor: String?, headSeq: Int?, tags: [String: String] = [:]) throws {
         try pool.write { db in
             for r in records {
                 guard let cur = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [r.id]).map(StoredRecord.init(row:)),
                       cur.rev == r.rev, cur.pending == .none else { continue }
                 try write(r, db)
-                try setAck(lane, r, tag: "\(r.rev).\(r.seq)", db)
+                try setAck(lane, r, tag: tags[r.id] ?? "\(r.rev).\(r.seq)", db)
             }
-            try db.execute(sql: """
-                INSERT INTO lane_state(lane, cursor, known_head) VALUES (?, ?, ?)
-                ON CONFLICT(lane) DO UPDATE SET cursor = excluded.cursor, known_head = MAX(known_head, excluded.known_head)
-                """, arguments: [lane, cursor, headSeq])
+            // A lane that numbers its history (the server) moved to the position the rotation left it at; one that does not
+            // keeps its cursor, so nothing written by others in the meantime is skipped.
+            if let cursor, let headSeq {
+                try db.execute(sql: """
+                    INSERT INTO lane_state(lane, cursor, known_head) VALUES (?, ?, ?)
+                    ON CONFLICT(lane) DO UPDATE SET cursor = excluded.cursor, known_head = MAX(known_head, excluded.known_head)
+                    """, arguments: [lane, cursor, headSeq])
+            }
         }
     }
 
@@ -592,6 +669,7 @@ public final class LocalStore: Sendable {
             try db.execute(sql: "DELETE FROM trash")
             try db.execute(sql: "DELETE FROM lane_state")
             try db.execute(sql: "DELETE FROM lane_ack")
+            try db.execute(sql: "DELETE FROM quarantine")
             try db.execute(sql: "DELETE FROM meta")
         }
     }

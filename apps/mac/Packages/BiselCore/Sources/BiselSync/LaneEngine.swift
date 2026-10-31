@@ -25,6 +25,8 @@ public struct SyncReport: Sendable, Equatable {
     public var rejectedTombstones: [String] = []
     /// Records the lane sent that the verifier refused to apply (malformed, mis-signed, replayed). They are kept aside, not applied.
     public var quarantined = 0
+    /// Records uploaded again because the lane lost them, replayed an older version, or had never seen them.
+    public var repaired = 0
     /// Things the lane did that are not legitimate updates (hard deletes, a position that went backwards).
     public var incidents: [LaneIncident] = []
     public init() {}
@@ -55,7 +57,9 @@ public struct LaneEngine: Sendable {
     }
 
     /// `pushing: false` only pulls: used while the vault key this device holds is not yet confirmed against the box.
-    public func run(pushing: Bool = true) async throws -> SyncReport {
+    /// `audit: true` reads the lane from the start and checks it against what this device knows: a lane that rolled back to an
+    /// older snapshot, or silently lost records, cannot be told apart from a quiet one by reading only what is new.
+    public func run(pushing: Bool = true, audit: Bool = false) async throws -> SyncReport {
         var report = SyncReport()
         _ = try store.laneState(laneKey)   // adopts what the box synced before lanes existed, before anything is acknowledged
         let epoch = try store.identity()?.epoch ?? 1
@@ -63,7 +67,7 @@ public struct LaneEngine: Sendable {
         if pushing { try await push(&report, epoch: epoch, staleEpoch: &staleEpoch) }
         var serverRevs: [String: Int] = [:]
         let reseeding = try store.reseedPending()
-        let serverEpoch = try await pull(&report, serverRevs: &serverRevs, fromStart: reseeding)
+        let serverEpoch = try await pull(&report, serverRevs: &serverRevs, fromStart: reseeding || audit, auditing: audit)
         if staleEpoch || serverEpoch > epoch {
             try await adoptRotation(&report)
         } else if pushing, let vk = vaultKey() {
@@ -77,6 +81,8 @@ public struct LaneEngine: Sendable {
                 var again = false
                 try await push(&report, epoch: epoch, staleEpoch: &again)   // push the restored items right away
             }
+            try await repair(&report, epoch: epoch)
+            try await attest(report, epoch: epoch)
         }
         return report
     }
@@ -247,27 +253,46 @@ public struct LaneEngine: Sendable {
         return restored
     }
 
+    private func adminKey() -> Data? {
+        guard let vk = vaultKey() else { return nil }
+        return try? vk.withKey { try VaultAdmin.signingKey(vaultKey: $0).publicKey.rawRepresentation }
+    }
+
+    private func witness(_ state: LaneState) -> LaneWitness {
+        state.witness.flatMap { try? JSONDecoder().decode(LaneWitness.self, from: $0) } ?? LaneWitness()
+    }
+
     /// Returns the lane's epoch as of the last page.
-    private func pull(_ report: inout SyncReport, serverRevs: inout [String: Int], fromStart: Bool) async throws -> Int {
+    private func pull(_ report: inout SyncReport, serverRevs: inout [String: Int], fromStart: Bool, auditing: Bool) async throws -> Int {
         var state = try store.laneState(laneKey)
+        var known = witness(state)
         var cursor = fromStart ? nil : state.cursor.map(LaneCursor.init)
         let eventCursor = state.eventCursor
         var newEvents: [ServerEvent] = []
+        var seenRecords = Set<String>(), seenControl = Set<String>()
         while true {
             let changes = try await lane.fetch(since: cursor, limit: 200)
             // A lane that reports less than it already told us is rolling us back or lying.
-            let verdict = try verifier.verify(changes, since: cursor, knownHead: state.knownHead)
+            let verdict = try verifier.verify(changes, since: cursor, knownHead: state.knownHead, witness: &known, adminKey: adminKey())
             report.quarantined += verdict.quarantined.count
             report.incidents += verdict.incidents
+            try store.quarantine(laneKey, verdict.quarantined.map { (kind: $0.record.kind.rawValue, id: $0.record.id, rev: $0.record.rev,
+                                                                     reason: $0.reason.rawValue, blob: $0.record.blob) })
+            // Records the lane says it deleted for good are never honoured: forget that it holds them, and they go back up.
+            try store.forgetAcks(laneKey, ids: changes.removed.filter { $0.kind == .item || $0.kind == .tombstone || $0.kind == .manifest }.map(\.id))
             let localEpoch = try store.identity()?.epoch ?? 1
-            let meta = changes.meta ?? LaneMeta(epoch: localEpoch, headSeq: state.knownHead)
+            let meta = verdict.meta ?? changes.meta ?? LaneMeta(epoch: localEpoch, headSeq: state.knownHead)
+            for rec in changes.upserts {
+                if rec.isItemLike { seenRecords.insert(rec.id) } else { seenControl.insert("\(rec.kind.rawValue)/\(rec.id)") }
+            }
             for rec in verdict.accepted {
                 serverRevs[rec.id] = rec.rev
                 if try store.applyRemote(stored(rec), lane: laneKey, tag: rec.tag?.rawValue) { report.pulled += 1 }
             }
             cursor = changes.cursor
             state.cursor = changes.cursor.rawValue
-            state.knownHead = meta.headSeq
+            state.knownHead = max(state.knownHead, meta.headSeq)
+            state.witness = try JSONEncoder().encode(known)
             try store.setLaneState(laneKey, state)
             report.headSeq = meta.headSeq
             if let devices = try? JSONEncoder().encode(meta.members) { try store.setDeviceListJSON(devices) }
@@ -285,8 +310,52 @@ public struct LaneEngine: Sendable {
                 if let recovery = meta.recovery {
                     try store.updateRecovery(pubkey: recovery.pubkey, encryptionPubkey: recovery.encPubkey, envelope: recovery.envelope)
                 }
+                if auditing { try audit(known, seenRecords: seenRecords, seenControl: seenControl, &report) }
                 return meta.epoch
             }
         }
+    }
+
+    /// A complete reading of the lane against what this device knows: control records it has seen must still be there, and so
+    /// must every record it was told the lane holds (the missing ones go back up).
+    private func audit(_ known: LaneWitness, seenRecords: Set<String>, seenControl: Set<String>, _ report: inout SyncReport) throws {
+        if known.logN > 0, !seenControl.contains("log/\(ControlRecords.logID(known.logN))") {
+            throw IntegrityError.serverRolledBack(known: known.logN, reported: known.logN - 1)
+        }
+        for (device, counter) in known.counters where counter > 0 && !seenControl.contains("head/\(ControlRecords.deviceHeadID(device))") {
+            throw IntegrityError.serverRolledBack(known: counter, reported: 0)
+        }
+        let lost = try store.ackedIDs(laneKey).subtracting(seenRecords)
+        if !lost.isEmpty {
+            report.incidents.append(.lost(count: lost.count))
+            try store.forgetAcks(laneKey, ids: Array(lost))
+        }
+    }
+
+    /// Uploads what the lane lacks or holds in an older version: after a hard delete, a replay, a restore, or when the lane
+    /// has just been enabled. Only on lanes that take a write at any revision.
+    private func repair(_ report: inout SyncReport, epoch: Int) async throws {
+        guard lane.capabilities.repairs else { return }
+        for (rec, ack) in try store.recordsBehind(laneKey) {
+            if ReservedRecord.isReserved(rec.id), vaultKey() == nil { continue }
+            let write = LaneWrite(record: laneRecord(rec, epoch: epoch), expect: ack.map { .tag(LaneTag($0.tag)) } ?? .absent)
+            // A conflict means the lane holds something newer; the next pull shows it.
+            if case .accepted(let accepted) = try await lane.write([write])[0] {
+                try store.acknowledge(laneKey, rec, tag: accepted.tag?.rawValue ?? "")
+                report.repaired += 1
+            }
+        }
+    }
+
+    /// Bumps this device's freshness counter after it wrote, on lanes that do not number their own history.
+    private func attest(_ report: SyncReport, epoch: Int) async throws {
+        guard !lane.capabilities.headIsCursor, report.pushed + report.repaired > 0, let me = try store.identity()?.deviceID else { return }
+        var state = try store.laneState(laneKey)
+        var known = witness(state)
+        let counter = (known.counters[me] ?? 0) + 1
+        try await lane.attest(counter: counter, epoch: epoch)
+        known.counters[me] = counter
+        state.witness = try JSONEncoder().encode(known)
+        try store.setLaneState(laneKey, state)
     }
 }

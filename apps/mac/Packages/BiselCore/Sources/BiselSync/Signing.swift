@@ -42,6 +42,8 @@ public struct AdminSigner: Sendable {
     public init(key: Curve25519.Signing.PrivateKey) { self.key = key }
     public init(vaultKey: Data) throws { key = try VaultAdmin.signingKey(vaultKey: vaultKey) }
     public var publicKey: Data { key.publicKey.rawRepresentation }
+    /// Signs a record of a lane that has no server to check the request (control records, `ControlRecords`).
+    public func sign(_ message: Data) throws -> Data { try key.signature(for: message) }
     func signature(device: String, canonicalRequest: String) throws -> Data {
         try key.signature(for: VaultAdmin.message(device: device, canonicalRequest: canonicalRequest))
     }

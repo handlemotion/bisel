@@ -14,19 +14,25 @@ public protocol BoxLane: SyncLane {
     /// This device's own envelope and the epoch of the vault key inside it.
     func ownEnvelope() async throws -> (envelope: Data, epoch: Int)
     func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int, admin: AdminSigner) async throws
-    func rotate(baseEpoch: Int, baseSeq: Int, revoke: String?, newAdminPublicKey: Data,
+    /// `admin` authorises (the key in force), `newAdmin` is the key for the new epoch. `written` lists the records the lane
+    /// rewrote, with their new positions, when it says so (the server does not: its positions follow from `headSeq`).
+    func rotate(baseEpoch: Int, baseSeq: Int, revoke: String?, newAdmin: AdminSigner,
                 items: [(id: String, rev: Int, wrappedKey: Data)], tombstones: [(id: String, rev: Int, marker: Data)],
-                devices: [(id: String, envelope: Data)], recoveryEnvelope: Data, admin: AdminSigner) async throws -> RotateOutcome
+                devices: [(id: String, envelope: Data)], recoveryEnvelope: Data, admin: AdminSigner) async throws -> (outcome: RotateOutcome, written: [LaneRecord])
     /// Fresh install, recovery step 1: the recovery envelope and its epoch. The lane must have been built to authenticate with the recovery key.
     func recoveryEnvelope() async throws -> (envelope: Data, epoch: Int)
     /// Recovery step 3: registers the replacement device. Returns when it may start syncing (nil = now).
+    /// `admin` is the admin key of the vault key the device just opened, for lanes that record the registration as a signed entry.
     @discardableResult
-    func recoveryRegister(device: WireDevice, epoch: Int) async throws -> Date?
+    func recoveryRegister(device: WireDevice, epoch: Int, admin: AdminSigner) async throws -> Date?
+    /// Called after this device wrote: its freshness counter goes up. Lanes that number their own history ignore it.
+    func attest(counter: Int, epoch: Int) async throws
     /// Creates the box on a lane that needs no credential for it. A server box is created through `SyncClient.bootstrap`.
     func create(_ box: NewBox) async throws -> SyncClient.BootstrapResult
 }
 
 public extension BoxLane {
+    func attest(counter: Int, epoch: Int) async throws {}
     func create(_ box: NewBox) async throws -> SyncClient.BootstrapResult { throw LaneError.unsupported }
 }
 
@@ -36,10 +42,10 @@ public struct NewBox: Sendable {
     public var recoveryPublicKey: Data
     public var recoveryEncryptionPublicKey: Data
     public var recoveryEnvelope: Data
-    public var adminPublicKey: Data
-    public init(device: WireDevice, recoveryPublicKey: Data, recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, adminPublicKey: Data) {
+    public var admin: AdminSigner
+    public init(device: WireDevice, recoveryPublicKey: Data, recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, admin: AdminSigner) {
         self.device = device; self.recoveryPublicKey = recoveryPublicKey; self.recoveryEncryptionPublicKey = recoveryEncryptionPublicKey
-        self.recoveryEnvelope = recoveryEnvelope; self.adminPublicKey = adminPublicKey
+        self.recoveryEnvelope = recoveryEnvelope; self.admin = admin
     }
 }
 
@@ -60,7 +66,7 @@ public struct ServerLane: BoxLane {
     }
 
     public var id: LaneID { LaneID("server:\(client.baseURL.host ?? "-"):\(boxID ?? "-")") }
-    public var capabilities: LaneCapabilities { .init(atomicBatch: 0, enforcesExpect: true, history: true, perDeviceAuth: true) }
+    public var capabilities: LaneCapabilities { .init(atomicBatch: 0, enforcesExpect: true, history: true, perDeviceAuth: true, headIsCursor: true) }
     public func identity() async throws -> LaneIdentity { LaneIdentity(boxID ?? "-") }
 
     public func fetch(since: LaneCursor?, limit: Int) async throws -> LaneChanges {
@@ -109,14 +115,16 @@ public struct ServerLane: BoxLane {
     public func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int, admin: AdminSigner) async throws {
         try await client.rotateRecovery(publicKey: publicKey, encryptionPublicKey: encryptionPublicKey, envelope: envelope, epoch: epoch, admin: admin)
     }
-    public func rotate(baseEpoch: Int, baseSeq: Int, revoke: String?, newAdminPublicKey: Data,
+    public func rotate(baseEpoch: Int, baseSeq: Int, revoke: String?, newAdmin: AdminSigner,
                        items: [(id: String, rev: Int, wrappedKey: Data)], tombstones: [(id: String, rev: Int, marker: Data)],
-                       devices: [(id: String, envelope: Data)], recoveryEnvelope: Data, admin: AdminSigner) async throws -> RotateOutcome {
-        try await client.rotate(baseEpoch: baseEpoch, baseSeq: baseSeq, revoke: revoke, newAdminPublicKey: newAdminPublicKey, items: items,
-                                tombstones: tombstones, devices: devices, recoveryEnvelope: recoveryEnvelope, admin: admin)
+                       devices: [(id: String, envelope: Data)], recoveryEnvelope: Data, admin: AdminSigner) async throws -> (outcome: RotateOutcome, written: [LaneRecord]) {
+        (try await client.rotate(baseEpoch: baseEpoch, baseSeq: baseSeq, revoke: revoke, newAdminPublicKey: newAdmin.publicKey, items: items,
+                                 tombstones: tombstones, devices: devices, recoveryEnvelope: recoveryEnvelope, admin: admin), [])
     }
     public func recoveryEnvelope() async throws -> (envelope: Data, epoch: Int) { try await client.recoveryEnvelope() }
-    public func recoveryRegister(device: WireDevice, epoch: Int) async throws -> Date? { try await client.recoveryRegister(device: device, epoch: epoch) }
+    public func recoveryRegister(device: WireDevice, epoch: Int, admin: AdminSigner) async throws -> Date? {
+        try await client.recoveryRegister(device: device, epoch: epoch)
+    }
 
     // MARK: record mapping
 

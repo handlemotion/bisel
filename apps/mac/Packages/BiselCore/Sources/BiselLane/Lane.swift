@@ -134,9 +134,16 @@ public struct LaneCapabilities: Sendable, Equatable {
     public var pushNotifications: Bool
     public var history: Bool
     public var perDeviceAuth: Bool
-    public init(atomicBatch: Int = 0, enforcesExpect: Bool = false, pushNotifications: Bool = false, history: Bool = false, perDeviceAuth: Bool = false) {
+    /// The lane's position is a number that only grows and is also the cursor (the server's `head_seq`). Lanes without one
+    /// get their freshness from signed per-writer counters.
+    public var headIsCursor: Bool
+    /// A record can be written at any revision above the one the lane holds, so a lane that lost or replayed state is repaired
+    /// by uploading the local copy. The server numbers revisions itself and cannot be repaired this way.
+    public var repairs: Bool
+    public init(atomicBatch: Int = 0, enforcesExpect: Bool = false, pushNotifications: Bool = false, history: Bool = false,
+                perDeviceAuth: Bool = false, headIsCursor: Bool = false, repairs: Bool = false) {
         self.atomicBatch = atomicBatch; self.enforcesExpect = enforcesExpect; self.pushNotifications = pushNotifications
-        self.history = history; self.perDeviceAuth = perDeviceAuth
+        self.history = history; self.perDeviceAuth = perDeviceAuth; self.headIsCursor = headIsCursor; self.repairs = repairs
     }
 }
 
@@ -163,6 +170,8 @@ public protocol SyncLane: Sendable {
     func identity() async throws -> LaneIdentity
     /// A page of records after `since` (nil: from the start), with the lane's view of the box in `meta`.
     func fetch(since: LaneCursor?, limit: Int) async throws -> LaneChanges
+    /// The current copies of these records, nil where the lane has none.
+    func read(_ refs: [LaneRecordRef]) async throws -> [LaneRecord?]
     /// Per record; not atomic.
     func write(_ batch: [LaneWrite]) async throws -> [LaneWriteResult]
     /// All or nothing; only if `capabilities.atomicBatch >= atomic.count`.
@@ -173,6 +182,7 @@ public protocol SyncLane: Sendable {
 }
 
 public extension SyncLane {
+    func read(_ refs: [LaneRecordRef]) async throws -> [LaneRecord?] { throw LaneError.unsupported }
     func commit(_ atomic: [LaneWrite]) async throws -> [LaneWriteResult] { throw LaneError.unsupported }
     func changes() -> AsyncStream<LaneSignal> { AsyncStream { $0.finish() } }
     func erase(confirmed: LaneEraseToken) async throws { throw LaneError.unsupported }
