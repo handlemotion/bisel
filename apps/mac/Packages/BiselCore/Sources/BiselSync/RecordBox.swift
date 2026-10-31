@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import BiselCrypto
 import BiselLane
 import BiselVault
@@ -74,13 +75,15 @@ public struct RecordBox: BoxLane {
         return (record.blob, head.epoch)
     }
 
-    public func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int, admin: AdminSigner) async throws {
-        guard let (head, _) = try await currentHead() else { throw SyncError.notAuthorized }
+    public func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int, admin: AdminSigner,
+                               anchor: @Sendable (Data) throws -> Data) async throws {
+        guard let (head, _) = try await currentHead(), let root = head.aks.first?.ak else { throw SyncError.notAuthorized }
         if epoch != head.epoch { throw RotationError.staleEpoch(serverEpoch: head.epoch) }
         let current = try await readOne(.recovery, ControlRecords.recoveryID)
         let seq = (current.flatMap { ControlRecords.decode(ControlRecords.Recovery.self, $0.blob) }?.seq ?? 0) + 1
         let rec = ControlRecords.Recovery(seq: seq, epoch: epoch, pubkey: publicKey.base64URLEncoded(),
-                                          encPubkey: encryptionPublicKey.base64URLEncoded(), envelope: envelope.base64URLEncoded())
+                                          encPubkey: encryptionPublicKey.base64URLEncoded(), envelope: envelope.base64URLEncoded(),
+                                          anchor: try anchor(root).base64URLEncoded())
         let write = LaneWrite(record: try signed(LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: epoch,
                                                             blob: try ControlRecords.encode(rec), writer: deviceID), by: admin),
                               expect: current?.tag.map { .tag($0) } ?? .absent)
@@ -130,7 +133,7 @@ public struct RecordBox: BoxLane {
         if let currentRecovery = try await readOne(.recovery, ControlRecords.recoveryID),
            let rec = ControlRecords.decode(ControlRecords.Recovery.self, currentRecovery.blob) {
             let next = ControlRecords.Recovery(seq: rec.seq + 1, epoch: newEpoch, pubkey: rec.pubkey, encPubkey: rec.encPubkey,
-                                               envelope: recoveryEnvelope.base64URLEncoded())
+                                               envelope: recoveryEnvelope.base64URLEncoded(), anchor: rec.anchor)
             batch.append(LaneWrite(record: try signed(LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: newEpoch,
                                                                  blob: try ControlRecords.encode(next), writer: deviceID), by: newAdmin),
                                    expect: currentRecovery.tag.map { .tag($0) } ?? .any))
@@ -154,13 +157,30 @@ public struct RecordBox: BoxLane {
     }
 
     public func recoveryEnvelope() async throws -> (envelope: Data, epoch: Int) {
-        // Signed in the head's own epoch: an older recovery record still carries a signature by an older admin key, and a revoked
-        // device that kept that key could otherwise hand a fresh device the key it was cut off from.
-        guard let (head, _) = try await currentHead(), let record = try await readOne(.recovery, ControlRecords.recoveryID),
+        guard let (head, _) = try await currentHead(), let (rec, envelope) = try await recovery(under: head) else { throw SyncError.notAuthorized }
+        return (envelope, rec.epoch)
+    }
+
+    /// The recovery record, if signed in the head's own epoch: an older one still carries a signature by an older admin key, and
+    /// a revoked device that kept that key could otherwise hand a fresh device the key it was cut off from.
+    private func recovery(under head: ControlRecords.Head) async throws -> (ControlRecords.Recovery, envelope: Data)? {
+        guard let record = try await readOne(.recovery, ControlRecords.recoveryID),
               let rec = ControlRecords.decode(ControlRecords.Recovery.self, record.blob), rec.epoch == head.epoch,
               let key = ControlRecords.key(at: rec.epoch, in: head.aks), ControlRecords.adminSignatureValid(record, key: key),
-              let envelope = Data(base64URLEncoded: rec.envelope) else { throw SyncError.notAuthorized }
-        return (envelope, rec.epoch)
+              let envelope = Data(base64URLEncoded: rec.envelope) else { return nil }
+        return (rec, envelope)
+    }
+
+    /// Recovery on storage anyone with the account can write: the box must be the one the phrase vouched for. Its head has to
+    /// descend from the admin key the recovery signing key `recoverySigningKey` signed (`ControlRecords.Recovery.anchor`), and the
+    /// envelope then has to open to the key that head ends in: `adminKey` is that key's public half, for the caller to compare.
+    public func anchoredRecoveryEnvelope(recoverySigningKey: Data) async throws -> (envelope: Data, epoch: Int, adminKey: Data) {
+        guard let (head, _) = try await currentHead(), let root = head.aks.first?.ak, let current = head.aks.last?.ak,
+              let (rec, envelope) = try await recovery(under: head),
+              let anchor = rec.anchor.flatMap({ Data(base64URLEncoded: $0) }),
+              let signer = try? Curve25519.Signing.PublicKey(rawRepresentation: recoverySigningKey),
+              signer.isValidSignature(anchor, for: ControlRecords.anchorMessage(root: root)) else { throw SyncError.notAuthorized }
+        return (envelope, rec.epoch, current)
     }
 
     public func recoveryRegister(device: WireDevice, epoch: Int, admin: AdminSigner) async throws -> Date? {
@@ -176,7 +196,8 @@ public struct RecordBox: BoxLane {
         guard let envelope = box.device.envelope.flatMap({ Data(base64URLEncoded: $0) }) else { throw SyncError.malformedResponse }
         let admin = box.admin
         let recovery = ControlRecords.Recovery(seq: 1, epoch: 1, pubkey: box.recoveryPublicKey.base64URLEncoded(),
-                                               encPubkey: box.recoveryEncryptionPublicKey.base64URLEncoded(), envelope: box.recoveryEnvelope.base64URLEncoded())
+                                               encPubkey: box.recoveryEncryptionPublicKey.base64URLEncoded(), envelope: box.recoveryEnvelope.base64URLEncoded(),
+                                               anchor: box.recoveryAnchor?.base64URLEncoded())
         try await put(try signed(LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: 1,
                                             blob: try ControlRecords.encode(recovery), writer: box.device.id), by: admin))
         try await put(try envelopeRecord(device: box.device.id, epoch: 1, envelope: envelope, admin: admin))

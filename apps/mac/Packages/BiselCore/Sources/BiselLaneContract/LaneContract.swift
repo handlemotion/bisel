@@ -368,6 +368,33 @@ public enum LaneContract {
                 try await rig.recover(fresh, phrase: phrase)
             }
         },
+        ContractFlow(name: "someone who can write to the storage but never held the key cannot build a box the 24 words recover into") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a")
+            let phrase = try await rig.bootstrap(a)
+            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+
+            // Only public material: the recovery keys as the recovery record shows them. A head of their own, signed by an admin key
+            // of their own, and a recovery record whose envelope (sealed to the public recovery key) holds a key they picked.
+            let real = try c.require(ControlRecords.decode(ControlRecords.Recovery.self, try c.require(fake.record(ControlRecords.recoveryID)).blob))
+            let enc = try c.require(Data(base64URLEncoded: real.encPubkey)), sig = try c.require(Data(base64URLEncoded: real.pubkey))
+            let evil = BiselRandom.bytes(32)
+            let admin = try AdminSigner(vaultKey: evil)
+            var head = LaneRecord(kind: .head, id: ControlRecords.headID, rev: 0, epoch: 1,
+                                  blob: try ControlRecords.encode(ControlRecords.Head(epoch: 1, aks: [.init(epoch: 1, ak: admin.publicKey, sig: nil)])))
+            head.sig = try admin.sign(head.canonical)
+            fake.inject(head)
+            let forged = ControlRecords.Recovery(seq: real.seq + 1, epoch: 1, pubkey: real.pubkey, encPubkey: real.encPubkey,
+                                                 envelope: try RecoveryKeys.seal(vaultKey: evil, toEncryptionKey: enc, signingKey: sig, epoch: 1).base64URLEncoded(),
+                                                 anchor: real.anchor)
+            var recovery = LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: 1, blob: try ControlRecords.encode(forged))
+            recovery.sig = try admin.sign(recovery.canonical)
+            fake.inject(recovery)
+
+            let fresh = try rig.device("fresh")
+            await c.expectThrows("the phrase must not recover into a box it never vouched for") { try await rig.recover(fresh, phrase: phrase) }
+        },
     ]
 }
 #endif

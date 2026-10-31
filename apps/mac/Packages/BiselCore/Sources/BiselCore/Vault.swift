@@ -313,9 +313,11 @@ public actor Vault {
         do {
             let device = WireDevice(id: identity.deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: me.sigPubkey,
                                     encPubkey: me.encPubkey, envelope: envelope)
+            let admin = try AdminSigner(vaultKey: vk)
+            let anchor = try RecoveryKeys(phrase: bundle.phrase).signingKey.signature(for: ControlRecords.anchorMessage(root: admin.publicKey))
             _ = try await lane().create(NewBox(device: device, recoveryPublicKey: bundle.publicKey,
                                                recoveryEncryptionPublicKey: bundle.encryptionPublicKey, recoveryEnvelope: bundle.envelope,
-                                               admin: try AdminSigner(vaultKey: vk)))
+                                               admin: admin, recoveryAnchor: anchor))
         } catch {
             lock()
             try? store.removeAll()
@@ -560,9 +562,17 @@ public actor Vault {
     public func recover(lane recovering: any BoxLane, address: URL, phrase: RecoveryPhrase, deviceName: String, boxID: String? = nil) async throws {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
         let keys = try RecoveryKeys(phrase: phrase)
-        let (recoveryEnvelope, epoch) = try await recovering.recoveryEnvelope()
+        let recoveryEnvelope: Data, epoch: Int, expectedAdmin: Data?
+        if let box = recovering as? RecordBox {
+            // Storage anyone with the account can write: only a box the phrase itself vouched for, and only the key its head ends in.
+            (recoveryEnvelope, epoch, expectedAdmin) = try await box.anchoredRecoveryEnvelope(recoverySigningKey: keys.publicKey)
+        } else {
+            (recoveryEnvelope, epoch) = try await recovering.recoveryEnvelope()
+            expectedAdmin = nil
+        }
         var vk = try keys.open(envelope: recoveryEnvelope, epoch: epoch)
         defer { vk.zeroize() }
+        if let expectedAdmin, try AdminSigner(vaultKey: vk).publicKey != expectedAdmin { throw IntegrityError.keyConfirmationFailed }
         let pub = try config.keyStore.createKeys()
         let deviceID = BiselRandom.identifier()
         let envelope = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: pub.enc)
@@ -590,8 +600,10 @@ public actor Vault {
         var id = try requireIdentity()
         let bundle = try RecoveryService.makeBundle(vaultKey: raw, epoch: id.epoch)
         do {
+            let keys = try RecoveryKeys(phrase: bundle.phrase)
             try await lane().rotateRecovery(publicKey: bundle.publicKey, encryptionPublicKey: bundle.encryptionPublicKey,
-                                            envelope: bundle.envelope, epoch: id.epoch, admin: try adminSigner(vk))
+                                            envelope: bundle.envelope, epoch: id.epoch, admin: try adminSigner(vk),
+                                            anchor: { try keys.signingKey.signature(for: ControlRecords.anchorMessage(root: $0)) })
         } catch RotationError.staleEpoch {
             _ = try? await sync()
             throw RotationError.vaultKeyRotated
