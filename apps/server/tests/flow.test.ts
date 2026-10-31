@@ -1196,8 +1196,9 @@ test("per-address flood limit: a flood from one address gets a bare 429, other a
   const flooder = clientAt("10.77.0.1");
   let limitedAt = -1;
   let limited: Response | undefined;
-  // The test server inherits the production limit: 300 requests per minute per address.
-  for (let i = 0; i < 400 && limitedAt < 0; i++) {
+  // The test server inherits the production limit: 300 requests per minute per address. The local limiter counts in
+  // fixed one-minute windows, so a flood that straddles a boundary can need up to two windows' worth (600) to trip.
+  for (let i = 0; i < 700 && limitedAt < 0; i++) {
     const res = await flooder.fetch("/healthz");
     if (res.status === 429) {
       limitedAt = i;
@@ -1205,7 +1206,7 @@ test("per-address flood limit: a flood from one address gets a bare 429, other a
     } else expect(res.status).toBe(200);
   }
   expect(limitedAt, "the limit kicks in").toBeGreaterThan(0);
-  expect(limitedAt).toBeLessThanOrEqual(300);
+  expect(limitedAt).toBeLessThanOrEqual(600);
   expect(await limited!.text()).toBe("");
   expect(limited!.headers.get("retry-after")).toBe("10");
 
