@@ -296,7 +296,7 @@ public enum LaneContract {
             let fake = try c.require(rig.fake)
             let a = try rig.device("a")
             _ = try await rig.bootstrap(a)
-            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
             try await a.vault.sync()
             let me = try c.require(try await a.vault.identity())
             let enc = try c.require(me.roster.first?.encPubkey)
@@ -325,6 +325,10 @@ public enum LaneContract {
                          "nothing this device uploads opens under the planted key (\(r.id))")
             }
             c.expect(try await a.vault.identity()?.epoch == me.epoch, "the unsigned head announced no rotation")
+            // The planted manifest does not lock the device out either: it publishes its own again and carries on.
+            c.expect(try await a.vault.revealPassword(id: bank.id) == "bank-pw", "the device still opens its box")
+            let manifest = try c.require(fake.record(ReservedRecord.manifestID))
+            c.expect(manifest.blob != planted && manifest.rev > rev, "the device's own manifest replaces the planted one")
         },
         ContractFlow(name: "a revoked device that kept the old admin key cannot replace the recovery material, here or for a device recovering, nor wedge sync with its counter") { rig, c in
             let fake = try c.require(rig.fake)

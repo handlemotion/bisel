@@ -634,10 +634,13 @@ public actor Vault {
     /// Reads the manifest the vault's devices share and folds it into this device's roster and recovery pins.
     /// The manifest is sealed under VK, so only a VK holder could have written it. A manifest that does not open under the
     /// key this device holds is the proof that the key is wrong (a server that swapped the envelope cannot forge one).
-    private func ingestManifest(_ k: LockedKey) throws {
+    private func ingestManifest(_ k: LockedKey, lane: String) throws {
         guard let record = try store.record(ReservedRecord.manifestID), !record.deleted, record.pending == .none else { return }
         let manifest: VaultManifest
         do { manifest = try k.withKey { try ManifestCodec.open(record, vaultKey: $0) } } catch {
+            // Where the admin-key chain vouches for this key, the manifest is what is wrong: anyone who can write to the storage can
+            // put one there. Publish this device's roster again rather than lock every device out of the box.
+            if try chainConfirms(k, lane: lane) == true { try writeManifest(); return }
             lock()
             throw IntegrityError.keyConfirmationFailed
         }
@@ -665,10 +668,8 @@ public actor Vault {
     /// write it there. The key is the box's there when its admin key is the last link of the admin-key chain this device verified
     /// (a chain that grows only by signatures of the key before), at the epoch this device holds it for.
     private func confirmBoxKey(_ k: LockedKey, lane: String) throws {
-        if let witness = (try store.laneState(lane).witness).flatMap({ try? JSONDecoder().decode(LaneWitness.self, from: $0) }),
-           let current = witness.aks.last {
-            let mine = try k.withKey { try VaultAdmin.signingKey(vaultKey: $0).publicKey.rawRepresentation }
-            guard current.ak == mine, witness.epoch == (try requireIdentity().epoch) else {
+        if let confirmed = try chainConfirms(k, lane: lane) {
+            guard confirmed else {
                 lock()
                 throw IntegrityError.keyConfirmationFailed
             }
@@ -690,6 +691,16 @@ public actor Vault {
         var id = try requireIdentity()
         id.keyUnconfirmed = false
         try store.setIdentity(id)
+    }
+
+    /// Whether `k` is the key the box's verified admin-key chain ends in, at the epoch this device holds it for; nil on a lane that
+    /// keeps no chain (the server).
+    private func chainConfirms(_ k: LockedKey, lane: String) throws -> Bool? {
+        guard let witness = (try store.laneState(lane).witness).flatMap({ try? JSONDecoder().decode(LaneWitness.self, from: $0) }),
+              let current = witness.aks.last else { return nil }
+        let mine = try k.withKey { try VaultAdmin.signingKey(vaultKey: $0).publicKey.rawRepresentation }
+        let epoch = try requireIdentity().epoch
+        return current.ak == mine && witness.epoch == epoch
     }
 
     /// Devices this vault's owner approved, as known to this device.
@@ -869,7 +880,7 @@ public actor Vault {
             report = try await engine.run(audit: audit)
         }
         if report.rotationAdopted { lock() }   // the key in memory is the rotated-away one; unlock to get the new one
-        else if let held { try ingestManifest(held) }
+        else if let held { try ingestManifest(held, lane: box.id.rawValue) }
         return report
     }
 
