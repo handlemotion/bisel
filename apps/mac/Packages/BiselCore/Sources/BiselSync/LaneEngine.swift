@@ -29,6 +29,11 @@ public struct SyncReport: Sendable, Equatable {
     public var repaired = 0
     /// Things the lane did that are not legitimate updates (hard deletes, a position that went backwards).
     public var incidents: [LaneIncident] = []
+    /// Item records this device re-wrapped for a rotation another device committed but did not finish folding (`RecordBox.finishRotation`).
+    public var folded = 0
+    /// A rotation is committed on this lane but some of its records still carry the old key, and this device could not finish it
+    /// (locked, or its key not yet confirmed). Those items read again once any unlocked device syncs.
+    public var rotationPending = false
     public init() {}
 }
 
@@ -160,6 +165,9 @@ public struct LaneEngine: Sendable {
                     return
                 case .rejected(.tooLarge):
                     throw SyncError.tooLarge
+                case .rejected(.rotationInProgress):
+                    // Another device is staging a key rotation: the edit waits for its commit (or its time-out), still pending.
+                    skipped.insert(rec.id)
                 case .rejected(let why):
                     throw SyncError.server(status: 409, code: "\(why)")
                 }
