@@ -20,19 +20,24 @@ public struct StorageUnderTest: Sendable {
     public let lane: any SyncLane
     /// Set when the storage is the in-memory fake: the hostile flows drive it directly.
     public let fake: FakeLane?
+    /// The freshness witness every device of the flow shares, as Macs on one Apple ID share iCloud key-value storage.
+    public let witness: (any FreshnessWitness)?
+    /// Set when the witness is the in-memory fake: the hostile flows write to it as a removed device on the account would.
+    public let fakeWitness: FakeFreshnessWitness?
     /// The store loses a record (the fake: silently; CloudKit: a hard delete, which it then reports).
     public let lose: @Sendable (_ id: String) async throws -> Void
     /// Tears the storage down after the flow (CloudKit: deletes the zone).
     public let close: @Sendable () async throws -> Void
 
-    public init(name: String, lane: any SyncLane, fake: FakeLane? = nil, lose: @escaping @Sendable (String) async throws -> Void,
-                close: @escaping @Sendable () async throws -> Void = {}) {
-        self.name = name; self.lane = lane; self.fake = fake; self.lose = lose; self.close = close
+    public init(name: String, lane: any SyncLane, fake: FakeLane? = nil, witness: (any FreshnessWitness)? = nil,
+                lose: @escaping @Sendable (String) async throws -> Void, close: @escaping @Sendable () async throws -> Void = {}) {
+        self.name = name; self.lane = lane; self.fake = fake; self.witness = witness; fakeWitness = witness as? FakeFreshnessWitness
+        self.lose = lose; self.close = close
     }
 
     public static func fake() -> StorageUnderTest {
         let fake = FakeLane()
-        return StorageUnderTest(name: "fake", lane: fake, fake: fake, lose: { fake.dropSilently($0) })
+        return StorageUnderTest(name: "fake", lane: fake, fake: fake, witness: FakeFreshnessWitness(), lose: { fake.dropSilently($0) })
     }
 }
 
@@ -41,6 +46,7 @@ public final class Rig: @unchecked Sendable {
     public let server: TestServer?
     public let storage: StorageUnderTest?
     public var fake: FakeLane? { storage?.fake }
+    public var fakeWitness: FakeFreshnessWitness? { storage?.fakeWitness }
     public var address: URL { server?.url ?? URL(string: "lane://\(storage?.name ?? "box")")! }
 
     init(server: TestServer?, storage: StorageUnderTest?) { self.server = server; self.storage = storage }
@@ -63,7 +69,7 @@ public final class Rig: @unchecked Sendable {
 
     public func device(_ name: String) throws -> Device {
         guard let lane = storage?.lane else { return try Device(name) }
-        return try Device(name, laneProvider: { _, _ in lane })
+        return try Device(name, laneProvider: { _, _ in lane }, freshnessWitness: storage?.witness)
     }
 
     public func bootstrap(_ d: Device) async throws -> RecoveryPhrase {
