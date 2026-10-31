@@ -44,6 +44,8 @@ public struct StorageUnderTest: Sendable {
 public final class Rig: @unchecked Sendable {
     public let server: TestServer?
     public let storage: StorageUnderTest?
+    /// Every device reaches the storage through this, so a flow can make the lane stop taking writes part-way (pass-through until armed).
+    public let flaky: FlakyLane?
     public var fake: FakeLane? { storage?.fake }
     public var address: URL { server?.url ?? Self.address(of: storage?.name ?? "box") }
     /// The storage as the devices reach it: behind the account a Mac is signed in to (`AccountLane`), so a flow can sign out or
@@ -61,7 +63,7 @@ public final class Rig: @unchecked Sendable {
 
     init(server: TestServer?, storage: StorageUnderTest?, serverForMoves: Bool = false) {
         self.server = server; self.storage = storage; self.serverForMoves = serverForMoves
-        guard let storage else { account = nil; return }
+        guard let storage else { account = nil; flaky = nil; return }
         let extra = extra
         let account = AccountLane(storage.lane, second: {
             let other = try await storage.sibling("acct2")
@@ -69,7 +71,9 @@ public final class Rig: @unchecked Sendable {
             return other.lane
         })
         self.account = account
-        lanes[Self.host(storage.name)] = account
+        let flaky = FlakyLane(account)
+        self.flaky = flaky
+        lanes[Self.host(storage.name)] = flaky
     }
 
     static func address(of name: String) -> URL { URL(string: "lane://\(host(name))")! }
@@ -132,7 +136,7 @@ public final class Rig: @unchecked Sendable {
 
     public func recover(_ d: Device, phrase: RecoveryPhrase) async throws {
         if let server { try await d.vault.recover(server: server.url, phrase: phrase, deviceName: d.name, boxID: try server.onlyBoxID()) }
-        else if let account { try await d.vault.recover(lane: RecordBox(storage: account, deviceID: nil), address: address, phrase: phrase, deviceName: d.name) }
+        else if let flaky { try await d.vault.recover(lane: RecordBox(storage: flaky, deviceID: nil), address: address, phrase: phrase, deviceName: d.name) }
     }
 
     /// Everything the lane holds, as `d` sees it.
@@ -151,6 +155,20 @@ public final class Rig: @unchecked Sendable {
         }
         let id = try c.require(try await d.vault.identity()?.deviceID)
         return try await d.signedClientFactory(address, id).pull(since: 0).records
+    }
+
+    /// The records of `kind` the storage holds right now (control records, which `records(as:)` leaves out).
+    public func stored(_ kind: LaneKind) async throws -> [LaneRecord] {
+        guard let storage else { return [] }
+        var out: [LaneRecord] = []
+        var cursor: LaneCursor?
+        while true {
+            let page = try await storage.lane.fetch(since: cursor, limit: 200)
+            out += page.upserts.filter { $0.kind == kind }
+            cursor = page.cursor
+            if !page.hasMore { break }
+        }
+        return out
     }
 
     /// The lane forgets its newest write (a restore from a slightly older point). Returns the id it lost.

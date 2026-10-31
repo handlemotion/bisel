@@ -426,6 +426,119 @@ public enum LaneContract {
             c.expect(await b.vault.isConfigured == false, "the new device holds no envelope")
             c.expect(try await b.vault.identity()?.pairingSecret != nil, "the new device still waits for the real approval")
         },
+        ContractFlow(name: "a rotation the lane stops taking part-way leaves a box every device still reads at the old key, and the same revoke succeeds once the lane takes writes again") { rig, c in
+            let flaky = try c.require(rig.flaky)
+            let a = try rig.device("a"), b = try rig.device("b"), d = try rig.device("c")
+            _ = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            try await rig.enroll(d, through: a)
+            try await a.vault.sync()
+            let bIdentity = try c.require(try await b.vault.identity())
+            let oldVK = try await b.keyStore.openEnvelope(try c.require(bIdentity.envelope), reason: "test")
+
+            // The journal and the one chunk of staged keys go in, then the lane stops taking writes: the new envelopes never land.
+            flaky.failWrites(after: 2)
+            await c.expectThrows("the rotation fails while the lane takes no writes") { try await a.vault.revoke(deviceID: bIdentity.deviceID) }
+            flaky.heal()
+            c.expect(try await rig.stored(.stage).isEmpty, "the failed attempt leaves nothing staged on the lane")
+            for x in [a, b, d] {
+                c.expect(!(try await x.vault.sync().rotationAdopted), "\(x.name) sees no rotation")
+                c.expect(try await x.vault.identity()?.epoch == 1, "\(x.name) is still at the old key")
+                c.expect(try await x.vault.revealPassword(id: bank.id) == "bank-pw", "\(x.name) still reads the box")
+            }
+            var edit = try await d.vault.item(id: bank.id); edit.password = "between-attempts"
+            _ = try await d.vault.save(edit)
+            c.expect(try await d.vault.sync().pushed == 1, "nothing left behind holds other devices' edits off")
+
+            try await a.vault.revoke(deviceID: bIdentity.deviceID)
+            c.expect(try await rig.stored(.stage).isEmpty, "a finished rotation leaves nothing staged")
+            let after = try await rig.records(as: a, c).filter { !$0.deleted }
+            c.expect(after.allSatisfy { (try? ItemSealer.open(blob: $0.blob, id: $0.id, rev: $0.rev, vaultKey: SymmetricKey(data: oldVK))) == nil },
+                     "everything the lane holds is closed to the revoked device's key")
+            c.expect(try await d.vault.sync().rotationAdopted, "the remaining device adopts the rotation")
+            try await d.vault.unlock()
+            c.expect(try await d.vault.revealPassword(id: bank.id) == "between-attempts", "the remaining device reads under the new key")
+        },
+
+        ContractFlow(name: "a lane that silently drops a rotation's staged records never gets its commit: the box stays at the old key until the lane keeps writes again") { rig, c in
+            let flaky = try c.require(rig.flaky)
+            let a = try rig.device("a"), b = try rig.device("b"), d = try rig.device("c")
+            _ = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            try await rig.enroll(d, through: a)
+            try await a.vault.sync()
+            let bID = try c.require(try await b.vault.identity()?.deviceID)
+
+            // The journal is kept; the staged keys and envelopes are reported taken and never stored.
+            flaky.failWrites(after: 1, silently: true)
+            do { _ = try await a.vault.revoke(deviceID: bID); c.fail("a rotation the lane did not keep must not commit") }
+            catch RotationError.laneDroppedWrites {}
+            flaky.heal()
+            let head = try c.require(try await rig.stored(.head).first { $0.id == ControlRecords.headID }, "the lane holds a head")
+            c.expect(ControlRecords.decode(ControlRecords.Head.self, head.blob)?.epoch == 1, "the head never moved")
+            c.expect(try await rig.stored(.stage).isEmpty, "the refused attempt leaves nothing staged")
+            for x in [a, d] {
+                c.expect(!(try await x.vault.sync().rotationAdopted), "\(x.name) sees no rotation")
+                c.expect(try await x.vault.revealPassword(id: bank.id) == "bank-pw", "\(x.name) still reads the box at the old key")
+            }
+
+            try await a.vault.revoke(deviceID: bID)
+            c.expect(try await d.vault.sync().rotationAdopted, "once the lane keeps writes the revoke goes through")
+            try await d.vault.unlock()
+            c.expect(try await d.vault.revealPassword(id: bank.id) == "bank-pw", "the remaining device reads under the new key")
+        },
+
+        ContractFlow(name: "a rotation that stops right after its commit is reported incomplete, and another unlocked device finishes it for every device") { rig, c in
+            let flaky = try c.require(rig.flaky)
+            let a = try rig.device("a"), b = try rig.device("b"), d = try rig.device("c")
+            let phrase = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            let mail = try await a.vault.save(login("Mail", password: "mail-pw"))
+            let gone = try await a.vault.save(login("Gone", password: "gone-pw"))
+            try await a.vault.sync()
+            try await a.vault.delete(id: gone.id)
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            try await rig.enroll(d, through: a)
+            try await a.vault.sync()
+            let bIdentity = try c.require(try await b.vault.identity())
+            let oldVK = try await b.keyStore.openEnvelope(try c.require(bIdentity.envelope), reason: "test")
+
+            // The journal, one chunk, an envelope for each device that stays and the commit (head, recovery, log entry) go in;
+            // every fold after that fails.
+            flaky.failWrites(after: 1 + 1 + 2 + 3)
+            let report = try await a.vault.revoke(deviceID: bIdentity.deviceID)
+            flaky.heal()
+            c.expect(report.epoch == 2, "the rotation committed (epoch \(report.epoch))")
+            c.expect(report.incomplete, "a rotation whose fold failed says so")
+            c.expect(try await a.vault.revealPassword(id: mail.id) == "mail-pw", "the rotator reads everything under the new key")
+            c.expect(!(try await rig.stored(.stage).isEmpty), "the staged keys wait on the lane")
+
+            c.expect(try await d.vault.sync().rotationAdopted, "the remaining device adopts the rotation")
+            c.expect(try await d.vault.sync().rotationPending, "locked, it sees the rotation is unfinished")
+            try await d.vault.unlock()
+            let finished = try await d.vault.sync()
+            c.expect(finished.folded >= 3 && !finished.rotationPending, "the unlocked device finishes the fold (folded \(finished.folded))")
+            c.expect(try await d.vault.revealPassword(id: bank.id) == "bank-pw", "it reads the items the rotator did not fold")
+            c.expect(try await d.vault.revealPassword(id: mail.id) == "mail-pw", "it reads the items the rotator did not fold")
+            c.expect(try await rig.stored(.stage).isEmpty, "nothing is left staged on the lane")
+            let after = try await rig.records(as: a, c).filter { !$0.deleted }
+            c.expect(after.allSatisfy { (try? ItemSealer.open(blob: $0.blob, id: $0.id, rev: $0.rev, vaultKey: SymmetricKey(data: oldVK))) == nil },
+                     "everything the lane holds is closed to the revoked device's key")
+
+            let fresh = try rig.device("fresh")
+            try await rig.recover(fresh, phrase: phrase)
+            try await fresh.vault.sync()
+            c.expect(try await fresh.vault.revealPassword(id: bank.id) == "bank-pw", "the phrase recovers the finished box")
+            c.expect(try await fresh.vault.items().items.map(\.title).sorted() == ["Bank", "Mail"], "with the delete still in it")
+            c.expect(try await fresh.vault.items().undecryptable.isEmpty, "and nothing it cannot open")
+            try await a.vault.sync()
+            c.expect(try await a.vault.revealPassword(id: bank.id) == "bank-pw", "the rotator carries on")
+        },
     ]
 
     /// The `enroll` records a lane holds.

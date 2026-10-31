@@ -83,6 +83,10 @@ public struct RotationReport: Sendable {
     public var revokedDeviceName: String?
     public var revokedDeviceLastSeen: Date?
     public var exposed: [ExposedItem]
+    /// The key switched, but the lane still holds records this device could not re-wrap (on a lane that is only storage, the
+    /// rotation's last step failed part-way). This device already reads everything under the new key; other devices read those
+    /// records again once any unlocked device syncs and finishes the rotation (`SyncReport.folded`).
+    public var incomplete = false
     /// The subset to change first: logins whose password or one-time secret the device may have read.
     public var secretsToChange: [ExposedItem] { exposed.filter { $0.mayHaveBeenRead && ($0.hasPassword || $0.hasTOTP) } }
 }
@@ -1060,17 +1064,36 @@ public actor Vault {
             // manifest (or an item the box already held), and only then upload anything sealed under it.
             report = try await engine.run(pushing: false, audit: audit)
             if report.rotationAdopted { lock(); return report }   // another rotation arrived: the key in memory is already stale
-            guard let held else { return report }   // locked: nothing can be checked, nothing is uploaded
-            try confirmBoxKey(held, lane: box.id.rawValue)
-            var next = try await engine.run(audit: audit)
-            next.pulled += report.pulled
-            next.events = report.events + next.events
-            report = next
+            if let held {   // unlocked: check the key, then upload; locked: nothing can be checked, nothing is uploaded
+                try confirmBoxKey(held, lane: box.id.rawValue)
+                var next = try await engine.run(audit: audit)
+                next.pulled += report.pulled
+                next.events = report.events + next.events
+                report = next
+            }
         } else {
             report = try await engine.run(audit: audit)
         }
-        if report.rotationAdopted { lock() }   // the key in memory is the rotated-away one; unlock to get the new one
-        else if let held { try ingestManifest(held, lane: box.id.rawValue) }
+        if report.rotationAdopted { lock(); return report }   // the key in memory is the rotated-away one; unlock to get the new one
+        if let records = box as? RecordBox {
+            // A rotation another device committed but did not finish folding: until it is, the records it did not get to are stale
+            // here (quarantined) and on every device. Any unlocked device holding the confirmed new key folds them, then takes them.
+            let confirmed = try store.identity()?.keyUnconfirmed == false
+            let folding = held != nil && confirmed
+            let (folded, pending) = try await records.settleRotation(folding: folding)
+            report.folded = folded
+            report.rotationPending = pending
+            if folded > 0 {
+                let again = try await engine.run(audit: false)
+                report.pulled += again.pulled
+                report.pushed += again.pushed
+                report.quarantined += again.quarantined
+                report.incidents += again.incidents
+                report.events += again.events
+                if again.rotationAdopted { report.rotationAdopted = true; lock(); return report }
+            }
+        }
+        if let held { try ingestManifest(held, lane: box.id.rawValue) }
         return report
     }
 
@@ -1125,8 +1148,13 @@ public actor Vault {
         let box = try lane()
 
         // 1. A current, fully pushed local view.
-        let report = try await LaneEngine(store: store, lane: box, vaultKey: { held }).run()
+        var report = try await LaneEngine(store: store, lane: box, vaultKey: { held }).run()
         if report.rotationAdopted { lock(); throw RotationError.vaultKeyRotated }
+        // An earlier rotation left half-folded: finish it first, so the snapshot below is of records that open under the key held.
+        if let records = box as? RecordBox, try await records.finishRotation() > 0 {
+            report = try await LaneEngine(store: store, lane: box, vaultKey: { held }).run()
+            if report.rotationAdopted { lock(); throw RotationError.vaultKeyRotated }
+        }
         let pending = try store.pendingRecords()
         guard pending.isEmpty else { throw RotationError.pendingChanges(pending.count) }
         if box.capabilities.headIsCursor, try store.laneState(box.id.rawValue).cursor.flatMap(Int.init) != report.headSeq { return nil }
@@ -1217,9 +1245,9 @@ public actor Vault {
             devices: envelopes, recoveryEnvelope: recoveryEnvelope, admin: oldAdmin)
         guard case .rotated(let epoch, let headSeq) = outcome else { return nil }
 
-        // 5. Mirror it locally. Edits made while the request was in flight are still sealed under the old key: re-wrap them too.
-        // Where the lane put the rewritten records: the server numbers them after the head it reported; a lane that is only
-        // storage says so in `written`.
+        // 5. Mirror it locally, every record, folded on the lane or not. Edits made while the request was in flight are still sealed
+        // under the old key: re-wrap them too. Where the lane put the rewritten records: the server numbers them after the head it
+        // reported; a lane that is only storage says so in `written`, which lacks the records its fold did not get to.
         let positions = Dictionary(written.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let rotated = zip(live, wrapped).enumerated().map { index, pair -> StoredRecord in
             var r = pair.0
@@ -1255,7 +1283,8 @@ public actor Vault {
         try store.setIdentity(updated)
         setKey(newRaw)
         return RotationReport(epoch: epoch, revokedDeviceID: revokeID, revokedDeviceName: exposure.name,
-                              revokedDeviceLastSeen: exposure.lastSeen, exposed: exposure.items)
+                              revokedDeviceLastSeen: exposure.lastSeen, exposed: exposure.items,
+                              incomplete: box is RecordBox && written.count < live.count + tombstoneRecords.count)
     }
 
     // MARK: lanes: state, moving a box, detaching

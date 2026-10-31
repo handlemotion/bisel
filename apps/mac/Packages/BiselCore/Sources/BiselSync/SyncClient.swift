@@ -59,7 +59,10 @@ public enum RotationError: Error, Sendable, Equatable, LocalizedError {
     /// Use another device to revoke this one.
     case cannotRevokeThisDevice
     case deviceNotFound(String)
+    /// This device, or another one on the lane, is part-way through a key rotation.
     case inProgress
+    /// The storage said it took the rotation's records but does not hold them. The head was never moved: nothing changed.
+    case laneDroppedWrites
 
     public var errorDescription: String? {
         switch self {
@@ -72,6 +75,7 @@ public enum RotationError: Error, Sendable, Equatable, LocalizedError {
         case .cannotRevokeThisDevice: return "A device cannot revoke itself. Revoke it from another device."
         case .deviceNotFound: return "That device is not in this box."
         case .inProgress: return "A key rotation is already in progress."
+        case .laneDroppedWrites: return "The storage did not keep the new box key. Nothing was changed; try again later."
         }
     }
 }

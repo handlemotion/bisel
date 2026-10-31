@@ -73,8 +73,12 @@ public struct LaneVerifier: Sendable {
             if let reason = fault(record, currentEpoch: witness.epoch) { verdict.quarantined.append(.init(record: record, reason: reason)) }
             else { verdict.accepted.append(record) }
         }
-        // Enrollment requests and a rotation's staging records are deleted on purpose once they served.
-        for ref in changes.removed where ref.kind != .enroll && ref.kind != .stage { verdict.incidents.append(.removed(ref)) }
+        // Enrollment requests and a rotation's staging records are deleted on purpose once they served, and so are the envelopes
+        // of a rotation that gave up before its head was committed: an epoch the box never reached holds nothing of it.
+        for ref in changes.removed where ref.kind != .enroll && ref.kind != .stage {
+            if ref.kind == .envelope, witness.epoch > 0, let parts = ControlRecords.envelopeParts(ref.id), parts.epoch > witness.epoch { continue }
+            verdict.incidents.append(.removed(ref))
+        }
         return verdict
     }
 
