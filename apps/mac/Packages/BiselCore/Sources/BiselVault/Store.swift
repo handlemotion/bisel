@@ -159,6 +159,9 @@ public final class LocalStore: Sendable {
     public init(location: StoreLocation, secrets: (any SecretStore)? = nil) throws {
         self.secrets = secrets
         try FileManager.default.createDirectory(at: location.directory, withIntermediateDirectories: true)
+        // Owner only: the database, its WAL and (in dev builds) the software keys live here. Files are created with the process
+        // umask (usually world-readable) and the atomic writes replace them, so the directory is what keeps other users out.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: location.directory.path)
         var config = Configuration()
         config.busyMode = .timeout(5)       // the app and its extensions share this file
         pool = try DatabasePool(path: location.databaseURL.path, configuration: config)

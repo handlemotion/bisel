@@ -27,6 +27,8 @@ public final class SoftwareDeviceKeyStore: DeviceKeyStore, @unchecked Sendable {
         }
         #endif
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        // The key file is written, then narrowed to 0600: an owner-only directory closes that window.
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         url = directory.appendingPathComponent("software-keys.json")
         let message = "BISEL_SOFTWARE_KEYS: SOFTWARE KEY STORE IN USE. Device keys are in a plain file (\(url.path)). TEST ONLY, NOT SECURE."
         Self.log.fault("\(message, privacy: .public)")
