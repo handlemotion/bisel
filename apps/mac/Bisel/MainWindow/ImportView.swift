@@ -14,37 +14,31 @@ struct ImportView: View {
     @State private var debugPath = ""
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: theme.spacing.l) {
-                Text("Import").font(theme.font(theme.fonts.title, weight: .semibold))
-                Text("1Password (.1pux) or a CSV with logins, notes and one-time codes. Everything is encrypted on this Mac before it syncs. Delete the export file afterwards: it contains your passwords in the clear.")
-                    .font(theme.font(theme.fonts.subtitle)).foregroundStyle(theme.colors.secondaryText.color)
-                HStack {
-                    Button("Choose file…", systemImage: "doc") { picking = true }.accessibilityIdentifier("import-choose")
-                    if let fileName { Text(fileName).foregroundStyle(theme.colors.secondaryText.color) }
-                }
-                #if DEBUG
-                // Debug builds only: lets flow tests pick a file without driving the out-of-process open panel.
-                TextField("", text: $debugPath, prompt: Text("debug: file path")).textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("import-debug-path").onSubmit { load(URL(fileURLWithPath: debugPath)) }
-                #endif
-                ErrorLine(text: error)
-                if let o = outcome {
-                    VStack(alignment: .leading, spacing: theme.spacing.s) {
-                        Text("Found \(Self.items(o.items.count))").font(theme.font(theme.fonts.detail, weight: .medium)).accessibilityIdentifier("import-summary")
-                        Caption(Self.breakdown(o))
-                        if !o.skipped.isEmpty {
-                            Caption("\(o.skipped.count) skipped:")
-                            ForEach(Array(o.skipped.prefix(8).enumerated()), id: \.offset) { _, s in Caption("• " + s) }
-                        }
-                    }
-                    Button(working ? "Importing… \(progress)/\(o.items.count)" : "Import \(Self.items(o.items.count))") { run(o) }
-                        .buttonStyle(.borderedProminent).disabled(working || o.items.isEmpty).accessibilityIdentifier("import-run")
-                }
-                if let done { Text(done).foregroundStyle(theme.colors.success.color).accessibilityIdentifier("import-done") }
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
+            Caption("1Password (.1pux) or a CSV with logins, notes and one-time codes. Everything is encrypted on this Mac before it syncs. Delete the export file afterwards: it contains your passwords in the clear.")
+            HStack {
+                Button("Choose file…", systemImage: "doc") { picking = true }.controlSize(.small).accessibilityIdentifier("import-choose")
+                if let fileName { Text(fileName).foregroundStyle(theme.colors.secondaryText.color) }
             }
-            .padding(theme.spacing.l)
-            .frame(maxWidth: 640, alignment: .leading)
+            #if DEBUG
+            // Debug builds only: lets flow tests pick a file without driving the out-of-process open panel.
+            TextField("", text: $debugPath, prompt: Text("debug: file path")).textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("import-debug-path").onSubmit { load(URL(fileURLWithPath: debugPath)) }
+            #endif
+            ErrorLine(text: error)
+            if let o = outcome {
+                VStack(alignment: .leading, spacing: theme.spacing.s) {
+                    Text("Found \(Self.items(o.items.count))").font(theme.font(theme.fonts.detail, weight: .medium)).accessibilityIdentifier("import-summary")
+                    Caption(Self.breakdown(o))
+                    if !o.skipped.isEmpty {
+                        Caption("\(o.skipped.count) skipped:")
+                        ForEach(Array(o.skipped.prefix(8).enumerated()), id: \.offset) { _, s in Caption("• " + s) }
+                    }
+                }
+                Button(working ? "Importing… \(progress)/\(o.items.count)" : "Import \(Self.items(o.items.count))") { run(o) }
+                    .buttonStyle(.borderedProminent).disabled(working || o.items.isEmpty).accessibilityIdentifier("import-run")
+            }
+            if let done { Text(done).foregroundStyle(theme.colors.success.color).accessibilityIdentifier("import-done") }
         }
         .fileImporter(isPresented: $picking, allowedContentTypes: [UTType(filenameExtension: "1pux") ?? .zip, .commaSeparatedText, .plainText]) { r in
             guard case .success(let url) = r else { return }

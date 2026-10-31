@@ -14,11 +14,12 @@ struct DevicesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.m) {
             HStack {
-                Text("Devices").font(theme.font(theme.fonts.title, weight: .semibold))
+                Text("Devices").font(theme.font(theme.fonts.detail, weight: .medium))
                 Spacer()
-                Button("Refresh", systemImage: "arrow.clockwise") { Task { await load() } }.disabled(loading).accessibilityIdentifier("devices-refresh")
+                Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.borderless).help("Refresh").accessibilityLabel("Refresh").disabled(loading || service.isLocalOnly)
+                    .accessibilityIdentifier("devices-refresh")
             }
-            if service.isLocalOnly { Caption("This box is on this Mac only. Connect a server in Settings → Box to add your iPhone or another Mac.") }
             ErrorLine(text: error)
             ForEach(service.securityAlerts) { alert in
                 HStack(alignment: .top, spacing: theme.spacing.s) {
@@ -39,7 +40,12 @@ struct DevicesView: View {
                     .font(theme.font(theme.fonts.row)).foregroundStyle(theme.colors.danger.color)
                     .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("recovery-changed")
             }
-            List(devices) { d in
+            if service.isLocalOnly {
+                Caption("\(service.deviceName) holds the only copy of your box.")
+            } else if devices.isEmpty && !loading {
+                Caption("No devices yet.")
+            }
+            ForEach(devices) { d in
                 HStack(spacing: theme.spacing.m) {
                     Image(systemName: d.kind == "iphone" ? "iphone" : "laptopcomputer")
                         .foregroundStyle(d.isRevoked ? theme.colors.tertiaryText.color : theme.colors.accent.color)
@@ -63,15 +69,6 @@ struct DevicesView: View {
                 }
                 .padding(.vertical, 2)
             }
-            .scrollContentBackground(.hidden)
-            .overlay {
-                if service.isLocalOnly {
-                    ContentUnavailableView(service.deviceName, systemImage: "laptopcomputer",
-                                           description: Text("This Mac holds the only copy of your box."))
-                } else if devices.isEmpty && !loading {
-                    ContentUnavailableView("No devices", systemImage: "laptopcomputer")
-                }
-            }
             if !events.isEmpty {
                 DisclosureGroup("Recent activity") {
                     ForEach(events.suffix(10).reversed()) { e in
@@ -80,9 +77,8 @@ struct DevicesView: View {
                 }
                 .font(theme.font(theme.fonts.caption))
             }
-            Caption("A revoked device is refused by the server immediately. Adding a second Mac or an iPhone comes with the iPhone app.")
+            if !service.isLocalOnly { Caption("A revoked device can no longer sync, and the box key is replaced.") }
         }
-        .padding(theme.spacing.l)
         .task { await load() }
         .sheet(item: Binding(get: { revokeReport.map(ReportBox.init) }, set: { if $0 == nil { revokeReport = nil } })) { box in
             RevokeReportSheet(report: box.report) { revokeReport = nil }
