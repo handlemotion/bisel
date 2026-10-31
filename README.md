@@ -44,4 +44,4 @@ pnpm ci:local
 
 How to contribute is in [CONTRIBUTING.md](CONTRIBUTING.md), and how to report a vulnerability in [SECURITY.md](SECURITY.md). Rules for people and agents working in the repo are in [AGENTS.md](AGENTS.md).
 
-There's no license file yet, I'm still picking one.
+Bisel is licensed under the [GNU Affero General Public License v3.0](LICENSE), so if you run a modified version for other people, including as a service, you share your changes under the same license.

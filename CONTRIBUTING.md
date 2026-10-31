@@ -4,6 +4,10 @@ Thanks for wanting to help. Bisel is alpha and maintained by one person, so open
 
 Read [AGENTS.md](AGENTS.md) first: it has the repo rules for people and coding agents alike. The design lives in [docs/SPEC.md](docs/SPEC.md); a change that deviates from it updates the spec in the same pull request.
 
+## License of contributions
+
+Bisel is licensed under [AGPL-3.0](LICENSE), and so is everything you contribute. By opening a pull request you also grant the maintainer the right to distribute your contribution under other terms, which the Mac and iOS App Store builds need.
+
 ## Setup
 
 See [Building it](README.md#building-it). Nothing in development touches Cloudflare or a real iCloud account: the server runs as a local `wrangler dev` with a local D1, and the Swift flow tests use software keys.
