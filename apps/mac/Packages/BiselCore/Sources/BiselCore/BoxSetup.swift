@@ -140,14 +140,15 @@ public actor BoxSetup {
     // MARK: create
 
     /// A new box in this Apple Account's iCloud. Throws `.iCloud(reason)` when iCloud cannot take it (nothing is made) and
-    /// `.iCloudHasBox` when iCloud already holds one (offer pairing and restore; `createAnyway` makes a second box regardless).
+    /// `.iCloudHasBox` when iCloud already holds one (offer adding this Mac and restoring; one box per Apple Account).
     /// In a build without iCloud the box is made on this Mac only, as that build always did. Then `.showPhrase`.
     @discardableResult
     public func create(deviceName: String) async throws(SetupError) -> RecoveryPhrase {
         try await create(deviceName: deviceName, evenIfICloudHasBox: false)
     }
 
-    /// Same, when the person saw the box iCloud already holds and still wants a new, separate one.
+    /// Same, even over the box iCloud already holds: a second box in one Apple Account. Tests and debug only: the UI never
+    /// offers it (v1 decision, 2026-10-31: one box per Apple Account; `.iCloudHasBox` offers adding this Mac or restoring).
     @discardableResult
     public func createAnyway(deviceName: String) async throws(SetupError) -> RecoveryPhrase {
         try await create(deviceName: deviceName, evenIfICloudHasBox: true)

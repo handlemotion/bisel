@@ -272,20 +272,13 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     }
 
     /// "Create a box": in this Apple Account's iCloud (`BoxSetup.create`). Throws `SetupError.iCloud(reason)` when iCloud cannot
-    /// take it and `.iCloudHasBox` when iCloud already holds one; nothing is made then. BiselDev (no iCloud) makes it on this Mac
+    /// take it and `.iCloudHasBox` when iCloud already holds one (offer adding this Mac or restoring, never a second box); nothing
+    /// is made then. BiselDev (no iCloud) makes it on this Mac
     /// only. The server is not part of first run: it is opt-in from Settings (`connectServer`).
     func createBox(deviceName: String) async throws {
         guard let setup else { throw BiselVault.VaultError.notConfigured }
         isBusy = true; defer { isBusy = false }
         let phrase = try await setup.create(deviceName: deviceName)
-        await didCreate(phrase)
-    }
-
-    /// The person saw that iCloud already holds a box (`SetupError.iCloudHasBox`) and still wants a separate, new one.
-    func createBoxAnyway(deviceName: String) async throws {
-        guard let setup else { throw BiselVault.VaultError.notConfigured }
-        isBusy = true; defer { isBusy = false }
-        let phrase = try await setup.createAnyway(deviceName: deviceName)
         await didCreate(phrase)
     }
 
