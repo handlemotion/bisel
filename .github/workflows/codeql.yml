@@ -37,12 +37,12 @@ jobs:
             runner: ubuntu-24.04
             build-mode: none
             timeout: 15
+          # The CodeQL tracer fails on the xcode-27 image ("Bad CPU type" spawning the manifest), so Swift is scanned with
+          # the macos-26 image's default Xcode, on which the core suite also builds.
           - language: swift
-            runner: xcode-27
+            runner: macos-26
             build-mode: manual
             timeout: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,7 +59,7 @@ jobs:
       - name: Build BiselCore
         if: matrix.language == 'swift'
         working-directory: apps/mac/Packages/BiselCore
-        run: swift build --traits SoftwareKeys
+        run: swift build --traits SoftwareKeys --disable-sandbox
 
       - name: Analyze
         uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
