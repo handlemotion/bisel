@@ -7,9 +7,11 @@ struct DevicesView: View {
     @State private var devices: [DeviceInfo] = []
     @State private var loading = false
     @State private var error: String?
-    @State private var revoking: DeviceInfo?
     @State private var events: [ServerEvent] = []
-    @State private var revokeReport: RotationReport?
+    /// One sheet at a time: the revoke confirmation, then the new phrase, then what the revoked device could have read.
+    @State private var sheet: DevicesSheet?
+    @State private var queued: [DevicesSheet] = []
+    @State private var working = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.m) {
@@ -29,7 +31,13 @@ struct DevicesView: View {
                         Caption(alert.date.formatted(date: .abbreviated, time: .shortened))
                     }
                     Spacer()
-                    Button("Dismiss") { service.dismissAlert(alert.id) }.buttonStyle(.borderless).accessibilityIdentifier("dismiss-alert")
+                    VStack(alignment: .trailing, spacing: theme.spacing.s) {
+                        Button("Dismiss") { service.dismissAlert(alert.id) }.buttonStyle(.borderless).accessibilityIdentifier("dismiss-alert")
+                        if alert.recoveredDeviceID != nil {
+                            Button("New phrase and revoke") { Task { await answer(alert) } }
+                                .controlSize(.small).disabled(working).accessibilityIdentifier("alert-new-phrase-revoke")
+                        }
+                    }
                 }
                 .padding(theme.spacing.s)
                 .background(RoundedRectangle(cornerRadius: 8).fill(theme.colors.danger.color.opacity(0.12)))
@@ -64,7 +72,8 @@ struct DevicesView: View {
                     }
                     Spacer()
                     if !d.isRevoked && d.id != service.deviceID {
-                        Button(d.isPending() ? "Cancel it" : "Revoke", role: .destructive) { revoking = d }.accessibilityIdentifier("revoke-\(Self.clean(d.name))")
+                        Button(d.isPending() ? "Cancel it" : "Revoke", role: .destructive) { sheet = .confirm(d) }
+                            .disabled(working).accessibilityIdentifier("revoke-\(Self.clean(d.name))")
                     }
                 }
                 .padding(.vertical, 2)
@@ -80,14 +89,31 @@ struct DevicesView: View {
             if !service.isLocalOnly { Caption("A revoked device can no longer sync, and the box key is replaced.") }
         }
         .task { await load() }
-        .sheet(item: Binding(get: { revokeReport.map(ReportBox.init) }, set: { if $0 == nil { revokeReport = nil } })) { box in
-            RevokeReportSheet(report: box.report) { revokeReport = nil }
+        .sheet(item: $sheet, onDismiss: showNext) { shown in
+            switch shown {
+            case .confirm(let d):
+                RevokeConfirmSheet(name: Self.clean(d.name), onICloud: service.isOnICloud) { newPhrase in
+                    sheet = nil
+                    Task { await revoke(d, newPhrase: newPhrase) }
+                } cancel: { sheet = nil }
+            case .phrase(let phrase):
+                PhraseGateView(service: service, phrase: phrase, title: "Your new recovery phrase") { sheet = nil; service.confirmPhraseStored() }
+                    .frame(width: 640, height: 520).themedPage(ThemeStore.shared.current)
+            case .report(let report):
+                RevokeReportSheet(report: report, onICloud: service.isOnICloud) { sheet = nil }
+            }
         }
-        .confirmationDialog("Revoke “\(Self.clean(revoking?.name ?? ""))”?", isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }),
-                            titleVisibility: .visible) {
-            Button("Revoke", role: .destructive) { if let d = revoking { Task { await revoke(d) } } }.accessibilityIdentifier("revoke-confirm")
-            Button("Cancel", role: .cancel) {}
-        } message: { Text("It can no longer sync, and the box key is replaced. Anything it already saw stays readable to whoever has that device, so change the passwords of sensitive accounts. Touch ID is required.") }
+    }
+
+    /// The next sheet in line, once the one on screen is gone.
+    private func showNext() {
+        guard sheet == nil, !queued.isEmpty else { return }
+        sheet = queued.removeFirst()
+    }
+
+    private func present(_ sheets: [DevicesSheet]) {
+        queued = sheets
+        if sheet == nil { showNext() }
     }
 
     /// Device names come from the server: drop control and bidirectional-override characters before showing them.
@@ -123,39 +149,133 @@ struct DevicesView: View {
         events = await service.recentEvents()
     }
 
-    private func revoke(_ d: DeviceInfo) async {
+    private func revoke(_ d: DeviceInfo, newPhrase: Bool) async {
+        working = true; defer { working = false }
         do {
             let report = try await service.revoke(deviceID: d.id)
-            await load()
-            if !report.secretsToChange.isEmpty { revokeReport = report }
+            let outcome = newPhrase ? await service.replacePhrase(after: report) : RevokeOutcome(report: report, phrase: nil)
+            await finished(outcome)
         }
         catch KeyStoreError.userCancelled { error = "Touch ID cancelled, nothing was revoked" }
         catch { self.error = describe(error) }
     }
+
+    /// The alert's one action: revoke the device that recovered with the phrase, then replace the phrase.
+    private func answer(_ alert: SecurityAlert) async {
+        working = true; defer { working = false }
+        do { await finished(try await service.answerRecovery(alert)) }
+        catch KeyStoreError.userCancelled { error = "Touch ID cancelled, nothing was revoked" }
+        catch { self.error = describe(error) }
+    }
+
+    private func finished(_ outcome: RevokeOutcome) async {
+        await load()
+        error = outcome.phraseError.map { "The device was revoked, but the recovery phrase was not replaced (\($0)). Replace it in Account settings." }
+        var next: [DevicesSheet] = []
+        if let phrase = outcome.phrase { next.append(.phrase(phrase)) }
+        if !outcome.report.secretsToChange.isEmpty || service.isOnICloud { next.append(.report(outcome.report)) }
+        present(next)
+    }
 }
 
-private struct ReportBox: Identifiable {
-    let report: RotationReport
-    var id: Int { report.epoch }
+private enum DevicesSheet: Identifiable {
+    case confirm(DeviceInfo)
+    case phrase(RecoveryPhrase)
+    case report(RotationReport)
+
+    var id: String {
+        switch self {
+        case .confirm(let d): "confirm-\(d.id)"
+        case .phrase: "phrase"
+        case .report(let r): "report-\(r.epoch)"
+        }
+    }
+}
+
+/// Before a revoke: what it does, the option to replace the recovery phrase too (on by default), and on iCloud, that the device
+/// must also leave the Apple Account.
+private struct RevokeConfirmSheet: View {
+    let name: String
+    let onICloud: Bool
+    let revoke: (_ newPhrase: Bool) -> Void
+    let cancel: () -> Void
+    @State private var newPhrase = true
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacing.m) {
+            Text("Revoke “\(name)”?").font(theme.font(theme.fonts.title, weight: .semibold))
+            Caption("It can no longer sync, and the box key is replaced. Anything it already saw stays readable to whoever has that device, so change the passwords of sensitive accounts. Touch ID is required.")
+                .fixedSize(horizontal: false, vertical: true)
+            if onICloud { AppleAccountNote(name: name) }
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle("Also replace the recovery phrase", isOn: $newPhrase).toggleStyle(.checkbox)
+                    .accessibilityIdentifier("revoke-new-phrase")
+                Caption("Until the phrase changes, the revoked device can still make backup files that your phrase opens.")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel).buttonStyle(PillButtonStyle(primary: false)).keyboardShortcut(.cancelAction)
+                Button("Revoke", role: .destructive) { revoke(newPhrase) }
+                    .buttonStyle(PillButtonStyle()).accessibilityIdentifier("revoke-confirm")
+            }
+        }
+        .padding(theme.spacing.l)
+        .frame(width: 420)
+    }
+}
+
+/// iCloud has no server to shut a device out: a revoked Mac signed in to the same Apple Account keeps reaching the box's storage
+/// until it leaves that account (SECURITY-REVIEW.md C9).
+private struct AppleAccountNote: View {
+    let name: String
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: theme.spacing.s) {
+            Caption("“\(name)” is still signed in to your Apple Account, so it can still reach the box in iCloud. Remove it from your Apple Account too.")
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Open Apple Account Settings") { AppleAccountSettings.openDevices() }
+                .controlSize(.small).accessibilityIdentifier("open-apple-account")
+        }
+    }
+}
+
+/// System Settings at the Apple Account's devices, or at least the Apple Account pane.
+@MainActor
+enum AppleAccountSettings {
+    static func openDevices() {
+        let urls = ["x-apple.systempreferences:com.apple.systempreferences.AppleIDSettings",
+                    "x-apple.systempreferences:com.apple.preferences.AppleIDPrefPane"].compactMap(URL.init(string:))
+        for url in urls where NSWorkspace.shared.open(url) { return }
+    }
 }
 
 /// After a revoke: the device is cut off and the box key replaced, but whatever it already read stays read.
 private struct RevokeReportSheet: View {
     let report: RotationReport
+    let onICloud: Bool
     let done: () -> Void
     @Environment(\.theme) private var theme
 
     var body: some View {
+        let name = report.revokedDeviceName ?? "The device"
         VStack(alignment: .leading, spacing: theme.spacing.m) {
-            Text("Change these passwords").font(theme.font(theme.fonts.title, weight: .semibold))
-            Caption("“\(report.revokedDeviceName ?? "The device")” can no longer sync, but it may have already read these logins. Change them at the sites.")
-            List(report.secretsToChange) { item in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.title).font(theme.font(theme.fonts.row, weight: .medium))
-                    if let u = item.username, !u.isEmpty { Caption(u) }
+            if report.secretsToChange.isEmpty {
+                Text("Remove it from your Apple Account").font(theme.font(theme.fonts.title, weight: .semibold))
+            } else {
+                Text("Change these passwords").font(theme.font(theme.fonts.title, weight: .semibold))
+                Caption("“\(name)” can no longer sync, but it may have already read these logins. Change them at the sites.")
+                List(report.secretsToChange) { item in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.title).font(theme.font(theme.fonts.row, weight: .medium))
+                        if let u = item.username, !u.isEmpty { Caption(u) }
+                    }
                 }
+                .frame(minHeight: 160)
             }
-            .frame(minHeight: 160)
+            if onICloud { AppleAccountNote(name: name) }
             HStack { Spacer(); Button("Done", action: done).keyboardShortcut(.defaultAction).accessibilityIdentifier("revoke-report-done") }
         }
         .padding(theme.spacing.l)
