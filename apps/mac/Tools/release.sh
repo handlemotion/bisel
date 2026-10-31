@@ -131,6 +131,7 @@ ent com.apple.developer.icloud-container-identifiers | grep -q "$CONTAINER" || d
 # the data-protection keychain fail with -34018, so the app could not create or open device keys.
 [[ "$(ent com.apple.application-identifier)" == "$TEAM.$BUNDLE_ID" ]] || die "com.apple.application-identifier is not $TEAM.$BUNDLE_ID: the keychain would fail with -34018."
 [[ "$(ent com.apple.developer.team-identifier)" == "$TEAM" ]] || die "com.apple.developer.team-identifier is not $TEAM: the keychain would fail with -34018."
+ent keychain-access-groups | grep -q "$TEAM.app.bisel" || die "keychain-access-groups does not pin $TEAM.app.bisel: device keys would land in another group."
 ent com.apple.security.get-task-allow | grep -q true && die "get-task-allow is in the signed entitlements."
 [[ -f "$APP/Contents/embedded.provisionprofile" ]] || die "no embedded provisioning profile: macOS would kill the app at launch."
 "$APPLE/Tools/check-release.sh" "$APP"   # get-task-allow, software keys, fixture and BISEL_DEV_ hooks

@@ -24,9 +24,16 @@ enum BiselEnvironment {
         Log.app.fault("BISEL_SOFTWARE_KEYS: this build keeps device keys in a PLAIN FILE in \(directory.path, privacy: .public). DEBUG/UNSIGNED ONLY. Not a Secure Enclave run.")
         return SoftwareDeviceKeyStore(directory: directory)
         #else
-        // Needs a signed build (-34018 otherwise). Access group stays nil until a Team ID exists (SPEC §8).
-        return SecureEnclaveDeviceKeyStore(accessGroup: nil)
+        // Needs a signed build (-34018 otherwise). The secret store follows the key store's group (Vault.Configuration).
+        return SecureEnclaveDeviceKeyStore(accessGroup: keychainGroup)
         #endif
+    }
+
+    /// `<team>.app.bisel`, pinned in `keychain-access-groups` so a later AutoFill extension or iPhone app can share the device keys
+    /// and secrets. Changing it strands existing device keys (RELEASE.md). Nil when unsigned (no team prefix): the default group.
+    static var keychainGroup: String? {
+        guard let group = Bundle.main.object(forInfoDictionaryKey: "BiselKeychainGroup") as? String, group.hasSuffix(".app.bisel") else { return nil }
+        return group
     }
 
     static var usesSoftwareKeys: Bool {
