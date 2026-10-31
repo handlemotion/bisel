@@ -888,7 +888,7 @@ public actor Vault {
             // manifest (or an item the box already held), and only then upload anything sealed under it.
             report = try await engine.run(pushing: false, audit: audit)
             if report.rotationAdopted { lock(); return report }   // another rotation arrived: the key in memory is already stale
-            if let held {   // locked: nothing can be checked, nothing is uploaded
+            if let held {   // unlocked: check the key, then upload; locked: nothing can be checked, nothing is uploaded
                 try confirmBoxKey(held, lane: box.id.rawValue)
                 var next = try await engine.run(audit: audit)
                 next.pulled += report.pulled
