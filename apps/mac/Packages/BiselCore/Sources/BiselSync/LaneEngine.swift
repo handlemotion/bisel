@@ -78,9 +78,14 @@ public struct LaneEngine: Sendable {
         if pushing { try await push(&report, epoch: epoch, staleEpoch: &staleEpoch) }
         var serverRevs: [String: Int] = [:]
         let reseeding = try store.reseedPending()
-        let serverEpoch = try await pull(&report, serverRevs: &serverRevs, fromStart: reseeding || audit, auditing: audit)
-        if staleEpoch || serverEpoch > epoch {
-            try await adoptRotation(&report)
+        let serverEpoch = try await pull(&report, serverRevs: &serverRevs, fromStart: reseeding || audit, auditing: audit,
+                                         witnessed: await witnessedChain())
+        // On a lane that is only storage, a rotation is adopted only once the verifier pinned its head: a write refused as stale
+        // says only that the lane shows a newer head, and the head the lane shows may be one the verifier held back (a fork the
+        // freshness witness contradicts) or quarantined (a rollback).
+        let rotated = lane.capabilities.headIsCursor ? staleEpoch || serverEpoch > epoch : serverEpoch > epoch
+        if rotated {
+            try await adoptRotation(&report, verifiedEpoch: lane.capabilities.headIsCursor ? nil : serverEpoch)
         } else if pushing, let vk = vaultKey() {
             if reseeding {
                 // The server was reset (restored from an older state, or rebuilt): put back what only this device still has.
@@ -116,8 +121,10 @@ public struct LaneEngine: Sendable {
 
     /// Another device rotated VK: take this device's new envelope. If edits sealed under the old key are still
     /// pending, remember the old envelope so the next unlock can re-wrap them.
-    private func adoptRotation(_ report: inout SyncReport) async throws {
+    /// `verifiedEpoch`: on a lane that is only storage, the epoch the verifier pinned; an envelope for any other is not taken.
+    private func adoptRotation(_ report: inout SyncReport, verifiedEpoch: Int?) async throws {
         let (envelope, epoch) = try await lane.ownEnvelope()
+        if let verifiedEpoch, epoch != verifiedEpoch { return }
         guard var identity = try store.identity() else { return }
         // The old key is needed at the next unlock for edits sealed under it and for the trash (versions this device kept).
         if identity.previousEnvelope == nil,
@@ -306,7 +313,8 @@ public struct LaneEngine: Sendable {
     }
 
     /// Returns the lane's epoch as of the last page.
-    private func pull(_ report: inout SyncReport, serverRevs: inout [String: Int], fromStart: Bool, auditing: Bool) async throws -> Int {
+    private func pull(_ report: inout SyncReport, serverRevs: inout [String: Int], fromStart: Bool, auditing: Bool,
+                      witnessed: [ControlRecords.AKLink]?) async throws -> Int {
         var state = try store.laneState(laneKey)
         var known = witness(state)
         var cursor = fromStart ? nil : state.cursor.map(LaneCursor.init)
@@ -316,7 +324,8 @@ public struct LaneEngine: Sendable {
         while true {
             let changes = try await lane.fetch(since: cursor, limit: 200)
             // A lane that reports less than it already told us is rolling us back or lying.
-            let verdict = try verifier.verify(changes, since: cursor, knownHead: state.knownHead, witness: &known, adminKey: adminKey())
+            let verdict = try verifier.verify(changes, since: cursor, knownHead: state.knownHead, witness: &known, adminKey: adminKey(),
+                                              witnessed: witnessed)
             report.quarantined += verdict.quarantined.count
             report.incidents += verdict.incidents
             try store.quarantine(laneKey, verdict.quarantined.map { (kind: $0.record.kind.rawValue, id: $0.record.id, rev: $0.record.rev,
@@ -413,6 +422,15 @@ public struct LaneEngine: Sendable {
                 report.repaired += 1
             }
         }
+    }
+
+    /// The admin-key chain the freshness witness holds for the box this device pinned, if it verifies; read before the pull so the
+    /// verifier can hold back a head that moves to a new epoch on another chain (`LaneVerifier.verify`). Nil when there is no
+    /// witness, it cannot be reached, holds nothing usable, or this device has pinned nothing yet.
+    private func witnessedChain() async -> [ControlRecords.AKLink]? {
+        guard let freshness, !lane.capabilities.headIsCursor, let state = try? store.laneState(laneKey),
+              let root = witness(state).aks.first?.ak, let stored = try? await freshness.read(FreshnessStatement.key(root: root)) else { return nil }
+        return LaneVerifier.statement(stored, root: root)?.aks
     }
 
     /// Checks the lane against the freshness witness and, when this device knows more (or the witness holds a fork or nothing

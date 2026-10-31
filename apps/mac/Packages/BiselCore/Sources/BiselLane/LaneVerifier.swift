@@ -51,11 +51,15 @@ public struct LaneVerifier: Sendable {
     /// - `witness`: what this device already verified; updated in place (the caller persists it only if this returns).
     /// - `adminKey`: the admin public key derived from the vault key this device holds, nil while locked. It anchors a
     ///   device that has no pin yet.
+    /// - `witnessed`: the admin-key chain the freshness witness holds for this box, already checked to start at the pinned root
+    ///   (nil: no witness, or nothing usable in it). A head that moves the box to a new epoch on a chain that parts from it
+    ///   waits (see step 1).
     ///
     /// Throws `IntegrityError.serverRolledBack` when the lane reports a position (or a writer's counter) lower than one this
     /// device already saw, and `.invalidCursor` when its answer contradicts itself: records or a cursor beyond its own head, a
     /// cursor that went backwards, or no progress on a page that says there is more.
-    public func verify(_ changes: LaneChanges, since: LaneCursor?, knownHead: Int, witness: inout LaneWitness, adminKey: Data?) throws -> LaneVerdict {
+    public func verify(_ changes: LaneChanges, since: LaneCursor?, knownHead: Int, witness: inout LaneWitness, adminKey: Data?,
+                       witnessed: [ControlRecords.AKLink]? = nil) throws -> LaneVerdict {
         var verdict = LaneVerdict(accepted: [], quarantined: [], incidents: [], meta: nil)
         if let meta = changes.meta {
             try checkPosition(changes, meta: meta, since: since, knownHead: knownHead)
@@ -63,7 +67,7 @@ public struct LaneVerifier: Sendable {
             var control = changes.upserts.filter { !$0.isItemLike }
             control += witness.held.values.map(\.record).filter { held in !control.contains { $0.kind == held.kind && $0.id == held.id } }
             witness.held = [:]
-            try verifyControl(control, witness: &witness, adminKey: adminKey, into: &verdict)
+            try verifyControl(control, witness: &witness, adminKey: adminKey, witnessed: witnessed, into: &verdict)
             let meta = LaneMeta(epoch: max(witness.epoch, 1), headSeq: witness.position, members: witness.members, events: witness.events,
                                 recovery: witness.recovery)
             if meta.headSeq < knownHead { throw IntegrityError.serverRolledBack(known: knownHead, reported: meta.headSeq) }
@@ -105,7 +109,8 @@ public struct LaneVerifier: Sendable {
 
     // MARK: control records
 
-    private func verifyControl(_ records: [LaneRecord], witness w: inout LaneWitness, adminKey: Data?, into verdict: inout LaneVerdict) throws {
+    private func verifyControl(_ records: [LaneRecord], witness w: inout LaneWitness, adminKey: Data?, witnessed: [ControlRecords.AKLink]?,
+                               into verdict: inout LaneVerdict) throws {
         func quarantine(_ r: LaneRecord, _ why: LaneQuarantineReason) { verdict.quarantined.append(.init(record: r, reason: why)) }
         func hold(_ r: LaneRecord) {
             if w.held.count >= Self.maxHeld, w.held[heldKey(r)] == nil { quarantine(r, .malformed) } else { w.held[heldKey(r)] = HeldRecord(r) }
@@ -119,6 +124,11 @@ public struct LaneVerifier: Sendable {
             if let pinned = w.aks.last {
                 // The chain must still contain the key this device pinned.
                 guard head.aks.contains(where: { $0.epoch == pinned.epoch && $0.ak == pinned.ak }) else { quarantine(r, .unpinnedSigner); continue }
+                // A device that slept through a revoke still pins the epoch the revoked device was cut off in, and that device kept
+                // its admin key: an epoch of its own, chained from that key, extends this pin as well as the real one does. Only a
+                // second store can tell them apart. Against a witness that holds another chain the head waits, unpinned, until
+                // the witness agrees (a device of the box rewrites a forked witness and puts the real head back).
+                if head.epoch > w.epoch, let witnessed, Self.forks(head.aks, witnessed) { hold(r); continue }
             } else if let adminKey {
                 guard head.aks.contains(where: { $0.ak == adminKey }) else { quarantine(r, .unpinnedSigner); continue }
             } else {

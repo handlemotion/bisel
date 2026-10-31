@@ -98,18 +98,29 @@ extension LaneVerifier {
     /// (a fork); it cannot sign one for the real current epoch.
     public func freshness(_ signed: SignedFreshness?, chain: [ControlRecords.AKLink], counter: Int?) -> FreshnessVerdict {
         guard let root = chain.first?.ak else { return .init(state: .unwitnessed, rewrite: false) }
-        guard let signed, let s = ControlRecords.decode(FreshnessStatement.self, signed.statement), s.v == 1,
-              ControlRecords.chainValid(s.aks, epoch: s.epoch), s.aks.first?.ak == root, let last = s.aks.last,
-              let pub = try? Curve25519.Signing.PublicKey(rawRepresentation: last.ak),
-              pub.isValidSignature(signed.sig, for: FreshnessStatement.message(signed.statement)),
-              s.head == FreshnessStatement.headHash(epoch: s.epoch, aks: s.aks) else { return .init(state: .unwitnessed, rewrite: true) }
-        let shared = zip(s.aks, chain).prefix { $0.epoch == $1.epoch && $0.ak == $1.ak }.count
-        if shared < min(s.aks.count, chain.count) { return .init(state: .forked, rewrite: true) }
+        guard let s = Self.statement(signed, root: root) else { return .init(state: .unwitnessed, rewrite: true) }
+        if Self.forks(s.aks, chain) { return .init(state: .forked, rewrite: true) }
         if s.aks.count > chain.count { return .init(state: .laneBehind, rewrite: false) }
         if s.aks.count < chain.count { return .init(state: .current, rewrite: true) }
         guard let counter else { return .init(state: .current, rewrite: false) }
         if s.counter > counter { return .init(state: .laneBehind, rewrite: false) }
         return .init(state: .current, rewrite: s.counter < counter)
+    }
+
+    /// The statement in `signed` if it holds together for the box whose chain starts at `root`: a well-formed chain from that
+    /// root, signed by its own last key. Says nothing yet about whether it agrees with the lane.
+    public static func statement(_ signed: SignedFreshness?, root: Data) -> FreshnessStatement? {
+        guard let signed, let s = ControlRecords.decode(FreshnessStatement.self, signed.statement), s.v == 1,
+              ControlRecords.chainValid(s.aks, epoch: s.epoch), s.aks.first?.ak == root, let last = s.aks.last,
+              let pub = try? Curve25519.Signing.PublicKey(rawRepresentation: last.ak),
+              pub.isValidSignature(signed.sig, for: FreshnessStatement.message(signed.statement)),
+              s.head == FreshnessStatement.headHash(epoch: s.epoch, aks: s.aks) else { return nil }
+        return s
+    }
+
+    /// Whether two admin-key chains part ways: neither is a prefix of the other.
+    static func forks(_ a: [ControlRecords.AKLink], _ b: [ControlRecords.AKLink]) -> Bool {
+        zip(a, b).prefix { $0.epoch == $1.epoch && $0.ak == $1.ak }.count < min(a.count, b.count)
     }
 }
 
