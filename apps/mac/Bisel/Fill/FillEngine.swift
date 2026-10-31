@@ -91,7 +91,7 @@ final class FillEngine {
 
         if case .explicit = plan {} else if !itemHosts.isEmpty {
             let page = AccessibilityInspector.pageURL(of: target, field: field)?.host()
-            let isBrowser = field.bundleID.map(FillOrigin.browserBundleIDs.contains) ?? false
+            let isBrowser = FillOrigin.isBrowser(field.bundleID)
             if let why = FillOrigin.refusal(pageHost: page, isBrowser: isBrowser, itemHosts: itemHosts) { return .failed(why) }
         }
 

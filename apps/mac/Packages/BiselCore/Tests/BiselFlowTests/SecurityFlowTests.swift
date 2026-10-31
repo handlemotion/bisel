@@ -428,6 +428,48 @@ struct SecurityFlowTests {
         }
     }
 
+    // MARK: Local surface audit (2026-10-31), fill origin
+
+    @Test("a login is never typed into a lookalike, another tenant of a shared host, or a page under a bare TLD")
+    func fillOriginRefusesLookalikesAndOtherTenants() {
+        // A few rules of the Public Suffix List (the app passes the bundled list): ICANN suffixes and private shared-hosting ones.
+        let suffixes: Set<String> = ["com", "net", "uk", "co.uk", "io", "github.io", "app", "vercel.app", "myshopify.com", "bank"]
+        func fits(_ page: String, _ itemURL: String) -> Bool {
+            let p = SiteMatch.normalized(page)
+            return SiteMatch.hosts(of: [itemURL]).contains { SiteMatch.matches(page: p, item: $0, isPublicSuffix: { suffixes.contains($0) || !$0.contains(".") }) }
+        }
+
+        // The same site and its subdomains, both ways.
+        #expect(fits("bank.com", "https://bank.com/login"))
+        #expect(fits("WWW.Bank.com.", "bank.com"))
+        #expect(fits("login.bank.com", "https://www.bank.com"))
+        #expect(fits("bank.com", "https://login.bank.com"))
+        #expect(fits("alice.github.io", "https://alice.github.io/admin"))
+        #expect(fits("shop.example.co.uk", "example.co.uk"))
+
+        // Lookalikes and look-through tricks.
+        #expect(!fits("bank.com.evil.net", "bank.com"))
+        #expect(!fits("evilbank.com", "bank.com"))
+        #expect(!fits("xn--bnk-sna.com", "bank.com"), "a homograph is another host")
+        #expect(!fits("bank.com", "https://bank.com@evil.net"), "the item's host is evil.net, the user-info is not a host")
+
+        // A public suffix is not a site: other tenants of a shared host, or any page under a TLD saved as an address.
+        #expect(!fits("bob.github.io", "https://alice.github.io"))
+        #expect(!fits("attacker.github.io", "https://github.io"))
+        #expect(!fits("github.io", "https://alice.github.io"))
+        #expect(!fits("evil-store.myshopify.com", "myshopify.com"))
+        #expect(!fits("phish.vercel.app", "vercel.app"))
+        #expect(!fits("evil.com", "com"))
+        #expect(!fits("anything.co.uk", "co.uk"))
+        #expect(!fits("phish.bank", "bank"), "`.bank` is a real TLD")
+        #expect(!fits("intranet.localhost", "localhost"))
+
+        // IP addresses only match exactly.
+        #expect(fits("192.168.1.1", "http://192.168.1.1:8080"))
+        #expect(!fits("10.192.168.1.1", "192.168.1.1"))
+        #expect(!fits("1.1", "192.168.1.1"))
+    }
+
     // MARK: helpers
 
     private func fingerprintBits(_ fingerprint: String) -> Int { fingerprint.filter { $0 != "-" }.count * 4 }

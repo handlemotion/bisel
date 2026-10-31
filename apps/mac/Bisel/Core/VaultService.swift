@@ -125,6 +125,12 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     func start() async {
         lockMonitor = LockMonitor(service: self)
         lockMonitor?.start()
+        BiometricGate.enrollmentChanged = { [weak self] in
+            // Only an open box is at stake; a locked one already refuses at the Secure Enclave, and re-adding this Mac must not stall.
+            guard let self, self.isUnlocked, self.vault?.deviceKeyStatus() == .biometryChanged else { return false }
+            self.lock(reason: "Touch ID enrolment changed")
+            return true
+        }
         await refreshPhase()
         listenForLaneSignals()
     }
