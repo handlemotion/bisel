@@ -1168,27 +1168,27 @@ test("failed-auth backoff: it slows the offender, never locks out a valid signat
   for (let i = 0; i < 19; i++)
     expect((await attacker.call({ ...stranger, id: a.id }, "GET", "/v1/sync")).status).toBe(404);
 
-  // From the 20th on, failing requests from this address are delayed (AUTH_BACKOFF_MS=400 in the test server) ...
+  // From the 20th on, failing requests from this address are delayed (AUTH_BACKOFF_MS=2000 in the test server, plus jitter) ...
   for (let i = 0; i < 3; i++) {
     const slow = await timed(() => attacker.call({ ...stranger, id: a.id }, "GET", "/v1/sync"));
     expect(slow.status).toBe(404);
-    expect(slow.ms).toBeGreaterThan(350);
+    expect(slow.ms).toBeGreaterThan(1900);
   }
   // ... for every kind of failure, unknown routes included, so the delay says nothing about what exists.
   const slowUnknown = await timed(() => attacker.call(stranger, "GET", "/v1/nope"));
   expect(slowUnknown.status).toBe(404);
-  expect(slowUnknown.ms).toBeGreaterThan(350);
+  expect(slowUnknown.ms).toBeGreaterThan(1900);
 
   // The owner's valid, signed requests from that very address are still served, promptly, however long the offender keeps going.
   for (let i = 0; i < 5; i++) {
     const good = await timed(() => attacker.call(a, "GET", "/v1/sync"));
     expect(good.status).toBe(200);
-    expect(good.ms).toBeLessThan(350);
+    expect(good.ms).toBeLessThan(1500);
   }
   // Other addresses never noticed.
   const fine = await timed(() => elsewhere.call({ ...stranger, id: a.id }, "GET", "/v1/sync"));
   expect(fine.status).toBe(404);
-  expect(fine.ms).toBeLessThan(350);
+  expect(fine.ms).toBeLessThan(1500);
   expect((await elsewhere.call(a, "GET", "/v1/sync")).status).toBe(200);
 });
 
