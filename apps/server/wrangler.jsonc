@@ -55,8 +55,8 @@
 
   // ---- production --------------------------------------------------------------------------
   // Deploy only by following DEPLOY.md: `pnpm exec wrangler deploy --env prod`.
-  // Every REPLACE_… value below must be filled in; wrangler refuses to deploy while the D1 id is a
-  // placeholder. No secret lives in this file: BOOTSTRAP_TOKEN is a Worker secret
+  // The D1 id below is the maintainer's database (an id is not a credential: using it needs that account's API token).
+  // A fork deploying its own server replaces it with the id from its own `wrangler d1 create bisel`. No secret lives in this file: BOOTSTRAP_TOKEN is a Worker secret
   // (`wrangler secret put BOOTSTRAP_TOKEN --env prod`); BETTER_AUTH_SECRET (the dashboard session signing key) is the same kind.
   "env": {
     "prod": {
@@ -81,7 +81,7 @@
         {
           "binding": "DB",
           "database_name": "bisel",
-          // 5a01b8bc-fb58-4ac7-92f7-b600869c8f0c: the id printed by `wrangler d1 create bisel` (DEPLOY.md step 3).
+          // The id printed by `wrangler d1 create bisel` (DEPLOY.md section 3).
           "database_id": "5a01b8bc-fb58-4ac7-92f7-b600869c8f0c",
           "migrations_dir": "migrations",
         },

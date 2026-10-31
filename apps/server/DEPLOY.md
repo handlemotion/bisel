@@ -1,14 +1,18 @@
 # Deploying and running the bisel server (box.bisel.app)
 
+> **Deferred.** Bisel is macOS-first and CloudKit-first now. The server keeps working and stays in the repo as an optional sync lane,
+> but it is not the default path and is not being developed further for now. This runbook is for whoever runs their own instance.
+
 Status (2026-10-30): **live**, multi-tenant, with passkey accounts. The Worker is `env.prod` in `wrangler.jsonc`: name `bisel-server`,
 Custom Domain `box.bisel.app`, `workers.dev` and preview URLs off. The production D1 database (`bisel`, id in `wrangler.jsonc`) has
 migrations **0001 to 0006** applied and holds no real box yet. Nothing in this file has been run by the session that wrote it:
 every command is for the owner (or a session on the owner's machine).
 
-Run every command from `bisel/server/` with the pinned wrangler (`pnpm exec wrangler`, never a global one). Every command that touches
-Cloudflare carries `--env prod` and, for D1, `--remote` (without `--remote` D1 commands only touch the local dev database). Secrets live
-in Doppler (project `bisel`, config `prd`; `doppler setup` binds this directory): `doppler run -- <command>` injects
-`CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`. Never print a secret or a recovery phrase into a chat, a log or a repo file.
+Run every command from `apps/server/` with the pinned wrangler (`pnpm exec wrangler`, never a global one). Every command that touches
+Cloudflare carries `--env prod` and, for D1, `--remote` (without `--remote` D1 commands only touch the local dev database). Deploy credentials
+(`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`) come from a secrets manager, never a file in the repo. The commands below use Doppler
+(`doppler setup` binds this directory to your own `<project>`/`<config>`; `doppler run -- <command>` injects both); any manager that sets
+those two environment variables works the same way. Never print a secret or a recovery phrase into a chat, a log or a repo file.
 
 ## 1. What is deployed
 
@@ -90,7 +94,7 @@ Mac app build); `scripts/check-all.sh --release` before shipping the Mac app.
 D1 Time Travel is always on: point-in-time restore for 30 days on Workers Paid, 7 on Free. `pnpm exec wrangler d1 time-travel info bisel --env prod`
 prints the current bookmark. It restores the **whole database** (every box and account), see 5.2. Independent of Cloudflare, every device holds
 its own copy and the app's `.bisel-backup` plus the 24 words rebuilds a box on any new database. A SQL dump (ciphertext plus account rows, treat it as
-sensitive): `pnpm exec wrangler d1 export bisel --env prod --remote --output ~/bisel-d1-$(date +%F).sql`. Scheduled exports: section 7.
+sensitive): `pnpm exec wrangler d1 export bisel --env prod --remote --output <backup-dir>/bisel-d1-$(date +%F).sql`. Scheduled exports: section 7.
 
 ## 5. Runbook
 
