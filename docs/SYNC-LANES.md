@@ -106,7 +106,7 @@ Rule of thumb: **anything the server used to refuse, the verifier now rejects af
 
 Facts below are from Apple documentation and community reports gathered during this review; items marked **verify** were not confirmed against a current official page.
 
-**Container and environment.** Private database only. Container `iCloud.app.bisel.mac` as briefed. See open decision D1: if the iPhone app (M5) will share the box, the container should be shared across bundle ids, e.g. `iCloud.app.bisel`; container ids cannot be renamed. Development builds use the Development environment; a notarized Developer ID build uses **Production**, which needs the record type/fields deployed from the CloudKit Console first (**verify** exact promotion steps). A box written by a dev build is not visible to the shipped app.
+**Container and environment.** Private database only. Container `iCloud.app.bisel`, shared across bundle ids so the iPhone app (M5) can use the same box (decision D1, approved; registered 2026-10-31, see the spike below). Container ids cannot be renamed or deleted. Development builds use the Development environment; a notarized Developer ID build uses **Production**, which needs the record type/fields deployed from the CloudKit Console first (**verify** exact promotion steps). A box written by a dev build is not visible to the shipped app.
 
 **Zone.** One custom zone per box, `box-<boxID>` (boxID = random 128-bit). The default zone has no change tracking; custom zones give `CKFetchRecordZoneChangesOperation` with change tokens and the atomic capability. A per-box zone lets a lane be reset by creating a new zone, and keeps multiple boxes possible.
 
@@ -134,28 +134,39 @@ No queries are needed (everything is zone-change fetch), so no queryable/sortabl
 
 **Account and availability.** `CKContainer.accountStatus()`; observe `CKAccountChanged`. The lane pins `identity()` = hash of `userRecordID` at enable time. Any mismatch pauses the lane (§6).
 
-### Entitlement spike (done, 2026-10-30)
+### Entitlement spike (done, 2026-10-31)
 
-Added to `apps/mac/project.yml` under the `Bisel` target `entitlements.properties` (diff kept in the shared notes folder, not committed):
+Real run on Rodrigo's Mac, Xcode 27.2, team ZVGTVNUPVA, bundle id `app.bisel.mac`. The entitlement is committed; the container is registered.
 
-```yaml
-properties:
-  com.apple.developer.icloud-container-identifiers: [iCloud.app.bisel.mac]
-  com.apple.developer.icloud-services: [CloudKit]
-```
+**Wiring.** `Bisel/Bisel.entitlements` is now a hand-kept plist (container `iCloud.app.bisel`, services `CloudKit`) referenced by `CODE_SIGN_ENTITLEMENTS` in `project.yml`. Not the XcodeGen `entitlements:` key: XcodeGen regenerates the plist from `properties` on every `generate` (an empty one overwrote the iCloud keys) and its derived setting beats per-config overrides, so the dev spec could not swap it. `project.dev.yml` sets `CODE_SIGN_ENTITLEMENTS: Bisel/BiselDev.entitlements` (empty plist), so BiselDev builds and runs unsigned without iCloud.
 
-Observed:
+**Registration, exact steps.**
 
-1. `xcodegen generate` writes both keys into `Bisel/Bisel.entitlements`. Feasible as configured; no other spec change needed.
-2. `xcodebuild … build` with the existing signing (Automatic, Apple Development, team ZVGTVNUPVA) **fails**: `No profiles for 'app.bisel.mac' were found … Automatic signing is disabled`. iCloud/CloudKit is a restricted entitlement, so the target needs a provisioning profile that contains it. Overriding to ad-hoc (`CODE_SIGN_IDENTITY=-`, manual) fails too (`"Bisel" requires a provisioning profile`).
-3. `CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO` builds (`BUILD SUCCEEDED`); signing that product ad-hoc by hand with the entitlements file and running `codesign -d --entitlements -` shows exactly the two keys. So the entitlement plumbing is correct; only the profile is missing.
-4. Not done on purpose: `xcodebuild -allowProvisioningUpdates`. It would create the App ID capability and the `iCloud.app.bisel.mac` container in the Apple Developer account for team ZVGTVNUPVA, which is an outward-facing change that is hard to undo (containers cannot be deleted). Needs Rodrigo's go (D1 first). Nothing was launched.
+1. Without a profile the signed build fails (`No profiles for 'app.bisel.mac' were found`); ad-hoc fails too (`requires a provisioning profile`).
+2. With Xcode signed in, `xcodebuild -project Bisel.xcodeproj -scheme Bisel -configuration Release -destination 'platform=macOS' -derivedDataPath <scratch> -allowProvisioningUpdates build` got one step further and failed with `Device "Rodrigo's MacBook Pro" isn't registered in your developer account`. A development profile needs a registered device; `-allowProvisioningUpdates` does not register one.
+3. Adding `-allowProvisioningDeviceRegistration` (registers this Mac only; one of 100 device slots, not removable) made the same command succeed: Xcode registered the device, enabled iCloud/CloudKit on the App ID, created the container `iCloud.app.bisel` and generated "Mac Team Provisioning Profile: app.bisel.mac" (expires 2027-10-31, embedded as `Contents/embedded.provisionprofile`). No agreement or other portal step was needed. Later builds only need `-allowProvisioningUpdates` (or Xcode's automatic signing in the IDE).
+
+**Verified on the signed Release app** (built to a scratch DerivedData path, never launched, nothing in `/Applications` touched):
+
+- `codesign --display --entitlements -` shows `com.apple.developer.icloud-container-identifiers = [iCloud.app.bisel]`, `com.apple.developer.icloud-services = [CloudKit]`, plus `application-identifier` and `team-identifier`. No `get-task-allow`.
+- `codesign --verify --deep --strict` passes; signature is Apple Development, hardened runtime flag set.
+- The profile's entitlements list `icloud-container-environment = [Production, Development]` and `icloud-services = *`. The profile also grants `ubiquity-kvstore-identifier` and `keychain-access-groups` that the app does not request, which is harmless (the app's entitlements decide).
+- `apps/mac/Tools/check-release.sh` on that app: OK. `BiselDev` (SoftwareKeys, unsigned) compiles and its signature has no iCloud keys.
+- `scripts/check-release-hooks.sh --control` passes after one change: it now builds with `CODE_SIGNING_ALLOWED=NO` (it only greps strings), because an ad-hoc Release build can no longer be signed with the iCloud entitlement. `scripts/check-all.sh` builds `BiselDev` ad-hoc and is unaffected.
+
+**What a Developer ID / notarized build needs (not done, not verifiable here).**
+
+- Only an Apple Development certificate exists on this Mac. Needs a **Developer ID Application** certificate, and a **Developer ID provisioning profile** for `app.bisel.mac` with iCloud + the container (created in the developer portal or by Xcode's Archive → Distribute → Developer ID). Developer ID builds with restricted entitlements must embed that profile; without it the app is killed at launch.
+- Keep hardened runtime and the `get-task-allow` gate; notarize and staple as for any Developer ID app.
+- Environment: the profile allows Production and Development. A build signed this way talks to **Production** CloudKit; Xcode-run development builds use **Development** (**verify** whether the `icloud-container-environment` entitlement must be set explicitly for a Developer ID build). Records written by a dev build are not visible to the shipped app.
+- **Manual step, only Rodrigo:** the Production environment has no record types until the schema is deployed. In the CloudKit Console (container `iCloud.app.bisel`) run the app once against Development so record type `R` and its fields are created (or define them by hand), then "Deploy Schema Changes to Production". The Console cannot be scripted from here. After deployment, additive changes are the norm; fields and types in Production cannot be removed.
+- If the lane gets push (M3+): add `com.apple.developer.aps-environment` and re-check the profile (**verify**).
 
 Consequences to plan for:
 
-- Committing the entitlement breaks every build until the container exists and a profile is available. Land it together with the portal registration, not before.
-- `project.dev.yml` includes `project.yml`, so `BiselDev` (software keys, unsigned runs) inherits the entitlement and cannot run unsigned any more. Use a separate entitlements file for the dev spec (without iCloud) and compile `CloudKitLane` out of it (`#if` or a dev-only lane factory), keeping the existing rule that dev flows never touch real CloudKit.
-- Release needs a **Developer ID** provisioning profile with the iCloud container (and, for push, the aps entitlement), the production environment, and the existing `get-task-allow` gate must still pass. `scripts/check-release-hooks.sh` and `Tools/check-release.sh` should additionally assert the container id is present in Release.
+- A signed build now needs a profile with the container; the container exists and the profile is generated per machine by Xcode. A fresh machine or CI runner needs Xcode signed in to the team plus `-allowProvisioningUpdates` (and `-allowProvisioningDeviceRegistration` once per new device).
+- `BiselDev` uses its own iCloud-free entitlements file (done, see above). When `CloudKitLane` lands, compile it out of the dev build (`#if` or a dev-only lane factory), keeping the rule that dev flows never touch real CloudKit.
+- Release needs a **Developer ID** provisioning profile with the iCloud container (see above) and the existing `get-task-allow` gate must still pass. `Tools/check-release.sh` should additionally assert the container id is present in a signed Release (not added yet: it also runs on unsigned builds).
 - The app stays unsandboxed; CloudKit does not require the sandbox.
 - CloudKit cannot run in the SwiftPM flow tests (no entitlement/profile for the test host). Flow tests use the fake lane; a real-CloudKit check is a manual, signed run on Rodrigo's machine (§10).
 
@@ -308,7 +319,7 @@ Avoid:
 
 ## 12. Risks
 
-1. **Entitlement/profile friction** (spike): breaks every signed build until the container is registered; dev build must be split; Developer ID profile + production schema needed. Containers are permanent in the portal.
+1. **Entitlement/profile friction** (spike done): the container `iCloud.app.bisel` is registered and the signed Apple Development build carries the entitlement; the dev build is split. Remaining: Developer ID certificate and profile, Production schema deployment from the CloudKit Console. Containers and registered devices are permanent in the portal.
 2. **Rotation without atomicity** (staged commit) is the most complex new protocol; needs the hostile-fake tests before any real data.
 3. **Fresh-device freshness** is not solvable against a malicious store; witness options reduce, not remove.
 4. **Per-lane pending state** is an invasive schema/engine change touching the sync core; must land with migration of existing queues.
@@ -319,7 +330,7 @@ Avoid:
 
 ## 13. Open decisions for Rodrigo
 
-- **D1. Container id and registration.** `iCloud.app.bisel.mac` as briefed vs a shared `iCloud.app.bisel` for the future iPhone app. Permanent. Do you want me to run `xcodebuild -allowProvisioningUpdates` for team ZVGTVNUPVA to register it?
+- **D1. Container id and registration.** Decided: shared `iCloud.app.bisel`, registered 2026-10-31.
 - **D2. Same Apple ID only?** The CloudKit lane serves devices on one Apple ID. Anything outside it (a second person, a device on another account) stays on the server lane. Confirm that is acceptable.
 - **D3. Raw CloudKit operations vs CKSyncEngine** for v1 (recommendation: raw, revisit after L3).
 - **D4. Second copy for CloudKit-only boxes**: forced reminder to export `.bisel-backup`, or require the server lane, or accept the risk.

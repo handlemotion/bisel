@@ -31,10 +31,12 @@ scan() {
   return $((hits == 0))   # 0 (success) when something was found
 }
 
+# Unsigned on purpose: the Release app carries the iCloud entitlement, which needs a provisioning profile to sign, and this check
+# only reads strings from the binary.
 build() {  # build <spec> <project> <configuration> <derived data dir>
   ( cd "$APPLE" && xcodegen generate --spec "$1" >/dev/null && \
     xcodebuild -project "$2" -scheme Bisel -configuration "$3" -destination 'platform=macOS' -derivedDataPath "$4" \
-      CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= build >"$4.log" 2>&1 ) \
+      CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build >"$4.log" 2>&1 ) \
     || { echo "FAIL: $3 build failed, see $4.log" >&2; tail -n 20 "$4.log" >&2; exit 2; }
 }
 
