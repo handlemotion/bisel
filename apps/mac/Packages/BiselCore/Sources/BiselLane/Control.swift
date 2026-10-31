@@ -257,6 +257,11 @@ public struct LaneWitness: Codable, Sendable, Equatable {
     public var recoverySeq = 0
     /// Highest counter seen from each writer.
     public var counters: [String: Int] = [:]
+    /// The last head, recovery record and log entry this device verified, byte for byte, so it can put them back when someone
+    /// overwrites or deletes them (their signatures still hold). Nil in witnesses written before they were kept.
+    public var headRecord: HeldRecord?
+    public var recoveryRecord: HeldRecord?
+    public var logRecord: HeldRecord?
     /// Control records that arrived before what is needed to verify them (a log entry before its predecessor, anything before
     /// the head), by `"<kind>/<id>"`.
     public var held: [String: HeldRecord] = [:]

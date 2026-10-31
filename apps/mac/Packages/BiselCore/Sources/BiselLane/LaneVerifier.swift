@@ -51,11 +51,15 @@ public struct LaneVerifier: Sendable {
     /// - `witness`: what this device already verified; updated in place (the caller persists it only if this returns).
     /// - `adminKey`: the admin public key derived from the vault key this device holds, nil while locked. It anchors a
     ///   device that has no pin yet.
+    /// - `witnessed`: the admin-key chain the freshness witness holds for this box, already checked to start at the pinned root
+    ///   (nil: no witness, or nothing usable in it). A head that moves the box to a new epoch on a chain that parts from it
+    ///   waits (see step 1).
     ///
     /// Throws `IntegrityError.serverRolledBack` when the lane reports a position (or a writer's counter) lower than one this
     /// device already saw, and `.invalidCursor` when its answer contradicts itself: records or a cursor beyond its own head, a
     /// cursor that went backwards, or no progress on a page that says there is more.
-    public func verify(_ changes: LaneChanges, since: LaneCursor?, knownHead: Int, witness: inout LaneWitness, adminKey: Data?) throws -> LaneVerdict {
+    public func verify(_ changes: LaneChanges, since: LaneCursor?, knownHead: Int, witness: inout LaneWitness, adminKey: Data?,
+                       witnessed: [ControlRecords.AKLink]? = nil) throws -> LaneVerdict {
         var verdict = LaneVerdict(accepted: [], quarantined: [], incidents: [], meta: nil)
         if let meta = changes.meta {
             try checkPosition(changes, meta: meta, since: since, knownHead: knownHead)
@@ -63,7 +67,7 @@ public struct LaneVerifier: Sendable {
             var control = changes.upserts.filter { !$0.isItemLike }
             control += witness.held.values.map(\.record).filter { held in !control.contains { $0.kind == held.kind && $0.id == held.id } }
             witness.held = [:]
-            try verifyControl(control, witness: &witness, adminKey: adminKey, into: &verdict)
+            try verifyControl(control, witness: &witness, adminKey: adminKey, witnessed: witnessed, into: &verdict)
             let meta = LaneMeta(epoch: max(witness.epoch, 1), headSeq: witness.position, members: witness.members, events: witness.events,
                                 recovery: witness.recovery)
             if meta.headSeq < knownHead { throw IntegrityError.serverRolledBack(known: knownHead, reported: meta.headSeq) }
@@ -98,6 +102,9 @@ public struct LaneVerifier: Sendable {
     private func fault(_ r: LaneRecord, currentEpoch: Int) -> LaneQuarantineReason? {
         guard r.blob.count <= Self.maxBlob, !r.id.isEmpty else { return .malformed }
         guard r.rev >= 1, (r.kind == .manifest) == (r.id == ReservedRecord.manifestID) else { return .malformed }
+        // CloudKit names a record by its id alone: an item written under a control record's name (`head`, `recovery`, `stage`,
+        // or any dotted name) takes that record's place on the lane. Item ids are random base64url and never look like one.
+        if r.id.contains(".") || [ControlRecords.headID, ControlRecords.recoveryID, ControlRecords.stageID].contains(r.id) { return .malformed }
         // A write built for a vault-key epoch the box has left: it cannot open under the current key (0: the lane does not say).
         if r.epoch != 0, currentEpoch > 0, r.epoch < currentEpoch { return .staleEpoch }
         return nil
@@ -105,7 +112,8 @@ public struct LaneVerifier: Sendable {
 
     // MARK: control records
 
-    private func verifyControl(_ records: [LaneRecord], witness w: inout LaneWitness, adminKey: Data?, into verdict: inout LaneVerdict) throws {
+    private func verifyControl(_ records: [LaneRecord], witness w: inout LaneWitness, adminKey: Data?, witnessed: [ControlRecords.AKLink]?,
+                               into verdict: inout LaneVerdict) throws {
         func quarantine(_ r: LaneRecord, _ why: LaneQuarantineReason) { verdict.quarantined.append(.init(record: r, reason: why)) }
         func hold(_ r: LaneRecord) {
             if w.held.count >= Self.maxHeld, w.held[heldKey(r)] == nil { quarantine(r, .malformed) } else { w.held[heldKey(r)] = HeldRecord(r) }
@@ -119,6 +127,11 @@ public struct LaneVerifier: Sendable {
             if let pinned = w.aks.last {
                 // The chain must still contain the key this device pinned.
                 guard head.aks.contains(where: { $0.epoch == pinned.epoch && $0.ak == pinned.ak }) else { quarantine(r, .unpinnedSigner); continue }
+                // A device that slept through a revoke still pins the epoch the revoked device was cut off in, and that device kept
+                // its admin key: an epoch of its own, chained from that key, extends this pin as well as the real one does. Only a
+                // second store can tell them apart. Against a witness that holds another chain the head waits, unpinned, until
+                // the witness agrees (a device of the box rewrites a forked witness and puts the real head back).
+                if head.epoch > w.epoch, let witnessed, Self.forks(head.aks, witnessed) { hold(r); continue }
             } else if let adminKey {
                 guard head.aks.contains(where: { $0.ak == adminKey }) else { quarantine(r, .unpinnedSigner); continue }
             } else {
@@ -127,6 +140,7 @@ public struct LaneVerifier: Sendable {
             }
             w.aks = head.aks
             w.epoch = head.epoch
+            w.headRecord = HeldRecord(r)
         }
 
         let rest = records.filter { !($0.kind == .head && $0.id == ControlRecords.headID) }
@@ -149,6 +163,7 @@ public struct LaneVerifier: Sendable {
             if n > w.logN + 1 { hold(r); continue }
             guard e.prev == w.logHash, e.epoch >= w.logEpoch else { quarantine(r, .chainBroken); continue }
             apply(e, blob: r.blob, to: &w)
+            w.logRecord = HeldRecord(r)
         }
         // Entries that were waiting for their predecessors may fit now.
         while let next = w.held["log/\(ControlRecords.logID(w.logN + 1))"]?.record,
@@ -156,6 +171,7 @@ public struct LaneVerifier: Sendable {
               let key = ControlRecords.key(at: e.epoch, in: w.aks), ControlRecords.adminSignatureValid(next, key: key) {
             w.held["log/\(next.id)"] = nil
             apply(e, blob: next.blob, to: &w)
+            w.logRecord = HeldRecord(next)
         }
 
         // 3. Envelopes, the recovery record and the writers' heads.
@@ -178,6 +194,7 @@ public struct LaneVerifier: Sendable {
                 guard rec.seq >= w.recoverySeq else { quarantine(r, .rolledBackRecord); continue }
                 w.recoverySeq = rec.seq
                 w.recovery = RecoveryMaterial(pubkey: rec.pubkey, encPubkey: rec.encPubkey, envelope: rec.envelope)
+                w.recoveryRecord = HeldRecord(r)
             case .head:
                 guard let device = ControlRecords.deviceOfHead(r.id), let head = ControlRecords.decode(ControlRecords.DeviceHead.self, r.blob),
                       head.device == device, (0...Self.maxCounter).contains(head.counter) else { quarantine(r, .malformed); continue }
