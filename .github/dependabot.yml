@@ -4,7 +4,35 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # BiselCore's Package.swift. The app's packages are pinned in apps/mac/project.yml (XcodeGen), which Dependabot cannot read.
+  - package-ecosystem: swift
+    directory: "/apps/mac/Packages/BiselCore"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      swift:
         patterns:
           - "*"

@@ -1,3 +1,5 @@
+# The gate for main. Every job runs a mode of scripts/check-all.sh, so `pnpm ci:local` runs the same commands on a Mac.
+# Public repo: no secrets anywhere, nothing reaches Cloudflare, fork PRs run with a read-only token.
 name: CI
 
 on:
@@ -15,60 +17,105 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Xcode 27.2 on the xcode-27 image, the toolchain the app is developed with (macos-26 tops out at Xcode 26).
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+  XCODEGEN_VERSION: "2.46.0"
+  XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+
 jobs:
   server:
-    name: Format, lint, types and server tests
+    name: Server (format, lint, types, flow tests)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Format and lint
-        run: pnpm check
-
-      - name: Type check
-        run: pnpm check-types
-
       # Flow tests run the real Worker (workerd) on a local D1. Nothing reaches Cloudflare.
-      - name: Test
-        run: pnpm test
+      - name: check-all --server
+        run: scripts/check-all.sh --server -v
 
   core:
-    name: Swift core flow tests
+    name: Core (Swift flow tests)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
       - name: Setup Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: SwiftPM cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: apps/mac/Packages/BiselCore/.build
+          key: swiftpm-core-xcode27.2-${{ hashFiles('apps/mac/Packages/BiselCore/Package.resolved') }}-${{ hashFiles('apps/mac/Packages/BiselCore/Sources/**', 'apps/mac/Packages/BiselCore/Tests/**') }}
+          restore-keys: |
+            swiftpm-core-xcode27.2-${{ hashFiles('apps/mac/Packages/BiselCore/Package.resolved') }}-
 
-      # The Swift flow tests start the real local server (wrangler dev), so they need the workspace install above.
-      - name: Swift flow tests
-        working-directory: apps/mac/Packages/BiselCore
-        run: swift test --traits SoftwareKeys
+      # The Swift flow tests start the real local server (wrangler dev), so check-all installs the workspace first.
+      - name: check-all --core
+        run: scripts/check-all.sh --core -v
+
+  app:
+    name: App (BiselDev Debug build, unsigned)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install XcodeGen
+        run: scripts/ci-install-xcodegen.sh "$XCODEGEN_VERSION" "$XCODEGEN_SHA256"
+
+      - name: SwiftPM cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: apps/mac/build-check/SourcePackages
+          key: swiftpm-app-xcode27.2-${{ hashFiles('apps/mac/project.yml', 'apps/mac/project.dev.yml', 'apps/mac/Packages/BiselCore/Package.resolved') }}
+
+      - name: check-all --app
+        run: scripts/check-all.sh --app -v
+
+  release-hooks:
+    name: Release (no debug hooks in the binary)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install XcodeGen
+        run: scripts/ci-install-xcodegen.sh "$XCODEGEN_VERSION" "$XCODEGEN_SHA256"
+
+      - name: check-all --release
+        run: scripts/check-all.sh --release -v
