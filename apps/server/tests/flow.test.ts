@@ -1168,27 +1168,27 @@ test("failed-auth backoff: it slows the offender, never locks out a valid signat
   for (let i = 0; i < 19; i++)
     expect((await attacker.call({ ...stranger, id: a.id }, "GET", "/v1/sync")).status).toBe(404);
 
-  // From the 20th on, failing requests from this address are delayed (AUTH_BACKOFF_MS=400 in the test server) ...
+  // From the 20th on, failing requests from this address are delayed (AUTH_BACKOFF_MS=2000 in the test server, plus jitter) ...
   for (let i = 0; i < 3; i++) {
     const slow = await timed(() => attacker.call({ ...stranger, id: a.id }, "GET", "/v1/sync"));
     expect(slow.status).toBe(404);
-    expect(slow.ms).toBeGreaterThan(350);
+    expect(slow.ms).toBeGreaterThan(1900);
   }
   // ... for every kind of failure, unknown routes included, so the delay says nothing about what exists.
   const slowUnknown = await timed(() => attacker.call(stranger, "GET", "/v1/nope"));
   expect(slowUnknown.status).toBe(404);
-  expect(slowUnknown.ms).toBeGreaterThan(350);
+  expect(slowUnknown.ms).toBeGreaterThan(1900);
 
   // The owner's valid, signed requests from that very address are still served, promptly, however long the offender keeps going.
   for (let i = 0; i < 5; i++) {
     const good = await timed(() => attacker.call(a, "GET", "/v1/sync"));
     expect(good.status).toBe(200);
-    expect(good.ms).toBeLessThan(350);
+    expect(good.ms).toBeLessThan(1500);
   }
   // Other addresses never noticed.
   const fine = await timed(() => elsewhere.call({ ...stranger, id: a.id }, "GET", "/v1/sync"));
   expect(fine.status).toBe(404);
-  expect(fine.ms).toBeLessThan(350);
+  expect(fine.ms).toBeLessThan(1500);
   expect((await elsewhere.call(a, "GET", "/v1/sync")).status).toBe(200);
 });
 
@@ -1196,8 +1196,9 @@ test("per-address flood limit: a flood from one address gets a bare 429, other a
   const flooder = clientAt("10.77.0.1");
   let limitedAt = -1;
   let limited: Response | undefined;
-  // The test server inherits the production limit: 300 requests per minute per address.
-  for (let i = 0; i < 400 && limitedAt < 0; i++) {
+  // The test server inherits the production limit: 300 requests per minute per address. The local limiter counts in
+  // fixed one-minute windows, so a flood that straddles a boundary can need up to two windows' worth (600) to trip.
+  for (let i = 0; i < 700 && limitedAt < 0; i++) {
     const res = await flooder.fetch("/healthz");
     if (res.status === 429) {
       limitedAt = i;
@@ -1205,7 +1206,7 @@ test("per-address flood limit: a flood from one address gets a bare 429, other a
     } else expect(res.status).toBe(200);
   }
   expect(limitedAt, "the limit kicks in").toBeGreaterThan(0);
-  expect(limitedAt).toBeLessThanOrEqual(300);
+  expect(limitedAt).toBeLessThanOrEqual(600);
   expect(await limited!.text()).toBe("");
   expect(limited!.headers.get("retry-after")).toBe("10");
 

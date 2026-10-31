@@ -85,7 +85,8 @@ export async function startServer(options: ServerOptions = {}): Promise<RunningS
     BOOTSTRAP_TOKEN,
     BETTER_AUTH_SECRET: AUTH_SECRET,
     PUBLIC_ORIGIN: url,
-    AUTH_BACKOFF_MS: "400",
+    // Large enough that a slow CI runner's normal latency (~1 s seen) never looks like a delay.
+    AUTH_BACKOFF_MS: "2000",
     RECOVERY_ACTIVATION_DELAY_SECONDS: "2",
     MAX_ITEMS_PER_BOX: "40",
     MAX_BOX_BYTES: "1000000",
