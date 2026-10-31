@@ -1,21 +1,14 @@
 # BiselFlowUITests: status and accessibility identifiers still needed
 
-## Status: written, compiled, NOT RUN
+## Status: written, compiled, never run
 
 `BiselFlowUITests.swift` was rewritten for the current first-run flow (welcome → recovery phrase → import step → settings window)
-and it **compiles** (`scripts/check-all.sh --app` runs `build-for-testing`). It has **not been run on this machine**: the first attempt
-dimmed Rodrigo's screen and crashed Claude Desktop, so it was stopped. Nothing here is known to pass or fail.
-
-Run it by hand, with the Mac otherwise idle (it launches the app and drives the real screen), and read the result yourself:
-
-```bash
-scripts/check-all.sh --ui
-```
-
-`--ui` is never part of the default run or of `--app`. Each test uses its own throwaway `BISEL_DATA_DIR` and `BISEL_DEV_SKIP_BIOMETRIC=1`;
+and it **compiles** (`scripts/check-all.sh --app` runs `build-for-testing`). It is **never run**: UI automation is forbidden in this
+repo (AGENTS.md; the first attempt dimmed Rodrigo's screen and crashed Claude Desktop), and there is no script mode that runs it.
+Nothing here is known to pass or fail. Each test would use its own throwaway `BISEL_DATA_DIR` and `BISEL_DEV_SKIP_BIOMETRIC=1`;
 there is no server involved ("Create a box" makes a local-only box).
 
-Things most likely to need a fix on the first real run (guesses, not results):
+If Rodrigo ever runs it by hand, things most likely to need a fix (guesses, not results):
 
 - `app.statusItems.firstMatch` / `menuItems["Open Bisel"]`: reaching the menu-bar extra from XCUITest is untested; the settings and
   relaunch tests depend on it.

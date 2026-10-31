@@ -1,12 +1,9 @@
 import XCTest
 
-/// NOT YET RUN on a real screen (see NEEDED-IDS.md): it compiles, nothing more is claimed. Run it by hand with `scripts/check-all.sh --ui`.
+/// NEVER RUN: UI automation is forbidden in this repo (AGENTS.md). The sources are built by `scripts/check-all.sh --app` so they keep compiling, nothing more is claimed.
 ///
 /// Flow tests on the real app (BiselDev build: software keys, Debug hooks) with a throwaway store. No server: "Create a box"
-/// makes a local-only box, which is the first-run path. Run with
-///   cd apple && xcodegen generate --spec project.dev.yml
-///   xcodebuild test -project BiselDev.xcodeproj -scheme Bisel -only-testing:BiselUITests -destination 'platform=macOS' \
-///     CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=
+/// makes a local-only box, which is the first-run path.
 /// Each test launches with its own BISEL_DATA_DIR and the Debug-only BISEL_DEV_SKIP_BIOMETRIC, and only drives Bisel's own windows.
 /// Identifiers a test needs that the views do not have yet are listed in NEEDED-IDS.md; those steps use labels and say so.
 final class BiselFlowUITests: XCTestCase {

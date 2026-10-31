@@ -5,8 +5,7 @@
 #   scripts/check-all.sh                 server + core + app
 #   scripts/check-all.sh --server        pnpm install, format + lint, typecheck, pnpm test, test:legacy
 #   scripts/check-all.sh --core          BiselCore Swift flow suite (swift test --traits SoftwareKeys)
-#   scripts/check-all.sh --app           xcodegen (project.dev.yml) + unsigned Debug build of the Mac app (software keys), + compile (no run) of the UI tests
-#   scripts/check-all.sh --ui            RUNS the XCUITest flow (launches the app and drives the screen): never in the default run, only when asked
+#   scripts/check-all.sh --app           xcodegen (project.dev.yml) + unsigned Debug build of the Mac app (software keys), + compile (never run) of the UI test sources
 #   scripts/check-all.sh --release       Release build + BISEL_DEV_ strings check (scripts/check-release-hooks.sh); slow, opt-in
 #   scripts/check-all.sh -v              stream every step's output instead of showing the tail of a failed one
 #
@@ -19,21 +18,20 @@ set -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOGS="$(mktemp -d "${TMPDIR:-/tmp}/bisel-check.XXXXXX")"
-RUN_SERVER=0 RUN_CORE=0 RUN_APP=0 RUN_UI=0 RUN_RELEASE=0 VERBOSE=0
+RUN_SERVER=0 RUN_CORE=0 RUN_APP=0 RUN_RELEASE=0 VERBOSE=0
 
 for arg in "$@"; do
   case "$arg" in
     --server)  RUN_SERVER=1 ;;
     --core)    RUN_CORE=1 ;;
     --app)     RUN_APP=1 ;;
-    --ui)      RUN_UI=1 ;;
     --release) RUN_RELEASE=1 ;;
     -v|--verbose) VERBOSE=1 ;;
-    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)" >&2; exit 64 ;;
   esac
 done
-if (( RUN_SERVER + RUN_CORE + RUN_APP + RUN_UI + RUN_RELEASE == 0 )); then RUN_SERVER=1 RUN_CORE=1 RUN_APP=1; fi
+if (( RUN_SERVER + RUN_CORE + RUN_APP + RUN_RELEASE == 0 )); then RUN_SERVER=1 RUN_CORE=1 RUN_APP=1; fi
 
 NAMES=() RESULTS=() TIMES=()
 CHILD=0
@@ -107,21 +105,12 @@ APP_DD="$ROOT/apps/mac/build-check"
 # Unsigned: this build only proves the app compiles; CI has no signing identity and needs none.
 XCB_BASE="-project BiselDev.xcodeproj -scheme Bisel -destination 'platform=macOS' -derivedDataPath '$APP_DD'"
 XCB_ARGS="$XCB_BASE CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO"
-# The UI test runner only loads an ad-hoc signed app.
-XCB_UI_ARGS="$XCB_BASE CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="
 
 if (( RUN_APP )); then
   echo "app"
   step "app: xcodegen (project.dev.yml)" bash -c "cd '$ROOT/apps/mac' && xcodegen generate --spec project.dev.yml" \
     && step "app: build BiselDev (Debug)" bash -c "cd '$ROOT/apps/mac' && xcodebuild $XCB_ARGS -configuration Debug build" \
     && step "app: compile UI tests (not run)" bash -c "cd '$ROOT/apps/mac' && xcodebuild $XCB_ARGS -configuration Debug build-for-testing"
-  echo
-fi
-
-if (( RUN_UI )); then
-  echo "ui  (launches the app and drives the screen: leave the Mac alone until it ends)"
-  step "ui: xcodegen (project.dev.yml)" bash -c "cd '$ROOT/apps/mac' && xcodegen generate --spec project.dev.yml" \
-    && step "ui: BiselFlowUITests" bash -c "cd '$ROOT/apps/mac' && xcodebuild $XCB_UI_ARGS -configuration Debug -only-testing:BiselUITests test"
   echo
 fi
 
