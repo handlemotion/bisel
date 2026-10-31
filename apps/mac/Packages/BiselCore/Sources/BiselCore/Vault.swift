@@ -20,6 +20,39 @@ public struct EnrollmentRequest: Codable, Sendable, Equatable {
     public var fingerprint: String { DevicePublicKeys(sig: sigPubkey, enc: encPubkey).fingerprint }
 }
 
+/// A new device waiting to be approved over a lane that is only storage: its request is on the lane, the secret is shown here
+/// (`secret.words`, or `qrPayload` as a QR code) and typed or scanned into the approving device. Show `fingerprint` too.
+public struct PairingOffer: Sendable, Equatable {
+    public var request: EnrollmentRequest
+    public var secret: PairingSecret
+    public var fingerprint: String { request.fingerprint }
+    public var qrPayload: String { secret.qrPayload(deviceID: request.deviceID) }
+}
+
+/// A request to join seen on the lane, as the approving device lists it. Never approved without the pairing secret.
+public struct PendingEnrollment: Sendable, Equatable, Identifiable {
+    /// How long after this device first saw a request it may be approved (its own clock, never the request's).
+    public static let lifetime: TimeInterval = 15 * 60
+    public var request: EnrollmentRequest
+    public var receivedAt: Date
+    public var isExpired: Bool { Date() >= receivedAt.addingTimeInterval(Self.lifetime) }
+    public var id: String { request.deviceID }
+    /// What the request claims about itself; bound into `proof`.
+    let createdAt: Int
+    let proof: Data
+}
+
+public enum EnrollmentError: Error, Sendable, Equatable {
+    /// The request was first seen too long ago (`PendingEnrollment.lifetime`): start again on the new device.
+    case expired
+    /// The pairing secret does not prove this request: wrong words, or the request's keys were swapped on the way. Nothing was approved.
+    case pairingMismatch
+    /// No approval (or no envelope) on the lane for this device yet.
+    case notApprovedYet
+    /// An envelope is there but the approval does not prove it came from someone holding the pairing secret. It was not taken.
+    case approvalUnproven
+}
+
 public struct ItemListing: Sendable {
     public var items: [Item]
     /// Records whose ciphertext failed authentication (wrong key, tampering, or moved to another id/revision). Never shown as items.
@@ -510,8 +543,81 @@ public actor Vault {
                                  sigPubkey: pub.sig, encPubkey: pub.enc)
     }
 
+    /// New device, step 1 over a lane that is only storage (CloudKit): create keys, put the request on the lane, and show the
+    /// returned secret (and fingerprint) to the person, who enters it on an enrolled device (`approveEnrollment(_:pairing:)`).
+    /// Then `completeEnrollment()` until it stops throwing `EnrollmentError.notApprovedYet`. `LaneError.unsupported` on the server.
+    public func prepareEnrollment(lane address: URL, deviceName: String) async throws -> PairingOffer {
+        guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
+        let secret = PairingSecret.generate()
+        let pub = try config.keyStore.createKeys()
+        let deviceID = BiselRandom.identifier()
+        var identity = LocalIdentity(deviceID: deviceID, deviceName: deviceName, serverURL: address,
+                                     keyStore: config.keyStore.implementation, envelope: nil)
+        identity.pairingSecret = secret.rawValue
+        do {
+            try store.setIdentity(identity)
+            guard let box = try lane() as? RecordBox else { throw LaneError.unsupported }
+            let createdAt = Int(Date().timeIntervalSince1970)
+            let proof = secret.proof(deviceID: deviceID, sigPubkey: pub.sig, encPubkey: pub.enc, createdAt: createdAt)
+            try await box.requestEnrollment(ControlRecords.EnrollRequest(deviceID: deviceID, name: deviceName, kind: config.deviceKind,
+                                                                         sigPubkey: pub.sig.base64URLEncoded(), encPubkey: pub.enc.base64URLEncoded(),
+                                                                         createdAt: createdAt, proof: proof.base64URLEncoded()))
+        } catch {
+            // Nothing half-made stays behind: the person can simply start again.
+            try? store.removeAll()
+            try? config.keyStore.deleteKeys()
+            throw error
+        }
+        return PairingOffer(request: EnrollmentRequest(server: address, deviceID: deviceID, name: deviceName, kind: config.deviceKind,
+                                                       sigPubkey: pub.sig, encPubkey: pub.enc), secret: secret)
+    }
+
+    /// Requests to join this box that the last syncs saw on the lane, oldest first. Show name, kind and fingerprint; approve one
+    /// only with the secret the new device shows (`approveEnrollment(_:pairing:)`). Never approved automatically.
+    public func pendingEnrollments() throws -> [PendingEnrollment] {
+        let id = try requireIdentity()
+        guard let server = id.serverURL, let json = try store.receivedEnrollmentsJSON(),
+              let list = try? JSONDecoder().decode([ReceivedEnrollment].self, from: json) else { return [] }
+        return list.compactMap { entry in
+            let r = entry.request
+            guard !id.roster.contains(where: { $0.deviceID == r.deviceID }), let sig = Data(base64URLEncoded: r.sigPubkey),
+                  let enc = Data(base64URLEncoded: r.encPubkey), let proof = Data(base64URLEncoded: r.proof) else { return nil }
+            return PendingEnrollment(request: EnrollmentRequest(server: server, deviceID: r.deviceID, name: Data.sanitizedName(r.name),
+                                                                kind: r.kind, sigPubkey: sig, encPubkey: enc),
+                                     receivedAt: Date(timeIntervalSince1970: TimeInterval(entry.receivedAt)), createdAt: r.createdAt, proof: proof)
+        }
+    }
+
+    /// Enrolled device, step 2 over a lane that is only storage. The secret must prove the request's exact keys: that is what
+    /// stops a request someone rewrote with keys of their own. Then the approval as for `approveEnrollment(_:)` (fresh biometric
+    /// check, envelope, log, roster, manifest), and the approval record that lets the new device tell this envelope from a planted one.
+    public func approveEnrollment(_ pending: PendingEnrollment, pairing: PairingSecret) async throws {
+        guard !pending.isExpired else { throw EnrollmentError.expired }
+        let r = pending.request
+        guard pairing.isValidProof(pending.proof, deviceID: r.deviceID, sigPubkey: r.sigPubkey, encPubkey: r.encPubkey,
+                                   createdAt: pending.createdAt) else { throw EnrollmentError.pairingMismatch }
+        guard let box = try lane() as? RecordBox else { throw LaneError.unsupported }
+        let (envelope, epoch) = try await admitDevice(r)
+        do {
+            try await box.recordEnrollmentApproval(device: r.deviceID, envelope: envelope, epoch: epoch, admin: try adminSigner(try requireKey())) {
+                pairing.approval(deviceID: r.deviceID, envelopeHash: $0, rootAdminKey: $1, epoch: epoch)
+            }
+        } catch RotationError.staleEpoch {
+            _ = try? await sync()
+            throw RotationError.vaultKeyRotated
+        }
+        _ = try? await sync()
+    }
+
     /// Enrolled device, step 2: seal VK to the new device's DK-enc and register it. Needs a fresh biometric check.
     public func approveEnrollment(_ request: EnrollmentRequest) async throws {
+        _ = try await admitDevice(request)
+        _ = try? await sync()
+    }
+
+    /// Seals VK to the request's DK-enc, admits it on the lane and records it in the roster and the manifest. Returns the envelope
+    /// and its epoch.
+    private func admitDevice(_ request: EnrollmentRequest) async throws -> (envelope: Data, epoch: Int) {
         let vk = try requireKey()
         try await config.gate.authenticate(reason: "Add \(request.name) to your box")
         let epoch = try requireIdentity().epoch
@@ -536,13 +642,35 @@ public actor Vault {
             try store.setIdentity(identity)
         }
         try writeManifest()
-        _ = try? await sync()
+        return (envelope, epoch)
     }
 
     /// New device, step 3 (after approval): fetch own envelope. Then `unlock()` and `sync()` work.
+    ///
+    /// After `prepareEnrollment(lane:)`, the envelope is taken only with an approval the kept pairing secret proves, for exactly
+    /// that envelope and the box it hangs under: anyone who can write to the storage could otherwise build a box of their own
+    /// around this device's public keys. `EnrollmentError.notApprovedYet` until it is there (poll), `.approvalUnproven` if an
+    /// envelope is there that nobody with the secret approved.
     public func completeEnrollment() async throws {
         var id = try requireIdentity()
-        let (envelope, epoch) = try await lane().ownEnvelope()
+        let box = try lane()
+        if let record = box as? RecordBox, let kept = id.pairingSecret {
+            let secret = try PairingSecret(rawValue: kept)
+            let grant: (envelope: Data, epoch: Int, rootAdminKey: Data, approval: ControlRecords.EnrollApproval?)
+            do { grant = try await record.enrollmentGrant() } catch SyncError.notFound { throw EnrollmentError.notApprovedYet }
+            guard let approval = grant.approval else { throw EnrollmentError.notApprovedYet }
+            guard let mac = Data(base64URLEncoded: approval.mac),
+                  secret.isValidApproval(mac, deviceID: id.deviceID, envelopeHash: grant.envelope.sha256Hex(),
+                                         rootAdminKey: grant.rootAdminKey, epoch: grant.epoch) else { throw EnrollmentError.approvalUnproven }
+            try? await record.endEnrollment()   // best effort: a leftover request is harmless, and the approver drops members
+            id.pairingSecret = nil
+            id.envelope = grant.envelope
+            id.epoch = grant.epoch
+            id.enrollmentUnconfirmed = true
+            try store.setIdentity(id)
+            return
+        }
+        let (envelope, epoch) = try await box.ownEnvelope()
         id.envelope = envelope
         id.epoch = epoch
         id.enrollmentUnconfirmed = true   // until the code shown by the approving device has been checked

@@ -90,6 +90,9 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
     /// The box on the server this device belongs to (`/v1/bootstrap` returns it). nil for identities from before accounts
     /// existed: the server resolves a recovery request without a box to its pre-accounts box.
     public var boxID: String?
+    /// The pairing secret (`PairingSecret.rawValue`) of an enrollment over a storage lane, kept until it completes: the approval
+    /// the approver writes is checked against it. nil otherwise.
+    public var pairingSecret: Data?
 
     public init(deviceID: String, deviceName: String, serverURL: URL?, keyStore: String, envelope: Data? = nil,
                 recoveryPublicKey: Data? = nil, recoveryEnvelope: Data? = nil,
@@ -123,6 +126,7 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
         keyUnconfirmed = try c.decodeIfPresent(Bool.self, forKey: .keyUnconfirmed) ?? false
         activatesAt = try c.decodeIfPresent(Int.self, forKey: .activatesAt)
         boxID = try c.decodeIfPresent(String.self, forKey: .boxID)
+        pairingSecret = try c.decodeIfPresent(Data.self, forKey: .pairingSecret)
     }
 }
 
@@ -602,6 +606,10 @@ public final class LocalStore: Sendable {
 
     public func recentEventsJSON() throws -> Data? { try getMeta("events") }
     public func setRecentEventsJSON(_ json: Data) throws { try setMeta("events", json) }
+
+    /// Enrollment requests seen on a storage lane (`[ReceivedEnrollment]`, kept by `LaneEngine`).
+    public func receivedEnrollmentsJSON() throws -> Data? { try getMeta("enrollments") }
+    public func setReceivedEnrollmentsJSON(_ json: Data) throws { try setMeta("enrollments", json) }
 
     /// Drops a record that never reached the server (local create followed by local delete).
     public func forget(_ id: String, keepInTrash: Bool = false) throws {
