@@ -10,21 +10,25 @@ struct Device {
     let keyStore: SoftwareDeviceKeyStore
     let gate: RecordingGate
     let vault: Vault
+    let laneProvider: (@Sendable (LocalIdentity, @escaping @Sendable () -> LockedKey?) throws -> any BoxLane)?
 
-    init(_ name: String, gate: RecordingGate = RecordingGate(), fillWindow: TimeInterval = 300) throws {
+    /// `laneProvider` nil: the device syncs with the Bisel server at its identity's address.
+    init(_ name: String, gate: RecordingGate = RecordingGate(), fillWindow: TimeInterval = 300,
+         laneProvider: (@Sendable (LocalIdentity, @escaping @Sendable () -> LockedKey?) throws -> any BoxLane)? = nil) throws {
         self.name = name
+        self.laneProvider = laneProvider
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("bisel-flow-\(name)-\(UUID().uuidString)")
         location = StoreLocation(directory: dir)
         keyStore = SoftwareDeviceKeyStore(directory: dir)
         self.gate = gate
         vault = try Vault(.init(location: location, keyStore: keyStore, gate: gate, fillWindow: fillWindow, deviceKind: "test",
-                                secrets: FileSecretStore(directory: dir)))
+                                secrets: FileSecretStore(directory: dir), laneProvider: laneProvider))
     }
 
     /// Re-opens the same store and keys as a new process would.
     func relaunched(fillWindow: TimeInterval = 300) throws -> Vault {
         try Vault(.init(location: location, keyStore: keyStore, gate: gate, fillWindow: fillWindow, deviceKind: "test",
-                        secrets: FileSecretStore(directory: location.directory)))
+                        secrets: FileSecretStore(directory: location.directory), laneProvider: laneProvider))
     }
 
     var signedClientFactory: (URL, String) -> SyncClient {
@@ -53,8 +57,10 @@ extension Device {
     }
 
     /// Enrolls `self` through `approver` the way a second Mac or iPhone would be added.
-    func enroll(through approver: Device, server: TestServer) async throws {
-        let request = try await vault.prepareEnrollment(server: server.url, deviceName: name)
+    func enroll(through approver: Device, server: TestServer) async throws { try await enroll(through: approver, address: server.url) }
+
+    func enroll(through approver: Device, address: URL) async throws {
+        let request = try await vault.prepareEnrollment(server: address, deviceName: name)
         try await approver.vault.approveEnrollment(request)
         try await vault.completeEnrollment()
         try await vault.unlock()
