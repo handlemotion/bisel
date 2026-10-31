@@ -6,6 +6,11 @@ struct BiselApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var themes = ThemeStore.shared
 
+    #if BISEL_LANE_CONTRACT
+    // The opt-in CloudKit contract run takes the process over before any scene, AppModel or vault exists.
+    init() { LaneContractRun.runIfRequested() }
+    #endif
+
     var body: some Scene {
         MenuBarExtra {
             MenuBarContent()

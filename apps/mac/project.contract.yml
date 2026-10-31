@@ -1,0 +1,24 @@
+# Contract spec: the SIGNED Debug app (iCloud entitlement, Development CloudKit) plus the lane contract flows, so the same
+# contract the flow tests run on FakeLane and the local server can run on real CloudKit (docs/SYNC-LANES.md §10, L3).
+# Opt-in and manual, never CI: apps/mac/Tools/run-cloudkit-contract.sh generates, builds to a scratch DerivedData path and
+# runs it with BISEL_DEV_LANE_CONTRACT=cloudkit.
+# Generate:  cd apps/mac && xcodegen generate --spec project.contract.yml      -> BiselLaneContract.xcodeproj
+# NEVER archive or ship from BiselLaneContract.xcodeproj: its BiselCore carries the software key store and the contract flows.
+include:
+  - project.yml
+name: BiselLaneContract
+packages:
+  BiselCore:
+    path: Packages/BiselCore
+    traits: [SoftwareKeys]
+targets:
+  Bisel:
+    dependencies:
+      - package: BiselCore
+        product: BiselCloudKit
+      - package: BiselCore
+        product: BiselLaneContract
+    settings:
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG BISEL_DEV_FIXTURE BISEL_SOFTWARE_KEYS BISEL_LANE_CONTRACT"
