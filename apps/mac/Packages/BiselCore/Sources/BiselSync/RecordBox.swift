@@ -290,13 +290,14 @@ public struct RecordBox: BoxLane {
     /// Recovery on storage anyone with the account can write: the box must be the one the phrase vouched for. Its head has to
     /// descend from the admin key the recovery signing key `recoverySigningKey` signed (`ControlRecords.Recovery.anchor`), and the
     /// envelope then has to open to the key that head ends in: `adminKey` is that key's public half, for the caller to compare.
-    public func anchoredRecoveryEnvelope(recoverySigningKey: Data) async throws -> (envelope: Data, epoch: Int, adminKey: Data) {
+    /// `chain` is the head's admin-key chain, from the same read, for the freshness witness to be checked against.
+    public func anchoredRecoveryEnvelope(recoverySigningKey: Data) async throws -> (envelope: Data, epoch: Int, adminKey: Data, chain: [ControlRecords.AKLink]) {
         guard let (head, _) = try await currentHead(), let root = head.aks.first?.ak, let current = head.aks.last?.ak,
               let (rec, envelope) = try await recovery(under: head),
               let anchor = rec.anchor.flatMap({ Data(base64URLEncoded: $0) }),
               let signer = try? Curve25519.Signing.PublicKey(rawRepresentation: recoverySigningKey),
               signer.isValidSignature(anchor, for: ControlRecords.anchorMessage(root: root)) else { throw SyncError.notAuthorized }
-        return (envelope, rec.epoch, current)
+        return (envelope, rec.epoch, current, head.aks)
     }
 
     public func recoveryRegister(device: WireDevice, epoch: Int, admin: AdminSigner) async throws -> Date? {

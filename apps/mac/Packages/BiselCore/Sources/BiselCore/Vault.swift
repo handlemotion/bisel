@@ -128,12 +128,16 @@ public actor Vault {
         /// (`cloudkit://` addresses); flows inject their own. A lane that is only storage is wrapped in a `RecordBox`, which keeps
         /// the box's control state as signed records on it.
         public var laneProvider: LaneProvider?
+        /// The second freshness witness for lanes that are only storage (docs/SYNC-LANES.md §8): `ICloudFreshnessWitness` on the
+        /// signed app with a CloudKit lane, nil elsewhere (the server lane numbers its own history; BiselDev has no iCloud).
+        public var freshnessWitness: (any FreshnessWitness)?
 
         public init(location: StoreLocation, keyStore: any DeviceKeyStore, gate: any BiometricGate = LocalAuthenticationGate(),
                     fillWindow: TimeInterval = 300, deviceKind: String = "mac", secrets: (any SecretStore)? = nil,
-                    laneProvider: LaneProvider? = nil) {
+                    laneProvider: LaneProvider? = nil,
+                    freshnessWitness: (any FreshnessWitness)? = nil) {
             self.location = location; self.keyStore = keyStore; self.gate = gate
-            self.fillWindow = fillWindow; self.deviceKind = deviceKind; self.laneProvider = laneProvider
+            self.fillWindow = fillWindow; self.deviceKind = deviceKind; self.laneProvider = laneProvider; self.freshnessWitness = freshnessWitness
             if let secrets { self.secrets = secrets }
             else if let se = keyStore as? SecureEnclaveDeviceKeyStore { self.secrets = KeychainSecretStore(accessGroup: se.accessGroup) }
             else { self.secrets = nil }
@@ -710,7 +714,9 @@ public actor Vault {
         let recoveryEnvelope: Data, epoch: Int, expectedAdmin: Data?
         if let box = recovering as? RecordBox {
             // Storage anyone with the account can write: only a box the phrase itself vouched for, and only the key its head ends in.
-            (recoveryEnvelope, epoch, expectedAdmin) = try await box.anchoredRecoveryEnvelope(recoverySigningKey: keys.publicKey)
+            let anchored = try await box.anchoredRecoveryEnvelope(recoverySigningKey: keys.publicKey)
+            (recoveryEnvelope, epoch, expectedAdmin) = (anchored.envelope, anchored.epoch, anchored.adminKey)
+            try await checkFreshness(chain: anchored.chain)
         } else {
             (recoveryEnvelope, epoch) = try await recovering.recoveryEnvelope()
             expectedAdmin = nil
@@ -734,6 +740,27 @@ public actor Vault {
         identity.activatesAt = activatesAt.map { Int($0.timeIntervalSince1970) }
         try store.setIdentity(identity)
         setKey(vk)
+    }
+
+    /// A device recovering from nothing has only the lane's word for how far the box got. The freshness witness, kept elsewhere,
+    /// may know better: a head that is a different chain (a removed device's fork) or an older epoch (a restored snapshot, whose
+    /// recovery envelope holds a key that was rotated away) is refused. A witness that is off, empty or unusable changes nothing.
+    private func checkFreshness(chain: [ControlRecords.AKLink]) async throws {
+        guard let witness = config.freshnessWitness, let root = chain.first?.ak else { return }
+        let stored = (try? await witness.read(FreshnessStatement.key(root: root))) ?? nil
+        switch LaneVerifier().freshness(stored, chain: chain, counter: nil).state {
+        case .forked: throw FreshnessError.forked
+        case .laneBehind: throw FreshnessError.laneBehind
+        case .unavailable, .unwitnessed, .current: return
+        }
+    }
+
+    /// On a lane that is only storage, the rotation is a new head: read it back at once so the witness moves to the new epoch
+    /// (and a removed device's statements for the old one read as stale) before anyone recovers. Best effort: the next sync does it too.
+    private func witnessRotation() async {
+        guard config.freshnessWitness != nil, let box = try? lane(), !box.capabilities.headIsCursor else { return }
+        let held = liveKey()
+        _ = try? await LaneEngine(store: store, lane: box, vaultKey: { held }, freshness: config.freshnessWitness).run()
     }
 
     /// Replaces the recovery key and envelope (new phrase; the old one stops working immediately).
@@ -1056,7 +1083,7 @@ public actor Vault {
         guard try store.identity()?.serverURL != nil else { return SyncReport() }   // local-only: nothing to sync with
         let held = liveKey()
         let box = try lane()
-        let engine = LaneEngine(store: store, lane: box, vaultKey: { held })
+        let engine = LaneEngine(store: store, lane: box, vaultKey: { held }, freshness: config.freshnessWitness)
         var report: SyncReport
         if try store.identity()?.keyUnconfirmed == true {
             // The key came from the server's relay (recovery phrase, or another device's rotation). A server that knows this
@@ -1135,7 +1162,10 @@ public actor Vault {
         rotationInProgress = true
         defer { rotationInProgress = false }
         for attempt in 0..<6 {
-            if let report = try await rotateOnce(revoking: deviceID) { return report }
+            if let report = try await rotateOnce(revoking: deviceID) {
+                await witnessRotation()
+                return report
+            }
             try await Task.sleep(for: .milliseconds(100 * (attempt + 1)))
         }
         throw RotationError.tooManyConflicts
@@ -1148,11 +1178,11 @@ public actor Vault {
         let box = try lane()
 
         // 1. A current, fully pushed local view.
-        var report = try await LaneEngine(store: store, lane: box, vaultKey: { held }).run()
+        var report = try await LaneEngine(store: store, lane: box, vaultKey: { held }, freshness: config.freshnessWitness).run()
         if report.rotationAdopted { lock(); throw RotationError.vaultKeyRotated }
         // An earlier rotation left half-folded: finish it first, so the snapshot below is of records that open under the key held.
         if let records = box as? RecordBox, try await records.finishRotation() > 0 {
-            report = try await LaneEngine(store: store, lane: box, vaultKey: { held }).run()
+            report = try await LaneEngine(store: store, lane: box, vaultKey: { held }, freshness: config.freshnessWitness).run()
             if report.rotationAdopted { lock(); throw RotationError.vaultKeyRotated }
         }
         let pending = try store.pendingRecords()
@@ -1374,7 +1404,7 @@ public actor Vault {
         try store.setLaneState(key, state)
 
         // 5. Upload the replica and read the lane back in full: every record this device holds must be there.
-        let engine = LaneEngine(store: store, lane: target, vaultKey: { k })
+        let engine = LaneEngine(store: store, lane: target, vaultKey: { k }, freshness: config.freshnessWitness)
         let first = try await engine.run()
         let check = try await engine.run(audit: true)
         let missing = try store.recordsBehind(key).count + store.pendingCount()
@@ -1420,7 +1450,7 @@ public actor Vault {
         let mine = try k.withKey { try VaultAdmin.signingKey(vaultKey: $0).publicKey.rawRepresentation }
         guard try await target.headAdminKey() == mine else { throw MigrationError.notInvited }
         try store.forgetLane(target.id.rawValue)
-        let report = try await LaneEngine(store: store, lane: target, vaultKey: { k }).run()
+        let report = try await LaneEngine(store: store, lane: target, vaultKey: { k }, freshness: config.freshnessWitness).run()
         var updated = try requireIdentity()
         updated.serverURL = address
         try store.setIdentity(updated)

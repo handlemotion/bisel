@@ -20,6 +20,10 @@ public struct StorageUnderTest: Sendable {
     public let lane: any SyncLane
     /// Set when the storage is the in-memory fake: the hostile flows drive it directly.
     public let fake: FakeLane?
+    /// The freshness witness every device of the flow shares, as Macs on one Apple ID share iCloud key-value storage.
+    public let witness: (any FreshnessWitness)?
+    /// Set when the witness is the in-memory fake: the hostile flows write to it as a removed device on the account would.
+    public let fakeWitness: FakeFreshnessWitness?
     /// The store loses a record (the fake: silently; CloudKit: a hard delete, which it then reports).
     public let lose: @Sendable (_ id: String) async throws -> Void
     /// Tears the storage down after the flow (CloudKit: deletes the zone).
@@ -28,15 +32,17 @@ public struct StorageUnderTest: Sendable {
     /// different account, the target of a migration. Closed with this one.
     public let sibling: @Sendable (_ suffix: String) async throws -> StorageUnderTest
 
-    public init(name: String, lane: any SyncLane, fake: FakeLane? = nil, lose: @escaping @Sendable (String) async throws -> Void,
-                close: @escaping @Sendable () async throws -> Void = {},
+    public init(name: String, lane: any SyncLane, fake: FakeLane? = nil, witness: (any FreshnessWitness)? = nil,
+                lose: @escaping @Sendable (String) async throws -> Void, close: @escaping @Sendable () async throws -> Void = {},
                 sibling: @escaping @Sendable (String) async throws -> StorageUnderTest) {
-        self.name = name; self.lane = lane; self.fake = fake; self.lose = lose; self.close = close; self.sibling = sibling
+        self.name = name; self.lane = lane; self.fake = fake; self.witness = witness; fakeWitness = witness as? FakeFreshnessWitness
+        self.lose = lose; self.close = close; self.sibling = sibling
     }
 
     public static func fake(_ name: String = "fake") -> StorageUnderTest {
         let fake = FakeLane(name: name)
-        return StorageUnderTest(name: name, lane: fake, fake: fake, lose: { fake.dropSilently($0) }, sibling: { .fake("\(name)-\($0)") })
+        return StorageUnderTest(name: name, lane: fake, fake: fake, witness: FakeFreshnessWitness(), lose: { fake.dropSilently($0) },
+                                sibling: { .fake("\(name)-\($0)") })
     }
 }
 
@@ -47,6 +53,7 @@ public final class Rig: @unchecked Sendable {
     /// Every device reaches the storage through this, so a flow can make the lane stop taking writes part-way (pass-through until armed).
     public let flaky: FlakyLane?
     public var fake: FakeLane? { storage?.fake }
+    public var fakeWitness: FakeFreshnessWitness? { storage?.fakeWitness }
     public var address: URL { server?.url ?? Self.address(of: storage?.name ?? "box") }
     /// The storage as the devices reach it: behind the account a Mac is signed in to (`AccountLane`), so a flow can sign out or
     /// switch accounts on any storage.
@@ -115,7 +122,7 @@ public final class Rig: @unchecked Sendable {
         return try Device(name, laneProvider: { [self] id, _ in
             guard let url = id.serverURL, url.scheme == "lane", let host = url.host else { return nil }
             return lock.withLock { lanes[host] }
-        })
+        }, freshnessWitness: storage?.witness)
     }
 
     /// Where a box comes from in a move: the real server when this run can start one, another store otherwise.

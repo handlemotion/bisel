@@ -788,6 +788,99 @@ public enum LaneContract {
             let kept = try await a.vault.trash().first { $0.itemID == bank.id }
             c.expect(kept?.item.password == "bank-pw", "the version it replaced is kept and can be restored")
         },
+
+        // The freshness witness (docs/SYNC-LANES.md §8): a revoked Mac on the same Apple ID keeps the admin key of the epoch it was
+        // cut off in. Against a device recovering fresh, which has seen nothing newer, only a second store can tell its work apart.
+        ContractFlow(name: "a revoked device that forks the chain with the old admin key cannot make a fresh device recover into its key, and its forked witness is put right") { rig, c in
+            let fake = try c.require(rig.fake), witness = try c.require(rig.fakeWitness)
+            let a = try rig.device("a"), b = try rig.device("b")
+            let phrase = try await rig.bootstrap(a)
+            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            let bIdentity = try c.require(try await b.vault.identity())
+            let oldVK = try await b.keyStore.openEnvelope(try c.require(bIdentity.envelope), reason: "test")
+            try await a.vault.revoke(deviceID: bIdentity.deviceID)
+            let head = try c.require(ControlRecords.decode(ControlRecords.Head.self, try c.require(fake.record(ControlRecords.headID)).blob))
+            let key = FreshnessStatement.key(root: try c.require(head.aks.first?.ak))
+            c.expect(witness.all[key] != nil, "the rotation is witnessed at once")
+
+            // An epoch 2 of its own: a key it picked, chained from the epoch-1 admin key it kept, and a recovery record whose envelope
+            // (sealed to the public recovery key) holds the key it picked. The anchor still holds: the root is the box's own.
+            let real = try c.require(ControlRecords.decode(ControlRecords.Recovery.self, try c.require(fake.record(ControlRecords.recoveryID)).blob))
+            let evil = BiselRandom.bytes(32)
+            let forkAdmin = try AdminSigner(vaultKey: evil)
+            let link = ControlRecords.AKLink(epoch: 2, ak: forkAdmin.publicKey,
+                                             sig: try AdminSigner(vaultKey: oldVK).sign(ControlRecords.chainMessage(newKey: forkAdmin.publicKey)))
+            let forkChain = [head.aks[0], link]
+            var forkHead = LaneRecord(kind: .head, id: ControlRecords.headID, rev: 0, epoch: 2,
+                                      blob: try ControlRecords.encode(ControlRecords.Head(epoch: 2, aks: forkChain)), writer: bIdentity.deviceID)
+            forkHead.sig = try forkAdmin.sign(forkHead.canonical)
+            let enc = try c.require(Data(base64URLEncoded: real.encPubkey)), sig = try c.require(Data(base64URLEncoded: real.pubkey))
+            let forged = ControlRecords.Recovery(seq: real.seq + 1, epoch: 2, pubkey: real.pubkey, encPubkey: real.encPubkey,
+                                                 envelope: try RecoveryKeys.seal(vaultKey: evil, toEncryptionKey: enc, signingKey: sig, epoch: 2).base64URLEncoded(),
+                                                 anchor: real.anchor)
+            var recovery = LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: 2, blob: try ControlRecords.encode(forged),
+                                      writer: bIdentity.deviceID)
+            recovery.sig = try forkAdmin.sign(recovery.canonical)
+            fake.inject(forkHead)
+            fake.inject(recovery)
+
+            let first = try rig.device("fresh")
+            do { try await rig.recover(first, phrase: phrase); c.fail("a fresh device must not recover into the forked chain") }
+            catch FreshnessError.forked {}
+
+            // It writes the witness too, for its fork. A device of the box that syncs sees the fork and puts its own statement back.
+            let statement = FreshnessStatement(epoch: 2, aks: forkChain, counter: 1 << 30, writer: bIdentity.deviceID, ts: 0)
+            let blob = try ControlRecords.encode(statement)
+            witness.plant(SignedFreshness(statement: blob, sig: try forkAdmin.sign(FreshnessStatement.message(blob))), key: key)
+            let report = try await a.vault.sync()
+            c.expect(report.freshness == .forked, "the device of the box raises the fork (\(report.freshness))")
+            c.expect(witness.all[key]?.statement != blob, "the forked statement is replaced")
+            let second = try rig.device("second")
+            do { try await rig.recover(second, phrase: phrase); c.fail("a fresh device must not recover into the forked chain") }
+            catch FreshnessError.forked {}
+        },
+        ContractFlow(name: "a genuine snapshot from before a revoke, restored to the storage, is refused by a device recovering fresh") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a"), b = try rig.device("b")
+            let phrase = try await rig.bootstrap(a)
+            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            let beforeRevoke = fake.snapshot()   // epoch 1: its recovery envelope holds the key b has
+            try await a.vault.revoke(deviceID: try c.require(try await b.vault.identity()?.deviceID))
+            c.expect(try await a.vault.sync().freshness == .current, "the witness has the rotation")
+
+            fake.restore(beforeRevoke)
+            let fresh = try rig.device("fresh")
+            do { try await rig.recover(fresh, phrase: phrase); c.fail("a fresh device must not recover from a snapshot older than the witness") }
+            catch FreshnessError.laneBehind {}
+        },
+        ContractFlow(name: "with the freshness witness unreachable or cleared, a box syncs and recovers as before and says which") { rig, c in
+            let witness = try c.require(rig.fakeWitness)
+            witness.setReachable(false)
+            let a = try rig.device("a")
+            let phrase = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            c.expect(try await a.vault.sync().freshness == .unavailable, "an unreachable witness is reported as such")
+            let fresh = try rig.device("fresh")
+            try await rig.recover(fresh, phrase: phrase)
+            try await fresh.vault.sync()
+            c.expect(try await fresh.vault.revealPassword(id: bank.id) == "bank-pw", "recovery works without the witness")
+
+            witness.setReachable(true)
+            c.expect(try await a.vault.sync().freshness == .current, "once reachable, the witness is written and the lane is current")
+            // Cleared (the owner deleted iCloud data, or anyone on the account wrote junk): nothing to compare, nothing refused.
+            let key = try c.require(witness.all.keys.first)
+            witness.plant(SignedFreshness(statement: Data("{}".utf8), sig: Data()), key: key)
+            let again = try rig.device("again")
+            try await rig.recover(again, phrase: phrase)
+            c.expect(try await fresh.vault.sync().freshness == .current, "a device of the box writes the witness again")
+            let restored = try c.require(witness.all[key])
+            c.expect(LaneVerifier().freshness(restored, chain: try c.require(ControlRecords.decode(ControlRecords.Head.self, try c.require(rig.fake?.record(ControlRecords.headID)).blob)).aks,
+                                              counter: nil).state == .current, "the rewritten statement verifies")
+        },
     ]
 }
 #endif

@@ -119,6 +119,7 @@ targets:
         # com.apple.security.app-sandbox: Accessibility fill needs an unsandboxed process (SPEC.md §8). Hardened runtime is on.
         # It carries iCloud / CloudKit for the sync lane (docs/SYNC-LANES.md §3, D1): a restricted entitlement, so the signed
         # build needs a provisioning profile with the container (Xcode creates it with -allowProvisioningUpdates).
+        # And iCloud key-value storage for the freshness witness (docs/SYNC-LANES.md §8, D5); the same profile grants it.
         CODE_SIGN_ENTITLEMENTS: Bisel/Bisel.entitlements
         GENERATE_INFOPLIST_FILE: NO
         COMBINE_HIDPI_IMAGES: YES

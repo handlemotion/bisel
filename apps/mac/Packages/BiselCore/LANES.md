@@ -89,6 +89,14 @@ folded. A crash or a dropped connection at any point leaves a box every device c
 - On iCloud, also tell the person to remove the revoked device from their Apple Account: it keeps its iCloud session and can still
   delete or spam records (availability, never confidentiality; SYNC-LANES §5, §7).
 
+## Freshness witness (D5)
+
+iCloud boxes check the lane against a second witness in iCloud key-value storage (`ICloudFreshnessWitness`, passed to the Vault by
+`VaultService`; SYNC-LANES §8). `VaultService.freshness` (from `SyncReport.freshness`) after each sync:
+`.forked` is an **alarm** ("a removed device is still writing to your box: remove it from your Apple Account"); `.laneBehind` is
+transient ("catching up"); `.unwitnessed` / `.unavailable` / `.current` need nothing. A device recovering with the 24 words refuses a
+forked or older box (`FreshnessError.forked` / `.laneBehind`): show the error, not a retry loop.
+
 ## Push
 
 `AppDelegate` registers for remote notifications and hands them to `CloudKitLane.handleRemoteNotification`; every push and every

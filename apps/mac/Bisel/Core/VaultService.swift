@@ -66,6 +66,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     /// Where the box syncs and whether that works right now (iCloud signed out, another Apple Account, data deleted in
     /// iCloud, moved elsewhere). Refreshed at launch and after every sync. See BiselCore/LANES.md for what each state asks of the UI.
     private(set) var laneStatus: LaneStatus = .thisDeviceOnly
+    /// What the freshness witness said at the last sync. `.forked` is an alarm (a removed device is writing a box of its own);
+    /// `.laneBehind` resolves itself. See BiselCore/LANES.md.
+    private(set) var freshness: FreshnessState = .unavailable
     private(set) var deviceID = ""
     /// Recovery phrase shown right after set-up, until the user confirms "I have stored it".
     private(set) var pendingPhrase: RecoveryPhrase?
@@ -108,7 +111,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             let keyStore = BiselEnvironment.makeKeyStore(directory: directory)
             // The core's own window is a backstop (30 min); the app enforces the user's fill window and idle timeout.
             vault = try Vault(.init(location: StoreLocation(directory: directory), keyStore: keyStore, gate: AppGate(),
-                                    fillWindow: 30 * 60, deviceKind: "mac", laneProvider: Self.laneProvider))
+                                    fillWindow: 30 * 60, deviceKind: "mac", laneProvider: Self.laneProvider,
+                                    freshnessWitness: Self.freshnessWitness))
         } catch {
             startupError = "Could not open the local box store: \(error.localizedDescription)"
             Log.app.error("vault init failed: \(error.localizedDescription)")
@@ -126,6 +130,16 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     private static var laneProvider: Vault.LaneProvider? {
         #if BISEL_CLOUDKIT
         CloudBox.provider
+        #else
+        nil
+        #endif
+    }
+
+    /// The second freshness witness for iCloud boxes (docs/SYNC-LANES.md §8, D5): iCloud key-value storage, a separate service
+    /// from the box's zone. The engine consults it only on storage lanes, so server boxes are unaffected.
+    private static var freshnessWitness: (any FreshnessWitness)? {
+        #if BISEL_CLOUDKIT
+        ICloudFreshnessWitness()
         #else
         nil
         #endif
@@ -630,6 +644,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             }
             if report.pulled > 0 || report.pushed > 0 || !report.conflicts.isEmpty { await reload() }
             await refreshLaneStatus()
+            freshness = report.freshness
+            if report.freshness == .forked { Log.app.fault("freshness witness: the lane and the witness hold two chains of this box") }
             // D4 (docs/SYNC-LANES.md §6, §13): a box only in iCloud has no second copy if the Apple Account is lost. INTEGRATION
             // POINT for the backup reminder of the .bisel-backup work (PR #4): once it is on main, ask
             // `vault.backupStatus(policy:)` here (it classifies a `cloudkit://` address as iCloud-only) and raise its reminder.
