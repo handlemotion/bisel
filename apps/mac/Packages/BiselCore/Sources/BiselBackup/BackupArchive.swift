@@ -9,6 +9,9 @@ public enum BackupError: Error, Sendable, Equatable, LocalizedError {
     case notABackup
     /// Written by a newer Bisel (format `version`); update the app.
     case newerVersion(Int)
+    /// Format 2 (JSON): nothing in it proves it was not edited (anyone who can write the file could swap in a box key of
+    /// their own, SECURITY-REVIEW B1), so it is not restored. Make a new backup from a device that has the box.
+    case unverifiableFormat(Int)
     /// The file ends early: `expected` bytes, `actual` present (an interrupted copy or download).
     case truncated(expected: Int, actual: Int)
     /// The file was changed after it was written (corruption, or someone edited it). Nothing in it is used.
@@ -26,6 +29,7 @@ public enum BackupError: Error, Sendable, Equatable, LocalizedError {
         switch self {
         case .notABackup: return "This file is not a Bisel backup."
         case .newerVersion(let v): return "This backup was made by a newer version of Bisel (format \(v)). Update Bisel to restore it."
+        case .unverifiableFormat: return "This backup was made by an older version of Bisel and cannot be checked for tampering, so it is not restored. Make a new backup from a device that has your box."
         case .truncated(let expected, let actual): return "This backup is incomplete (\(actual) of \(expected) bytes). Copy the whole file again."
         case .tampered: return "This backup was changed after it was written and cannot be trusted. Nothing was restored."
         case .wrongPhrase: return "These 24 words do not open this backup. Use the recovery phrase of the box it came from."

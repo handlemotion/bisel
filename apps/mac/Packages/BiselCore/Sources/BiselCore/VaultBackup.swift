@@ -89,7 +89,7 @@ extension Vault {
 
     /// The header of a backup file (format, box, date, size), checked for truncation and damage. Needs no phrase.
     public nonisolated static func inspectBackup(at url: URL) throws -> BackupHeader {
-        try BackupArchive.inspect(try Data(contentsOf: url))
+        try BackupArchive.inspect(try verifiableBackup(at: url))
     }
 
     // MARK: restore
@@ -100,7 +100,7 @@ extension Vault {
     @discardableResult
     public func restoreBackup(from url: URL, phrase: RecoveryPhrase, deviceName: String) throws -> BackupRestoreReport {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
-        let file = try Data(contentsOf: url)
+        let file = try Self.verifiableBackup(at: url)
         let header = try BackupArchive.inspect(file)
         var contents = try BackupArchive.open(file, phrase: phrase)
         defer { contents.zeroize() }
@@ -141,7 +141,7 @@ extension Vault {
     @discardableResult
     public func mergeBackup(from url: URL, phrase: RecoveryPhrase) async throws -> BackupRestoreReport {
         let k = try requireKey()
-        let file = try Data(contentsOf: url)
+        let file = try Self.verifiableBackup(at: url)
         let header = try BackupArchive.inspect(file)
         var contents = try BackupArchive.open(file, phrase: phrase)
         defer { contents.zeroize() }
@@ -231,7 +231,7 @@ extension Vault {
         }
     }
 
-    // MARK: legacy entry points (format 2 files still open)
+    // MARK: other entry points
 
     /// Disaster recovery onto a fresh (un-bootstrapped) server: opens the backup with the phrase, bootstraps
     /// this device with the same recovery key, and re-uploads every item (re-sealed for its new revision).
@@ -243,10 +243,7 @@ extension Vault {
     public func importBackup(from url: URL, phrase: RecoveryPhrase, server: URL, credential: SyncClient.BootstrapCredential,
                              deviceName: String) async throws {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
-        let data = try Data(contentsOf: url)
-        guard data.starts(with: Data("BISELBAK".utf8)) else {
-            return try await importLegacyBackup(BackupFile.decode(data), phrase: phrase, server: server, credential: credential, deviceName: deviceName)
-        }
+        let data = try Self.verifiableBackup(at: url)
         _ = try BackupArchive.inspect(data)
         var contents = try BackupArchive.open(data, phrase: phrase)
         defer { contents.zeroize() }
@@ -262,65 +259,23 @@ extension Vault {
         _ = try await sync()
     }
 
-    /// Disaster recovery without any server (for example after the Secure Enclave key was invalidated by a fingerprint
-    /// change): rebuilds a local-only vault from a backup and its phrase. A server can be connected afterwards with
-    /// `connectServer`, which uploads every restored item. Returns how many items failed authentication and were skipped
-    /// (format 2 only; a format 3 file restores whole or not at all).
+    /// Disaster recovery without any server: `restoreBackup`, for callers of the older name. Always returns 0 (a format 3 file
+    /// restores whole or not at all).
     @discardableResult
     public func importBackupLocal(from url: URL, phrase: RecoveryPhrase, deviceName: String) throws -> Int {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
+        _ = try Self.verifiableBackup(at: url)
+        try restoreBackup(from: url, phrase: phrase, deviceName: deviceName)
+        return 0
+    }
+
+    /// The file's bytes, refusing a format 2 (JSON) file by name rather than as "not a backup".
+    private static func verifiableBackup(at url: URL) throws -> Data {
         let data = try Data(contentsOf: url)
-        if data.starts(with: Data("BISELBAK".utf8)) {
-            try restoreBackup(from: url, phrase: phrase, deviceName: deviceName)
-            return 0
+        if !data.starts(with: Data("BISELBAK".utf8)), let legacy = try? BackupFile.decode(data) {
+            throw BackupError.unverifiableFormat(legacy.version)
         }
-        let file = try BackupFile.decode(data)
-        var (vkData, _) = try file.vaultKey(phrase: phrase)
-        defer { vkData.zeroize() }
-        try requireOpenableItems(file, SymmetricKey(data: vkData))
-        let keys = try RecoveryKeys(phrase: phrase)
-        let bundle = RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
-                                    envelope: try keys.seal(vaultKey: vkData, epoch: 1))
-        // The owner just proved they hold this phrase.
-        try installLocalIdentity(vaultKey: vkData, bundle: bundle, deviceName: deviceName, recoveryUnconfirmed: false)
-        return try restore(file, vaultKey: SymmetricKey(data: vkData))
-    }
-
-    private func importLegacyBackup(_ file: BackupFile, phrase: RecoveryPhrase, server: URL, credential: SyncClient.BootstrapCredential,
-                                    deviceName: String) async throws {
-        var (vkData, _) = try file.vaultKey(phrase: phrase)
-        defer { vkData.zeroize() }
-        let vk = SymmetricKey(data: vkData)
-        try requireOpenableItems(file, vk)
-        let keys = try RecoveryKeys(phrase: phrase)
-        let bundle = RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
-                                    envelope: try keys.seal(vaultKey: vkData, epoch: 1))
-        try await register(server: server, credential: credential, deviceName: deviceName, vaultKey: vkData, recovery: bundle)
-        let skipped = try restore(file, vaultKey: vk)
-        // Upload what was restored before reporting problems: the vault exists from here on, so a thrown error must not leave
-        // the good items stuck behind it (a second import is refused as `alreadyConfigured`).
-        _ = try await sync()
-        if skipped > 0 { throw VaultError.badBackup("\(skipped) item(s) in the backup failed authentication and were skipped; the rest was restored") }
-    }
-
-    /// Refuses a backup none of whose items opens (wrong or mismatched file) before anything is bootstrapped or written.
-    private func requireOpenableItems(_ file: BackupFile, _ vk: SymmetricKey) throws {
-        let live = file.records.filter { !$0.deleted }
-        guard live.isEmpty || live.contains(where: { (try? ItemSealer.open(blob: $0.blob, id: $0.id, rev: $0.rev, vaultKey: vk)) != nil }) else {
-            throw VaultError.badBackup("none of the \(live.count) item(s) in this backup opens with its key; the file is damaged")
-        }
-    }
-
-    /// Re-seals every live item of a format 2 backup as a new local edit; returns how many failed authentication.
-    private func restore(_ file: BackupFile, vaultKey vk: SymmetricKey) throws -> Int {
-        var skipped = 0
-        for rec in file.records where !rec.deleted {
-            guard let payload = try? ItemSealer.open(blob: rec.blob, id: rec.id, rev: rec.rev, vaultKey: vk) else { skipped += 1; continue }
-            try store.commitLocal(id: rec.id, deleted: false) { rev in
-                try ItemSealer.seal(payload: payload, id: rec.id, rev: rev, vaultKey: vk)
-            }
-        }
-        return skipped
+        return data
     }
 
     // MARK: helpers

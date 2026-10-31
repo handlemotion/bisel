@@ -518,7 +518,7 @@ struct VaultFlowTests {
         }
     }
 
-    @Test("a tampered, truncated, forged, newer or wrong-phrase backup is refused with its own error and nothing is written")
+    @Test("a tampered, truncated, swapped-envelope, newer, old-format or wrong-phrase backup is refused with its own error and nothing is written")
     func badBackupsAreRefusedBeforeAnyWrite() async throws {
         let a = try Device("a")
         let phrase = try await a.vault.bootstrapLocal(deviceName: "a")
@@ -531,16 +531,29 @@ struct VaultFlowTests {
 
         var flipped = bytes; flipped[bytes.count - 40] ^= 0x01
         var newer = bytes; newer[9] = 4
-        // Someone who knows only the box's public recovery key seals their own box key and items to it.
-        let forged = try BackupArchive.seal(
-            BackupContents(boxID: try Vault.inspectBackup(at: good).boxID, createdAt: Int(Date().timeIntervalSince1970), epoch: 1,
-                           vaultKey: BiselRandom.bytes(32), manifest: VaultManifest(), items: [], history: []),
-            recoveryEncryptionPublicKey: try #require(try await a.vault.identity()?.recoveryEncryptionPublicKey), backupKey: BiselRandom.bytes(32))
+        // SECURITY-REVIEW B1: someone who can write the file (a synced folder) but knows only the box's public recovery keys
+        // swaps the envelope for one holding a box key and items of their own: same header, new HPKE part, a fresh integrity tag.
+        let header = try Vault.inspectBackup(at: good)
+        let identity = try #require(try await a.vault.identity())
+        let encPub = try #require(identity.recoveryEncryptionPublicKey), sigPub = try #require(identity.recoveryPublicKey)
+        let theirKey = BiselRandom.bytes(32)
+        let swapped = try BackupArchive.seal(
+            BackupContents(boxID: header.boxID, createdAt: Int(header.createdAt.timeIntervalSince1970), epoch: 1, vaultKey: theirKey,
+                           manifest: VaultManifest(), items: [BackupEntry(id: BiselRandom.identifier(), rev: 1, updatedAt: 0,
+                                                                          payload: try ItemCodec.encode(login("Theirs", password: "x")))],
+                           history: []),
+            recoveryEncryptionPublicKey: encPub, backupKey: BiselRandom.bytes(32))
+        #expect(swapped.prefix(36) == bytes.prefix(36), "only the envelope, its length and the tag differ")
+        // The same attack on a format 2 file works (the envelope is sealed to the public key in the file), so that format is refused.
+        let oldFormat = try BackupFile(recoveryPublicKey: sigPub, recoveryEncryptionPublicKey: encPub,
+                                       recoveryEnvelope: RecoveryKeys.seal(vaultKey: theirKey, toEncryptionKey: encPub, signingKey: sigPub, epoch: 1),
+                                       epoch: 1, records: []).encoded()
         let cases: [(Data, RecoveryPhrase, BackupError)] = [
             (flipped, phrase, .tampered),
             (bytes.prefix(bytes.count - 100), phrase, .truncated(expected: bytes.count, actual: bytes.count - 100)),
             (newer, phrase, .newerVersion(4)),
-            (forged, phrase, .tampered),
+            (swapped, phrase, .tampered),
+            (oldFormat, phrase, .unverifiableFormat(2)),
             (bytes, try RecoveryPhrase.generate(), .wrongPhrase),
         ]
         let other = try Device("other")
@@ -550,6 +563,7 @@ struct VaultFlowTests {
             try data.write(to: bad)
             let fresh = try Device("fresh")
             await #expect(throws: expected) { try await fresh.vault.restoreBackup(from: bad, phrase: words, deviceName: "fresh") }
+            await #expect(throws: expected) { try await fresh.vault.importBackupLocal(from: bad, phrase: words, deviceName: "fresh") }
             #expect(try await fresh.vault.identity() == nil, "nothing written on a fresh install")
             await #expect(throws: expected) { try await other.vault.mergeBackup(from: bad, phrase: words) }
             #expect(try await other.vault.items().items.map(\.title) == ["Mine"], "nothing written into an existing box")

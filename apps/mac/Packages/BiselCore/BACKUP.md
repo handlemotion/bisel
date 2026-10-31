@@ -39,7 +39,7 @@ let report = try await vault.mergeBackup(from: url, phrase: phrase)             
   - `.notABackup`.
   - `BiselCryptoError.invalidRecoveryPhrase` comes earlier, from `RecoveryPhrase(text)`.
 - Every `BackupError` has an `errorDescription` you can use or replace.
-- Format 2 files (JSON) still restore through `importBackupLocal` / `importBackup(server:)`.
+- `.unverifiableFormat(2)`: an old JSON backup. It is refused because nothing in it shows whether it was edited. The user should make a new backup from a device that has the box.
 
 ## Reminder
 
