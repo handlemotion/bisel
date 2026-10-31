@@ -164,11 +164,18 @@ enum AccessibilityInspector {
         let appEl = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appEl, 0.4)
         var el = field.ref?.element
+        var frameWithoutURL = false
         for _ in 0..<14 {
             guard let cur = el else { break }
-            if string(cur, kAXRoleAttribute) == "AXWebArea", let u = copy(cur, "AXURL") {
-                if let url = u as? URL { return url }
-                if let text = u as? String { return URL(string: text) }
+            if string(cur, kAXRoleAttribute) == "AXWebArea" {
+                // The field's own frame says nothing: an outer web area's address is the embedding page's, not the frame's (a
+                // third-party iframe on bank.com is not bank.com). Unknown, so the browser refuses.
+                if frameWithoutURL { return nil }
+                if let u = copy(cur, "AXURL") {
+                    if let url = u as? URL { return url }
+                    if let text = u as? String { return URL(string: text) }
+                }
+                frameWithoutURL = true
             }
             el = element(cur, kAXParentAttribute)
         }
