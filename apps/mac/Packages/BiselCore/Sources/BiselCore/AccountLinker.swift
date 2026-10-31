@@ -28,7 +28,7 @@ struct LiveLinkTransport: LinkTransport {
 /// recovery phrase of a new box in `.linked`, which the UI must show once. The secret device code never leaves this actor,
 /// is never logged and is dropped the moment it is spent.
 public actor AccountLinker {
-    /// The one server every box uses (the app's `BiselEnvironment.defaultServer`).
+    /// The Bisel server (the app's `BiselEnvironment.defaultServer`). Opt-in: first run never links (`BoxSetup`, SETUP.md).
     public static let defaultServer = URL(string: "https://box.bisel.app")!
 
     public enum Mode: Sendable, Equatable { case newBox, linkLocalBox, claimServerBox }

@@ -4,7 +4,7 @@ Bisel is a password manager for the Mac that I built for myself. It opens from a
 
 ## Mac first, iCloud first
 
-It started as a Mac app plus my own sync server on Cloudflare, and that server still works. At some point it made more sense to sync through the iCloud account people already have, with no server of mine in the middle, so the default path is a CloudKit lane in your private iCloud database. That lane is being built right now, the design and where it's at are in [docs/SYNC-LANES.md](docs/SYNC-LANES.md). The server stays in the repo as an optional lane and its tests keep running in CI, but I'm not developing it further for now ([apps/server](apps/server/README.md)).
+It started as a Mac app plus my own sync server on Cloudflare, and that server still works. At some point it made more sense to sync through the iCloud account people already have, with no server of mine in the middle, so the default path is a CloudKit lane in your private iCloud database. First run puts your box there: create it in iCloud, add another Mac with 8 words, or restore with the 24 words or a backup file. The design is in [docs/SYNC-LANES.md](docs/SYNC-LANES.md). The server stays in the repo as an optional lane you can connect later from Settings, and its tests keep running in CI, but I'm not developing it further for now ([apps/server](apps/server/README.md)).
 
 ## Zero-knowledge, briefly
 

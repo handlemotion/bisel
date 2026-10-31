@@ -78,6 +78,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     /// True from creating a brand-new box until its phrase is confirmed: the only time "Back" may throw the box away.
     private(set) var freshBox = false
     private(set) var unlockedAt: Date?
+    /// First run, iCloud first (BiselCore/SETUP.md): which set-up screen the core says is next. `.welcome` before set-up, `.done`
+    /// or `.attention` once a box is here. The views drive it through the set-up calls below.
+    private(set) var setupState: BoxSetup.State = .checking
     var isBusy = false
 
     // MARK: VaultSearchSource
@@ -86,6 +89,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
 
     // MARK: wiring
     @ObservationIgnored private(set) var vault: Vault?
+    @ObservationIgnored private(set) var setup: BoxSetup?
     @ObservationIgnored private let directory = BiselEnvironment.dataDirectory
     @ObservationIgnored private let usage: UsageStore
     @ObservationIgnored private let index = FuzzySearchIndex()
@@ -116,6 +120,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             vault = try Vault(.init(location: StoreLocation(directory: directory), keyStore: keyStore, gate: AppGate(),
                                     fillWindow: 30 * 60, deviceKind: "mac", laneProvider: Self.laneProvider,
                                     freshnessWitness: Self.freshnessWitness))
+            if let vault { setup = BoxSetup(vault: vault, home: Self.home) }
         } catch {
             startupError = "Could not open the local box store: \(error.localizedDescription)"
             Log.app.error("vault init failed: \(error.localizedDescription)")
@@ -131,8 +136,28 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             self.lock(reason: "Touch ID enrolment changed")
             return true
         }
+        await followSetup()
         await refreshPhase()
         listenForLaneSignals()
+    }
+
+    /// Mirrors the set-up machine's state, and reads this Mac and iCloud once.
+    private func followSetup() async {
+        guard let setup else { return }
+        Task { [weak self] in
+            for await state in await setup.updates() { self?.setupState = state }
+        }
+        let state = await setup.start()
+        Log.app.notice("set-up: \(String(describing: state), privacy: .public)")
+    }
+
+    /// Where new boxes go: the person's iCloud in the signed build, none in BiselDev (no iCloud entitlement; its boxes stay on this Mac).
+    private static var home: (any BoxHome)? {
+        #if BISEL_CLOUDKIT
+        CloudBox.home
+        #else
+        nil
+        #endif
     }
 
     /// The signed build syncs boxes through iCloud (`cloudkit://` addresses); the server stays for boxes that use it.
@@ -246,38 +271,39 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         setPhase(.unlocked)
     }
 
-    /// New vault that lives on this Mac only. A server can be connected later (Settings → Vault).
-    func bootstrapLocal(deviceName: String) async throws {
-        guard let vault else { throw BiselVault.VaultError.notConfigured }
+    /// "Create a box": in this Apple Account's iCloud (`BoxSetup.create`). Throws `SetupError.iCloud(reason)` when iCloud cannot
+    /// take it and `.iCloudHasBox` when iCloud already holds one; nothing is made then. BiselDev (no iCloud) makes it on this Mac
+    /// only. The server is not part of first run: it is opt-in from Settings (`connectServer`).
+    func createBox(deviceName: String) async throws {
+        guard let setup else { throw BiselVault.VaultError.notConfigured }
         isBusy = true; defer { isBusy = false }
-        let phrase = try await vault.bootstrapLocal(deviceName: deviceName)
+        let phrase = try await setup.create(deviceName: deviceName)
+        await didCreate(phrase)
+    }
+
+    /// The person saw that iCloud already holds a box (`SetupError.iCloudHasBox`) and still wants a separate, new one.
+    func createBoxAnyway(deviceName: String) async throws {
+        guard let setup else { throw BiselVault.VaultError.notConfigured }
+        isBusy = true; defer { isBusy = false }
+        let phrase = try await setup.createAnyway(deviceName: deviceName)
+        await didCreate(phrase)
+    }
+
+    /// The person chose to keep a new box on this Mac only (iCloud unavailable). Never chosen for them.
+    func createBoxOnThisMacOnly(deviceName: String) async throws {
+        guard let setup else { throw BiselVault.VaultError.notConfigured }
+        isBusy = true; defer { isBusy = false }
+        let phrase = try await setup.createOnThisMacOnly(deviceName: deviceName)
+        await didCreate(phrase)
+    }
+
+    private func didCreate(_ phrase: RecoveryPhrase) async {
         setRecoveryUnconfirmed(true)
         pendingPhrase = phrase
         freshBox = true
         await refreshPhase()
         setPhase(.unlocked)
-    }
-
-    /// "Create a box": in iCloud when this build has it and an account is signed in (no server involved), otherwise on this Mac
-    /// only (it can be moved to iCloud later with `moveToICloud`). The server is opt-in (`connectServer`).
-    func createBox(deviceName: String) async throws {
-        #if BISEL_CLOUDKIT
-        guard let vault else { throw BiselVault.VaultError.notConfigured }
-        if await CloudBox.isAvailable() {
-            isBusy = true; defer { isBusy = false }
-            let address = CloudBox.newAddress()
-            let phrase = try await vault.bootstrap(lane: address, deviceName: deviceName)
-            setRecoveryUnconfirmed(true)
-            pendingPhrase = phrase
-            freshBox = true
-            await refreshPhase()
-            setPhase(.unlocked)
-            await CloudBox.subscribe(address)
-            return
-        }
-        Log.app.notice("iCloud not available: creating the box on this Mac only")
-        #endif
-        try await bootstrapLocal(deviceName: deviceName)
+        if let address = serverURL { await subscribeIfICloud(address) }
     }
 
     /// Puts this box in iCloud and syncs through it from now on (from the server or from "this Mac only"). The server's copy
@@ -297,14 +323,14 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     }
 
     /// After `.storeMissing` (the box's iCloud data was deleted) or `.accountChanged` (another Apple Account): upload this
-    /// Mac's copy to the iCloud account signed in now. Never done without the person asking.
-    func putBoxInICloudAgain(phrase: String? = nil) async throws {
-        guard let vault, let address = serverURL else { throw BiselVault.VaultError.notConfigured }
+    /// Mac's copy to the iCloud account signed in now (`BoxSetup.moveBoxToThisAccount`). Never done without the person asking;
+    /// refused with `SetupError.iCloudHasBox` when that account already holds another box, unless `evenIfItHoldsAnotherBox`.
+    func putBoxInICloudAgain(phrase: String? = nil, evenIfItHoldsAnotherBox: Bool = false) async throws {
+        guard let setup, let address = serverURL else { throw BiselVault.VaultError.notConfigured }
         isBusy = true; defer { isBusy = false }
-        try await vault.enableLane(address, phrase: try phrase.map(RecoveryPhrase.init))
-        #if BISEL_CLOUDKIT
-        await CloudBox.subscribe(address)
-        #endif
+        await setup.refresh()
+        try await setup.moveBoxToThisAccount(words: try phrase.map(RecoveryPhrase.init), evenIfItHoldsAnotherBox: evenIfItHoldsAnotherBox)
+        await subscribeIfICloud(address)
         await refreshPhase()
         await sync(reason: "put back in iCloud")
     }
@@ -316,11 +342,16 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         await refreshPhase()
     }
 
-    /// Back from the recovery phrase of a box that was created a moment ago and holds nothing: erase it and start over.
+    /// Back from the recovery phrase of a box that was created a moment ago and holds nothing: erase it (here and in iCloud, so
+    /// the next "Create a box" is not taken for a second box) and start over.
     func discardNewBox() async {
-        guard freshBox, pendingPhrase != nil, let vault else { return }
+        guard freshBox, pendingPhrase != nil, let setup else { return }
         isBusy = true; defer { isBusy = false }
-        do { try await vault.removeLocalDevice() } catch { Log.app.error("discarding the new box failed") }
+        do { try await setup.discardNewBox() }
+        catch SetupError.wrongStep {
+            // Made outside the set-up machine (a debug tour): nothing in iCloud to erase.
+            do { try await vault?.removeLocalDevice() } catch { Log.app.error("discarding the new box failed: \(describe(error))") }
+        } catch { Log.app.error("discarding the new box failed: \(describe(error))") }
         setRecoveryUnconfirmed(false)
         await refreshPhase()   // first: the phase goes back to set-up while the phrase is still held, so no other screen shows
         pendingPhrase = nil
@@ -343,9 +374,43 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         freshBox = false
         pendingPhrase = nil
         setRecoveryUnconfirmed(false)
-        Task { await sync(reason: "setup") }
+        Task {
+            // A new box: the set-up machine moves on to `.done`, whose backup status carries the D4 reminder.
+            if case .showPhrase = setupState { _ = try? await setup?.phraseStored() }
+            await sync(reason: "setup")
+            await refreshBackupStatus()
+        }
     }
 
+    /// "I already have one" with the 24 words: the box in this Apple Account's iCloud that they open (`BoxSetup.restore`).
+    /// Throws `SetupError` (`.noBoxInICloud`, `.wrongPhrase`, `.iCloud(reason)`, `.boxForked`…). The server is not tried: a box on
+    /// the server is reached from Settings.
+    func restore(phrase: String, deviceName: String) async throws {
+        guard let setup else { throw BiselVault.VaultError.notConfigured }
+        isBusy = true; defer { isBusy = false }
+        try await setup.restore(words: try RecoveryPhrase(phrase), deviceName: deviceName)
+        await didRestore()
+    }
+
+    /// A `.bisel-backup` file and its 24 words (`BoxSetup.restore(backup:)`): back into iCloud, or merged into the box iCloud holds.
+    func restore(backup url: URL, phrase: String, deviceName: String) async throws {
+        guard let setup else { throw BiselVault.VaultError.notConfigured }
+        isBusy = true; defer { isBusy = false }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        try await setup.restore(backup: url, words: try RecoveryPhrase(phrase), deviceName: deviceName)
+        await didRestore()
+    }
+
+    private func didRestore() async {
+        if let address = (try? await vault?.identity())??.serverURL { await subscribeIfICloud(address) }
+        await refreshPhase()
+        setPhase(.unlocked)
+        await reload()
+    }
+
+    /// The 24 words against a box on the Bisel server (after looking in iCloud). Off the first-run path, which is iCloud only
+    /// (`restore(phrase:deviceName:)`); kept for the opt-in server and the debug flows that run against a local server.
     func recover(server: URL, phrase: String, deviceName: String) async throws {
         guard let vault else { throw BiselVault.VaultError.notConfigured }
         isBusy = true; defer { isBusy = false }
@@ -520,22 +585,30 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     /// New device, step 1: finds the box in this Mac's iCloud and asks to join it. Show `offer.secret.words` (8 words) and
     /// `offer.qrPayload` (QR), and `offer.fingerprint`; then call `finishICloudEnrollment()` until it stops throwing
     /// `EnrollmentError.notApprovedYet`. Throws `LaneError.storeMissing` when this iCloud account holds no box.
-    func startICloudEnrollment(deviceName: String) async throws -> PairingOffer {
-        #if BISEL_CLOUDKIT
-        guard let vault else { throw BiselVault.VaultError.notConfigured }
-        guard let address = try await CloudBox.existingBoxes().first else { throw LaneError.storeMissing }
-        return try await vault.prepareEnrollment(lane: address, deviceName: deviceName)
-        #else
-        throw LaneError.unsupported
-        #endif
+    func startICloudEnrollment(deviceName: String, box: URL? = nil) async throws -> PairingOffer {
+        guard let setup else { throw BiselVault.VaultError.notConfigured }
+        return try await setup.startPairing(deviceName: deviceName, box: box)
     }
 
-    /// New device, step 2 (poll every few seconds while the offer is on screen): takes the envelope once another device
-    /// approved with the words. Then unlock and compare `verificationCode()` as for any enrollment.
-    func finishICloudEnrollment() async throws {
-        guard let vault else { throw BiselVault.VaultError.notConfigured }
-        try await vault.completeEnrollment()
-        if let address = serverURL { await subscribeIfICloud(address) }
+    /// New device, step 2 (poll every few seconds while the offer is on screen): false until another device approved with the
+    /// words; true once the box key is here and unlocked (Touch ID). Then `setupState` is `.compareCode(code)`: show it, and
+    /// `confirmICloudEnrollment(code:)` with the code the other device shows.
+    func finishICloudEnrollment() async throws -> Bool {
+        guard let setup else { throw BiselVault.VaultError.notConfigured }
+        return try await setup.checkPairing()
+    }
+
+    func confirmICloudEnrollment(code: String) async throws {
+        guard let setup else { throw BiselVault.VaultError.notConfigured }
+        try await setup.confirmPairing(code: code)
+        if let address = (try? await vault?.identity())??.serverURL { await subscribeIfICloud(address) }
+        await refreshPhase()
+    }
+
+    /// Gives up on pairing; this Mac forgets its half-made keys.
+    func cancelICloudEnrollment() async throws {
+        guard let setup else { throw BiselVault.VaultError.notConfigured }
+        try await setup.cancelPairing()
         await refreshPhase()
     }
 

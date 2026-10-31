@@ -4,7 +4,8 @@ import UniformTypeIdentifiers
 import BiselCore
 
 /// First run on this Mac, as a short route (Figma "Bisel", node 8:2): welcome → the recovery phrase (Download, Continue) →
-/// import → done. Nothing to type: the Mac's name is the Mac's own and the server is always box.bisel.app.
+/// import → done. Nothing to type: the Mac's name is the Mac's own and the box goes to this Apple Account's iCloud
+/// (`BoxSetup`, BiselCore/SETUP.md). The server is not part of first run: it is opt-in, from Settings.
 /// "I already have a box" is the one detour: the 24 words, nothing else.
 struct SetupView: View {
     let service: VaultService
@@ -68,6 +69,10 @@ struct SetupView: View {
                 }
                 .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
                 .disabled(service.isBusy).accessibilityIdentifier("setup-go")
+                // UI: "I already have one" leads to the 24 words only. Adding this Mac to the box in iCloud with the 8 words or a QR
+                // code (D6; `service.startICloudEnrollment` → `finishICloudEnrollment` → `.compareCode` → `confirmICloudEnrollment`)
+                // and restoring a `.bisel-backup` file (`service.restore(backup:phrase:deviceName:)`) need screens Rodrigo designs
+                // (SETUP.md "Screens to design").
                 Button("I already have one") { go(.recover) }
                     .buttonStyle(PillButtonStyle(primary: false)).accessibilityIdentifier("setup-mode-recover")
             case .recover:
@@ -110,17 +115,21 @@ struct SetupView: View {
         error = nil
         let name = deviceName
         Task {
+            // UI: `SetupError.iCloudHasBox`: this Apple Account's iCloud already holds a box. Rodrigo's "a box already exists in
+            // iCloud" choice goes here: add this Mac to it (`service.startICloudEnrollment`), restore it with the 24 words (the
+            // `.recover` step), or, deliberately, a second box (`service.createBoxAnyway`). Until then: its message.
+            // UI: `SetupError.iCloud(reason)`: iCloud cannot take the box (signed out, off for Bisel, restricted, offline, full,
+            // unavailable). "Keep it on this Mac only" (`service.createBoxOnThisMacOnly`) needs a control Rodrigo designs.
             do { try await service.createBox(deviceName: name) } catch { self.error = describe(error) }
         }
     }
 
+    /// The 24 words open the box in this Apple Account's iCloud (`BoxSetup.restore`).
     private func recover() {
         error = nil
-        let (url, bad) = ServerURLCheck.parse(BiselEnvironment.defaultServer)
-        guard let url else { error = bad; return }
         let phrase = words.joined(separator: " "), name = deviceName
         Task {
-            do { try await service.recover(server: url, phrase: phrase, deviceName: name); words = Array(repeating: "", count: 24) }
+            do { try await service.restore(phrase: phrase, deviceName: name); words = Array(repeating: "", count: 24) }
             catch { self.error = describe(error) }
         }
     }

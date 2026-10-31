@@ -34,15 +34,14 @@ enum CloudBox {
 
     static func lane(for url: URL) -> CloudKitLane? { zone(of: url).map { cache.lane(zone: $0) } }
 
-    static func isAvailable() async -> Bool {
-        (try? await CKContainer(identifier: container).accountStatus()) == .available
-    }
+    /// The person's iCloud as first run sees it (`BoxSetup`): whether a box can go there, the boxes it holds, the lane at an
+    /// address (from the same cache the vault syncs through).
+    static let home = ICloudHome(container: container, lane: { cache.lane(zone: $0) })
+
+    static func isAvailable() async -> Bool { await home.availability() == .available }
 
     /// The boxes this iCloud account holds (their zones), oldest name first: what "I already have one" and a new Mac look for.
-    static func existingBoxes() async throws -> [URL] {
-        let zones = try await CKContainer(identifier: container).privateCloudDatabase.allRecordZones()
-        return zones.map(\.zoneID.zoneName).filter { $0.hasPrefix("box-") }.sorted().map(address(zone:))
-    }
+    static func existingBoxes() async throws -> [URL] { try await home.boxes() }
 
     /// Silent pushes for the private database (best effort: without the push entitlement the subscription saves and no push arrives).
     static func subscribe(_ url: URL) async {

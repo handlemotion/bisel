@@ -7,6 +7,13 @@ extensions and tools.
 
 ## CHANGES
 
+**First run in iCloud (`BoxSetup`).** First run no longer reaches the server: `BoxSetup` (Sources/BiselCore/BoxSetup.swift) is the one
+state machine the onboarding screens drive (create in iCloud, add this Mac with the 8 words, restore from iCloud or a `.bisel-backup`,
+the iCloud account changing under a box). States, errors and the screens still to design: [SETUP.md](SETUP.md). `BoxHome` (BiselLane)
+is where new boxes live: `ICloudHome` (BiselCloudKit) in the signed app, `FakeHome` (BiselTestSupport) in `SetupFlowTests`.
+`RecordBox` now reports why storage refused a control record (`SyncError.server(409, "quota")` for a full iCloud) instead of
+`.malformedResponse`. `AccountLinker` and `ServerLane` are unchanged and off the default path.
+
 **Accounts, box ids and device-code connect (server migrations 0004-0006).** For the Mac-app session. Everything old keeps compiling
 (token overloads stay); this is what is new.
 
