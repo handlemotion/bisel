@@ -28,11 +28,13 @@ struct ItemRow: Identifiable, Hashable, Sendable {
 }
 
 /// Something the owner must look at: a sync reported an event or an integrity result that could mean a stolen key, a stolen
-/// phrase or a hostile server. Kept until dismissed (the Devices window lists them; the sync indicator turns red).
-struct SecurityAlert: Identifiable, Equatable {
+/// phrase or a hostile server. Kept until dismissed, across relaunches (the Devices window lists them; the sync indicator turns red).
+struct SecurityAlert: Identifiable, Equatable, Codable {
     let id: String
     let text: String
     let date: Date
+    /// A device that joined with the recovery phrase: "New phrase and revoke" (`VaultService.answerRecovery`) acts on it.
+    var recoveredDeviceID: String?
 }
 
 extension UserDefaults {
@@ -41,6 +43,13 @@ extension UserDefaults {
         guard let value = object(forKey: key) as? Int, range.contains(value) else { return fallback }
         return value
     }
+}
+
+/// What a revoke did: the report of what the device could have read, and the new recovery phrase when one was made.
+struct RevokeOutcome {
+    let report: RotationReport
+    let phrase: RecoveryPhrase?
+    var phraseError: String?
 }
 
 enum SyncState: Equatable {
@@ -128,6 +137,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     init() {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         usage = UsageStore(directory: directory)
+        loadAlerts()
         do {
             let keyStore = BiselEnvironment.makeKeyStore(directory: directory)
             // The core's own window is a backstop (30 min); the app enforces the user's fill window and idle timeout.
@@ -662,7 +672,46 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         return (try? await vault.recentEvents()) ?? []
     }
 
-    func dismissAlert(_ id: String) { securityAlerts.removeAll { $0.id == id } }
+    func dismissAlert(_ id: String) {
+        securityAlerts.removeAll { $0.id == id }
+        saveAlerts()
+    }
+
+    /// "New phrase and revoke" (D7 option c): the device that recovered with the phrase is revoked and the box key replaced
+    /// (Touch ID), then the phrase it used is replaced (Touch ID). Show `phrase` with `PhraseGateView`. If the revoke went
+    /// through and the new phrase did not, `phrase` is nil and `phraseError` says why; the alert stays until both are done.
+    func answerRecovery(_ alert: SecurityAlert) async throws -> RevokeOutcome {
+        guard let id = alert.recoveredDeviceID else { throw BiselVault.VaultError.notConfigured }
+        let outcome = await replacePhrase(after: try await revoke(deviceID: id))
+        if outcome.phrase != nil { dismissAlert(alert.id) }
+        return outcome
+    }
+
+    /// After a revoke: a revoked device keeps the backup key until the phrase changes (SECURITY-REVIEW.md C7).
+    func replacePhrase(after report: RotationReport) async -> RevokeOutcome {
+        do { return RevokeOutcome(report: report, phrase: try await rotateRecovery()) }
+        catch { return RevokeOutcome(report: report, phrase: nil, phraseError: describe(error)) }
+    }
+
+    /// The box is in iCloud (not on this Mac only, not on a Bisel server): a revoked Mac still signed in to the Apple Account can
+    /// still reach its storage until it is removed from that account.
+    var isOnICloud: Bool {
+        laneStatus != .thisDeviceOnly && !["http", "https"].contains(serverURL?.scheme ?? "")
+    }
+
+    private var alertsFile: URL { directory.appendingPathComponent("security-alerts.json") }
+
+    private func loadAlerts() {
+        guard let data = try? Data(contentsOf: alertsFile) else { return }
+        securityAlerts = (try? JSONDecoder().decode([SecurityAlert].self, from: data)) ?? []
+    }
+
+    private func saveAlerts() {
+        do {
+            if securityAlerts.isEmpty { try? FileManager.default.removeItem(at: alertsFile); return }
+            try JSONEncoder().encode(securityAlerts).write(to: alertsFile, options: .atomic)
+        } catch { Log.app.error("could not keep the security alerts: \(describe(error))") }
+    }
 
     /// Turns what a sync reported into alerts. Events caused by this Mac itself are not alarms.
     private func raiseAlerts(_ report: SyncReport, vault: Vault) async {
@@ -671,15 +720,19 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             let text: String
             switch e.type {
             case "recovery":
+                // D7: on iCloud the words and the Apple Account make a full member at once; only the server holds a device back.
                 text = e.subjectId == nil
                     ? "The recovery phrase was used to read your box. If that was not you, replace the recovery phrase and change your important passwords."
+                    : isOnICloud
+                    ? "A device was added with your recovery phrase and can already read your box. If that was not you, choose New phrase and revoke."
                     : "A device was added with your recovery phrase and is held back for now. If that was not you, revoke it in Devices and replace the recovery phrase."
             case "recovery_rotate": text = "The recovery phrase was replaced from another device."
             case "approve": text = "Another device was approved to join your box."
             case "revoke", "rotate": text = "Another device revoked a device or replaced the box key."
             default: continue
             }
-            fresh.append(SecurityAlert(id: "event-\(e.id)", text: text, date: e.date))
+            let recovered = e.type == "recovery" ? e.subjectId : nil
+            fresh.append(SecurityAlert(id: "event-\(e.id)", text: text, date: e.date, recoveredDeviceID: recovered))
         }
         for id in report.rejectedTombstones {
             fresh.append(SecurityAlert(id: "tombstone-\(id)-\(report.headSeq)", text:
@@ -695,6 +748,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         let added = fresh.filter { !known.contains($0.id) }
         guard !added.isEmpty else { return }
         securityAlerts.append(contentsOf: added)
+        saveAlerts()
         Toast.shared.show(added.count == 1 ? added[0].text : "\(added.count) security notices. Open Devices to read them", isError: true, duration: .seconds(8))
     }
 
