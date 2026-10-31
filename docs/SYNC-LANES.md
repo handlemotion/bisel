@@ -526,8 +526,8 @@ account is signed in and on this Mac only otherwise; "I already have one" tries 
 `moveToICloud`, `putBoxInICloudAgain`, `stopSyncing`, `startICloudEnrollment` / `finishICloudEnrollment` / `pendingEnrollments` /
 `approve` are the logic behind Rodrigo's screens (none was changed; the one call site that moved is `SetupView.create`). `AppDelegate`
 registers for remote notifications and hands them to `CloudKitLane.handleRemoteNotification`; every push and account change triggers a
-sync. The server lane works as before and is opt-in (`connectServer`). D4: the backup reminder integration point is marked in
-`VaultService.performSync` for when the `.bisel-backup` work lands. Storage lanes keep local history (`keepsLocalHistory`), as a box
+sync. The server lane works as before and is opt-in (`connectServer`). D4: `VaultService.backupStatus` carries the backup reminder (SPEC §12,
+BiselCore/BACKUP.md). Storage lanes keep local history (`keepsLocalHistory`), as a box
 without a server always did.
 
 **Contract.** `LaneContract.storageOnly` (eight flows, on `FakeLane` in the flow tests and on CloudKit in the signed run; never the

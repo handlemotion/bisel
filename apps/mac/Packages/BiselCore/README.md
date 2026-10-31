@@ -2,7 +2,7 @@
 
 SwiftPM package behind every bisel app: crypto, vault format, local store, signed sync client, recovery, key store.
 Contract: [`../../../SPEC.md`](../../../SPEC.md) §4, §6, §7. Apps use the `BiselCore` umbrella module (the `Vault` actor); the
-sub-modules (`BiselCrypto`, `BiselKeyStore`, `BiselVault`, `BiselLane`, `BiselSync`, `BiselRecovery`, `BiselTOTP`) are public for the
+sub-modules (`BiselCrypto`, `BiselKeyStore`, `BiselVault`, `BiselLane`, `BiselSync`, `BiselRecovery`, `BiselBackup`, `BiselTOTP`) are public for the
 extensions and tools.
 
 ## CHANGES

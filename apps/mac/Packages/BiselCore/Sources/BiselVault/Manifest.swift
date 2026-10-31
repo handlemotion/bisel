@@ -45,6 +45,11 @@ public struct VaultManifest: Codable, Sendable, Equatable {
     /// sealed by builds that predate it still decode (a manifest that does not decode reads as the wrong key).
     public var lane: String?
     public var laneGeneration: Int?
+    /// `HKDF(RK, "bisel/v1/backup-auth")`, the pre-shared key that authenticates `.bisel-backup` files (SPEC §12), and the
+    /// recovery encryption key it was derived for. Only someone who held the phrase can put it here, and only a VK holder can
+    /// read it, so a backup cannot be forged from the public recovery key alone. nil until the phrase was entered once.
+    public var backupKey: Data?
+    public var backupKeyFor: Data?
 
     public init(roster: [RosterEntry] = [], recoveryPublicKey: Data? = nil, recoveryEncryptionPublicKey: Data? = nil, recoveryGeneration: Int = 1) {
         self.roster = roster; self.recoveryPublicKey = recoveryPublicKey
@@ -59,6 +64,12 @@ public struct VaultManifest: Codable, Sendable, Equatable {
             out.recoveryGeneration = other.recoveryGeneration
             out.recoveryPublicKey = other.recoveryPublicKey
             out.recoveryEncryptionPublicKey = other.recoveryEncryptionPublicKey
+            out.backupKey = other.backupKey; out.backupKeyFor = other.backupKeyFor
+        }
+        // The backup key belongs to the recovery keys it was derived for: never pair it with another phrase's.
+        if out.backupKeyFor != out.recoveryEncryptionPublicKey { out.backupKey = nil; out.backupKeyFor = nil }
+        if out.backupKey == nil, other.backupKey != nil, other.backupKeyFor == out.recoveryEncryptionPublicKey {
+            out.backupKey = other.backupKey; out.backupKeyFor = other.backupKeyFor
         }
         if (other.laneGeneration ?? 0) > (out.laneGeneration ?? 0) {
             out.laneGeneration = other.laneGeneration

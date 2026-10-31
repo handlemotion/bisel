@@ -626,6 +626,31 @@ public final class LocalStore: Sendable {
         }
     }
 
+    /// What this device remembers about its last `.bisel-backup` (opaque here; `BackupState` in BiselBackup).
+    public func backupStateJSON() throws -> Data? { try getMeta("backup-state") }
+    public func setBackupStateJSON(_ json: Data) throws { try setMeta("backup-state", json) }
+
+    /// A marker per record that moves on every edit, local or pulled, without loading blobs: the item's AES-GCM body tag (the
+    /// blob's last 16 bytes, new on every seal and untouched by a key rotation, which only re-wraps the item key), or the
+    /// revision of a tombstone. Revisions alone miss the local edits of a box without a server, which stay at revision 1.
+    public func versionMarkers() throws -> [String: String] {
+        try pool.read { db in
+            Dictionary(try Row.fetchAll(db, sql: "SELECT id, rev, deleted, substr(blob, -16) AS tag FROM records").map { row in
+                let deleted: Bool = row["deleted"]
+                return (row["id"] as String, deleted ? "deleted.\(row["rev"] as Int)" : ((row["tag"] as Data?) ?? Data()).hexEncoded())
+            }, uniquingKeysWith: { a, _ in a })
+        }
+    }
+
+    /// Puts a past version back into the local trash (a box restored from a backup keeps its history).
+    public func insertTrash(_ r: StoredRecord, replacedAt: Date, reason: String) throws {
+        try pool.write { db in
+            try db.execute(sql: """
+                INSERT INTO trash(id, rev, seq, deleted, blob, updated_at, replaced_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, arguments: [r.id, r.rev, r.seq, r.deleted, r.blob, r.updatedAt, Int(replacedAt.timeIntervalSince1970), reason])
+        }
+    }
+
     public func recentEventsJSON() throws -> Data? { try getMeta("events") }
     public func setRecentEventsJSON(_ json: Data) throws { try setMeta("events", json) }
 

@@ -66,7 +66,8 @@ Key hierarchy
 - **Recovery phrase**: 24 words (BIP-39 wordlist, 256 bits of entropy), shown once at bootstrap. `RK = phrase entropy`.
   - `RK-enc`: an X25519 key whose seed is `HKDF(RK, "bisel/v1/recovery-enc")`. Its **public** key is stored on the server and on every device. The **recovery envelope** is a copy of VK sealed to it with HPKE (X25519, HKDF-SHA256, AES-256-GCM), stored on the server. Because sealing needs only the public key, any enrolled device can write a fresh recovery envelope (vault-key rotation) without ever holding the phrase; only the phrase opens it. _(v0.1 used a symmetric `RK-wrap` key, which would have forced the phrase to be typed on every rotation.)_
   - `RK-sig`: an Ed25519 key whose seed is `HKDF(RK, "bisel/v1/recovery-sig")`. Its public key is registered at bootstrap and lets a device-less client authenticate to fetch the recovery envelope.
-- **Backup file** `.bisel-backup` (format version 2): the server's records (items, recovery pubkeys, recovery envelope) exported to a single file. Only the recovery phrase opens it.
+- **Backup file** `.bisel-backup` (format 3, §12): the whole box (items, 30-day history, roster, recovery pins, VK) sealed with HPKE to `RK-enc` in PSK mode. Only the recovery phrase opens it; only the phrase or VK can make one that opens. Format 2 (JSON, the server's records plus the recovery envelope) is no longer restored: anyone who could edit it could swap in their own envelope (SECURITY-REVIEW B1).
+- **Backup key** (`BK`): `HKDF(RK, "bisel/v1/backup-auth")`, kept in the VK-sealed manifest (`backupKey`, with `backupKeyFor` = the `RK-enc` public key it belongs to). Written wherever the phrase is in hand (bootstrap, new phrase, `confirmRecovery`, recovery, restore, `exportBackup(phrase:)`); dropped from the manifest when the phrase changes.
 - **Vault-admin key** (`AK`): Ed25519, seed `HKDF(VK, "bisel/v1/admin-sig")`, public key registered at bootstrap and replaced by every rotation. The server requires its signature (`X-Bisel-Admin`, over `bisel-admin/v1 \n device \n <canonical request string>`) in addition to the device signature on `POST /v1/rotate`, `POST /v1/devices`, `DELETE /v1/devices/:id` and `POST /v1/recovery/rotate`. `DK-sig` never prompts and has no VK, so a stolen or malware-driven device key can no longer destroy or re-key the vault; producing the admin signature needs an unlocked vault.
 - **Vault manifest**: a reserved record (`bisel-manifest-v1-reserved`) sealed under VK like any item, holding the **roster** (every device the owner approved: id, name, kind, both public keys, how it was added) and the **recovery pins** (RK-sig/RK-enc public keys and a generation). Only a VK holder can write it. Each device keeps its own copy in `LocalIdentity`; it is written by bootstrap, `approveEnrollment`, `recover`, `trustDevice` and merged from the synced manifest. Rotation seals the new VK **only to roster keys** and stops with `IntegrityError.unknownDevices` if the server lists an active device that is not in the roster (or whose keys differ): a device planted by a stolen signing key, a hostile server or a leaked phrase never receives the new key. Fingerprints shown to humans are 96 bits.
 - **Key confirmation**: a device that received VK through an envelope must not trust it blindly (the server relays the envelope). (1) The manifest is the canary: if it does not open under the received key the sync fails with `IntegrityError.keyConfirmationFailed` and the vault locks. (2) `HKDF(VK, "bisel/v1/verify")` gives a 40-bit code shown by the approver and by the new device; the human compares, `confirmEnrollment(code:)` checks it. (3) On a not-yet-confirmed device, records existing but none decrypting is a hard error.
@@ -207,7 +208,7 @@ Binary columns are unpadded base64url TEXT (D1 returns BLOBs as number arrays); 
 
 SwiftPM package, Swift 6, macOS 26+ / iOS 26+. No UI.
 
-Module names are prefixed (`BiselCrypto`, `BiselKeyStore`, `BiselVault`, `BiselLane`, `BiselSync`, `BiselRecovery`, `BiselTOTP`) because a module called `Crypto` collides with swift-crypto's (pulled in by the OTP package) and a module called `Vault` would shadow the public `Vault` type. The umbrella module `BiselCore` re-exports them all and defines the `Vault` facade (an `actor`). `BiselLane` is the sync-lane boundary (`SyncLane`, records, verifier); `BiselSync` runs the engine over a lane (`ServerLane` for the server, `RecordBox` for storage-only lanes; see `docs/SYNC-LANES.md` §14). `BiselTestSupport` (dev/test only, never linked by apps) starts a throwaway local server and provides the in-memory `FakeLane` for flow tests.
+Module names are prefixed (`BiselCrypto`, `BiselKeyStore`, `BiselVault`, `BiselLane`, `BiselSync`, `BiselRecovery`, `BiselBackup`, `BiselTOTP`) because a module called `Crypto` collides with swift-crypto's (pulled in by the OTP package) and a module called `Vault` would shadow the public `Vault` type. The umbrella module `BiselCore` re-exports them all and defines the `Vault` facade (an `actor`). `BiselLane` is the sync-lane boundary (`SyncLane`, records, verifier); `BiselSync` runs the engine over a lane (`ServerLane` for the server, `RecordBox` for storage-only lanes; see `docs/SYNC-LANES.md` §14). `BiselBackup` is the `.bisel-backup` format and the backup reminder policy (§12). `BiselTestSupport` (dev/test only, never linked by apps) starts a throwaway local server and provides the in-memory `FakeLane` for flow tests.
 
 Modules
 
@@ -246,7 +247,9 @@ Vault.activationDate(), deviceKeyStatus(), removeLocalDevice(), acknowledgeServe
 Vault.revokeWithoutRotation(deviceID)       // emergency only (server DELETE); the device keeps VK
 Vault.Configuration.secureEnclave(appGroupIdentifier:, keychainAccessGroup:)   // production wiring, identifiers injected
 Vault.recover(server:, phrase:, deviceName:)
-Vault.exportBackup(to:) / importBackup(from:, phrase:)
+Vault.exportBackup(to:, phrase:) / restoreBackup(from:, phrase:, deviceName:) / mergeBackup(from:, phrase:) / Vault.inspectBackup(at:)   // §12
+Vault.backupStatus(policy:)                 // D4 reminder: BackupReminderPolicy over BackupState
+Vault.importBackup(from:, phrase:, server:, ...) / importBackupLocal(from:, phrase:, deviceName:)   // format 2 or 3
 ```
 
 ## 8. Mac app (M3)
@@ -333,3 +336,58 @@ Prefer CLIs and libraries to hand-written code.
 - Exact AX fill behavior per app (matrix in §8).
 - ~~Whether Ed25519 verification in workerd needs a specific algorithm name or a library.~~ Resolved in M1: no library; `crypto.subtle.importKey("raw", pub32, {name: "Ed25519"}, ...)` and `verify({name: "Ed25519"}, ...)` work in workerd (wrangler 4.154 / workerd 1.20261023), verified by the recovery flow tests.
 - Whether the local DB should additionally be encrypted at rest (items are already ciphertext).
+
+## 12. Backup file (`.bisel-backup`, format 3)
+
+The second copy a box without a server needs (D4, `docs/SYNC-LANES.md`): losing the Apple ID and every device loses a CloudKit-only box, and the 24 words alone open nothing. A backup file plus the 24 words rebuild the whole box on a fresh install with no device, server or Apple ID. Code: `BiselBackup` (`BackupArchive`, `BackupReminderPolicy`), `Vault` in `BiselCore/VaultBackup.swift`.
+
+**Crypto.** One HPKE message (RFC 9180, mode `psk`): KEM X25519-HKDF-SHA256, KDF HKDF-SHA256, AEAD AES-256-GCM (CryptoKit), sealed to the box's `RK-enc` public key, `info = "bisel/v1|backup|v3"`, `psk = BK`, `psk_id = "bisel/v1|backup-psk"`, AAD = the header up to (not including) the integrity tag. Opening needs the `RK-enc` private key, so the phrase. Sealing needs `BK`, which only the phrase or VK (through the manifest) gives: base-mode HPKE to a public key would let anyone who saw the recovery public key (a server, a lane) hand the owner a forged box with a key they chose.
+
+**Byte layout.** Integers are unsigned big-endian.
+
+| Offset | Size | Field                                                                                                   |
+| ------ | ---- | ------------------------------------------------------------------------------------------------------- |
+| 0      | 8    | magic `BISELBAK` (`42 49 53 45 4C 42 41 4B`)                                                            |
+| 8      | 2    | format version, `3`                                                                                     |
+| 10     | 2    | flags, `0` (a non-zero flag is treated as a newer format)                                               |
+| 12     | 8    | created-at, unix seconds                                                                                |
+| 20     | 16   | key id: first 16 bytes of `SHA-256("bisel/v1\|backup-key-id\|" ‖ RK-enc public key)`                    |
+| 36     | 8    | `L`, length of the sealed part (everything after the header)                                            |
+| 44     | 1    | `n`, box id length (0–64)                                                                               |
+| 45     | n    | box id, UTF-8: the id the server or lane gave the box, else `device-<id of the device that created it>` |
+| 45+n   | 32   | integrity tag: `SHA-256(bytes[0 ..< 45+n] ‖ sealed part)`                                               |
+| 77+n   | 32   | HPKE encapsulated key                                                                                   |
+| 109+n  | L−32 | HPKE ciphertext (padded body, then the 16-byte GCM tag)                                                 |
+
+The file is exactly `77 + n + L` bytes. The body is `Padding` (§4, 512-byte blocks) over sorted-key JSON:
+
+```json
+{
+  "v": 3, "boxID": "…", "createdAt": 1793491200, "epoch": 4,
+  "vaultKey": "<base64, 32 bytes>",
+  "manifest": { "v": 1, "roster": [ … ], "recoveryPublicKey": "…", "recoveryEncryptionPublicKey": "…", "recoveryGeneration": 2 },
+  "items":   [ { "id": "…", "rev": 3, "updatedAt": 1793490000, "payload": "<base64 of the exact §5 plaintext payload>" } ],
+  "history": [ { "id": "…", "rev": 2, "updatedAt": …, "replacedAt": …, "reason": "local-edit", "payload": "…" } ]
+}
+```
+
+`items` are the live items (pending local edits included; tombstones and the reserved manifest record are not items), `history` the 30-day local trash that opens under the current key, `manifest` the roster and recovery pins without `BK`. `boxID` and `createdAt` must equal the header's. Payloads are the exact bytes that were sealed, so a payload version this build does not know survives a round trip.
+
+**Reading, in order** (each refusal before anything is written):
+
+1. Magic wrong: `notABackup`, or `unverifiableFormat(2)` for a format 2 (JSON) file. Fewer than 45 bytes: `truncated`.
+2. Version above 3, or a flag set: `newerVersion(v)`.
+3. Fewer than `77 + n + L` bytes: `truncated(expected:actual:)`; more: `tampered`.
+4. Integrity tag wrong: `tampered` (no phrase needed; `Vault.inspectBackup(at:)` stops here).
+5. Key id is not the phrase's: `wrongPhrase`.
+6. HPKE open fails, padding or JSON invalid, or body and header disagree: `tampered` (this is also what a forged file gives).
+
+**Authenticity** (SECURITY-REVIEW B1, B2). A file that opens was sealed by someone holding the phrase or a box key. A swapped envelope, a dropped or replayed record, or a mix of two files all fail as `tampered`. Residual, the same limit as P2b: a device that once held the box key keeps `BK` until the phrase is replaced, so a revoke should be followed by `rotateRecovery` when that matters. Restoring an older genuine file whole is possible; the header date says how old it is.
+
+**Export** (`exportBackup(to:phrase:)`) needs the box unlocked (it unlocks if a sync just locked it), syncs first when it can, refuses when any live item does not open (`unreadableItems`) or the recovery pins are unknown or disputed, and when the manifest has no `BK` for the pinned `RK-enc` (`needsPhrase`: call again with the 24 words, once per box made before format 3). The file is built in memory and written with an atomic rename; it holds only ciphertext. It is read back and parsed before the call returns. The report gives the item and history counts and the size.
+
+**Restore on a fresh install** (`restoreBackup`): the box keeps its VK (same verification code and admin key), roster, recovery pins and generation, items (same ids, payloads and dates) and history; the recovery envelope is sealed again for epoch 1; the device is new and the box is local until a lane or server is connected. `importBackupLocal` and `importBackup(server:)` take format 3 only; a format 2 file is refused as `unverifiableFormat(2)`, before anything is written.
+
+**Merge into an existing box** (`mergeBackup`, fresh biometric check): an item the box lacks is added; one it holds in the same version, or whose history holds the backup's version, is left alone; one both sides changed keeps the box's version and gets a `"<title> (conflict)"` copy of the backup's, as a sync conflict does; one the box deleted after the backup was written stays deleted and is listed (`keptDeleted`). Merging the same file again changes nothing. Items are compared as decoded payloads.
+
+**Reminder** (D4). `Vault.backupStatus(policy:)` reports where else the box lives (`thisDeviceOnly`: no address; `server`: an http(s) address; `cloudKitOnly`: any other lane) and evaluates `BackupReminderPolicy` (default: due when there is no backup yet, the last is older than 30 days, or more than 25 items changed since; boxes on a server are not reminded). State (`BackupState`: date, file name, a version marker per record) is kept per device in the local store and written by every export and restore. The marker is a record's AES-GCM body tag (moves on every edit, not on a key rotation) or a tombstone's revision.

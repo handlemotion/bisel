@@ -200,7 +200,7 @@ public actor Vault {
         return k
     }
 
-    private func requireIdentity() throws -> LocalIdentity {
+    func requireIdentity() throws -> LocalIdentity {
         guard let id = try store.identity() else { throw VaultError.notConfigured }
         return id
     }
@@ -393,7 +393,7 @@ public actor Vault {
     }
 
     /// Creates this device's keys and a local-only identity for `vk`, and unlocks the vault.
-    private func installLocalIdentity(vaultKey vk: Data, bundle: RecoveryBundle, deviceName: String, recoveryUnconfirmed: Bool) throws {
+    func installLocalIdentity(vaultKey vk: Data, bundle: RecoveryBundle, deviceName: String, recoveryUnconfirmed: Bool) throws {
         let pub = try config.keyStore.createKeys()
         let deviceID = BiselRandom.identifier()
         let envelope = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: pub.enc)
@@ -408,6 +408,7 @@ public actor Vault {
         try store.setIdentity(identity)
         setKey(vk)
         try writeManifest()
+        try? adoptBackupKey(phrase: bundle.phrase)
     }
 
     /// Registers this device and the recovery keys of an existing local-only vault with a fresh server. The next
@@ -492,7 +493,7 @@ public actor Vault {
         try store.resetLanePosition(laneKeyHint(identity))
     }
 
-    private func register(server: URL, credential: SyncClient.BootstrapCredential, deviceName: String, vaultKey vk: Data,
+    func register(server: URL, credential: SyncClient.BootstrapCredential, deviceName: String, vaultKey vk: Data,
                           recovery: RecoveryBundle) async throws {
         let pub = try config.keyStore.createKeys()
         let deviceID = BiselRandom.identifier()
@@ -512,6 +513,7 @@ public actor Vault {
         try store.setIdentity(identity)
         setKey(vk)
         try writeManifest()
+        try? adoptBackupKey(phrase: recovery.phrase)
     }
 
     // MARK: device-code connect
@@ -789,12 +791,13 @@ public actor Vault {
         id.recoveryUnconfirmed = true
         try store.setIdentity(id)
         try writeManifest()
+        try? adoptBackupKey(phrase: bundle.phrase)
         return bundle.phrase
     }
 
     // MARK: manifest, roster, confirmation
 
-    private func manifestFromIdentity(_ id: LocalIdentity) -> VaultManifest {
+    func manifestFromIdentity(_ id: LocalIdentity) -> VaultManifest {
         var m = VaultManifest(roster: id.roster, recoveryPublicKey: id.recoveryPublicKey,
                               recoveryEncryptionPublicKey: id.recoveryEncryptionPublicKey, recoveryGeneration: id.recoveryGeneration)
         if id.laneGeneration > 0, let url = id.laneAddress {
@@ -806,7 +809,7 @@ public actor Vault {
 
     /// Seals this device's view of the manifest (roster + recovery pins) as the reserved record; `sync()` pushes it.
     /// Merges with what is already stored so concurrent writers never drop each other's entries.
-    private func writeManifest() throws {
+    func writeManifest() throws {
         let k = try requireKey()
         let id = try requireIdentity()
         var manifest = manifestFromIdentity(id)
@@ -963,6 +966,7 @@ public actor Vault {
         guard pinned.constantTimeEquals(keys.publicKey) else { throw BiselCryptoError.invalidRecoveryPhrase }
         id.recoveryUnconfirmed = false
         try store.setIdentity(id)
+        try? adoptBackupKey(phrase: phrase)
     }
 
     // MARK: items
@@ -1607,102 +1611,7 @@ public actor Vault {
         try store.setIdentity(id)
         setKey(vkData)
         try? writeManifest()
-    }
-
-    // MARK: backup
-
-    /// Writes a `.bisel-backup` with everything the server holds. Syncs first when reachable.
-    public func exportBackup(to url: URL) async throws {
-        _ = try? await sync()
-        guard let id = try store.identity(), let pub = id.recoveryPublicKey, let env = id.recoveryEnvelope else {
-            throw VaultError.badBackup("no recovery material known yet; sync first")
-        }
-        guard !id.recoveryMismatch else { throw IntegrityError.recoveryMaterialChanged }
-        guard id.recoveryPinned else { throw IntegrityError.recoveryNotPinned }
-        guard let encPub = id.recoveryEncryptionPublicKey, !encPub.isEmpty else {
-            throw VaultError.badBackup("this box's recovery phrase predates key rotation; create a new one first")
-        }
-        let records = try store.allRecords()
-        // With the box unlocked, prove the records open under the key the recovery envelope will hand back: a pull that stopped
-        // half-way through another device's key rotation leaves records of two keys, and such a file only fails on restore day.
-        if let held = liveKey() {
-            let unreadable = records.filter { $0.pending == .none && !$0.deleted && !canOpen($0, with: held) }
-            guard unreadable.isEmpty else {
-                throw VaultError.badBackup("\(unreadable.count) item(s) do not open with this box's key yet; sync again and retry")
-            }
-        }
-        let file = BackupFile(recoveryPublicKey: pub, recoveryEncryptionPublicKey: encPub, recoveryEnvelope: env,
-                              epoch: id.epoch, records: records)
-        try file.encoded().write(to: url, options: .atomic)
-    }
-
-    private func canOpen(_ record: StoredRecord, with key: LockedKey) -> Bool {
-        key.withKeyOrFalse { (try? ItemSealer.open(blob: record.blob, id: record.id, rev: record.rev, vaultKey: $0)) != nil }
-    }
-
-    /// Refuses a backup none of whose items opens (wrong or mismatched file) before anything is bootstrapped or written.
-    private func requireOpenableItems(_ file: BackupFile, _ vk: SymmetricKey) throws {
-        let live = file.records.filter { !$0.deleted }
-        guard live.isEmpty || live.contains(where: { (try? ItemSealer.open(blob: $0.blob, id: $0.id, rev: $0.rev, vaultKey: vk)) != nil }) else {
-            throw VaultError.badBackup("none of the \(live.count) item(s) in this backup opens with its key; the file is damaged")
-        }
-    }
-
-    /// Disaster recovery onto a fresh (un-bootstrapped) server: opens the backup with the phrase, bootstraps
-    /// this device with the same recovery key, and re-uploads every item (re-sealed for its new revision).
-    public func importBackup(from url: URL, phrase: RecoveryPhrase, server: URL, bootstrapToken: String,
-                             deviceName: String) async throws {
-        try await importBackup(from: url, phrase: phrase, server: server, credential: .token(bootstrapToken), deviceName: deviceName)
-    }
-
-    public func importBackup(from url: URL, phrase: RecoveryPhrase, server: URL, credential: SyncClient.BootstrapCredential,
-                             deviceName: String) async throws {
-        guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
-        let file = try BackupFile.decode(try Data(contentsOf: url))
-        var (vkData, _) = try file.vaultKey(phrase: phrase)
-        defer { vkData.zeroize() }
-        let vk = SymmetricKey(data: vkData)
-        try requireOpenableItems(file, vk)
-        // A fresh server starts at epoch 1, and the recovery envelope is bound to the epoch: seal it again for this server.
-        let keys = try RecoveryKeys(phrase: phrase)
-        let bundle = RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
-                                    envelope: try keys.seal(vaultKey: vkData, epoch: 1))
-        try await register(server: server, credential: credential, deviceName: deviceName, vaultKey: vkData, recovery: bundle)
-        let skipped = try restore(file, vaultKey: vk)
-        // Upload what was restored before reporting problems: the vault exists from here on, so a thrown error must not leave
-        // the good items stuck behind it (a second import is refused as `alreadyConfigured`).
-        _ = try await sync()
-        if skipped > 0 { throw VaultError.badBackup("\(skipped) item(s) in the backup failed authentication and were skipped; the rest was restored") }
-    }
-
-    /// Disaster recovery without any server (for example after the Secure Enclave key was invalidated by a fingerprint
-    /// change): rebuilds a local-only vault from a backup and its phrase. A server can be connected afterwards with
-    /// `connectServer`, which uploads every restored item. Returns how many items failed authentication and were skipped.
-    @discardableResult
-    public func importBackupLocal(from url: URL, phrase: RecoveryPhrase, deviceName: String) throws -> Int {
-        guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
-        let file = try BackupFile.decode(try Data(contentsOf: url))
-        var (vkData, _) = try file.vaultKey(phrase: phrase)
-        defer { vkData.zeroize() }
-        try requireOpenableItems(file, SymmetricKey(data: vkData))
-        let keys = try RecoveryKeys(phrase: phrase)
-        let bundle = RecoveryBundle(phrase: phrase, publicKey: keys.publicKey, encryptionPublicKey: keys.encryptionPublicKey,
-                                    envelope: try keys.seal(vaultKey: vkData, epoch: 1))
-        // The owner just proved they hold this phrase.
-        try installLocalIdentity(vaultKey: vkData, bundle: bundle, deviceName: deviceName, recoveryUnconfirmed: false)
-        return try restore(file, vaultKey: SymmetricKey(data: vkData))
-    }
-
-    /// Re-seals every live item of a backup as a new local edit; returns how many failed authentication.
-    private func restore(_ file: BackupFile, vaultKey vk: SymmetricKey) throws -> Int {
-        var skipped = 0
-        for rec in file.records where !rec.deleted {
-            guard let payload = try? ItemSealer.open(blob: rec.blob, id: rec.id, rev: rec.rev, vaultKey: vk) else { skipped += 1; continue }
-            try store.commitLocal(id: rec.id, deleted: false) { rev in
-                try ItemSealer.seal(payload: payload, id: rec.id, rev: rev, vaultKey: vk)
-            }
-        }
-        return skipped
+        try? adoptBackupKey(phrase: phrase)
     }
 }
 

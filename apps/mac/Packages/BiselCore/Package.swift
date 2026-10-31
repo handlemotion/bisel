@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "BiselLane", targets: ["BiselLane"]),
         .library(name: "BiselSync", targets: ["BiselSync"]),
         .library(name: "BiselRecovery", targets: ["BiselRecovery"]),
+        .library(name: "BiselBackup", targets: ["BiselBackup"]),
         .library(name: "BiselTOTP", targets: ["BiselTOTP"]),
         .library(name: "BiselTestSupport", targets: ["BiselTestSupport"]),   // dev/test only: spawns the local server
         .library(name: "BiselLaneContract", targets: ["BiselLaneContract"]), // dev/test only: the lane contract flows
@@ -41,8 +42,9 @@ let package = Package(
         .target(name: "BiselLane", dependencies: ["BiselCrypto", "BiselVault"]),
         .target(name: "BiselSync", dependencies: ["BiselCrypto", "BiselKeyStore", "BiselVault", "BiselLane"]),
         .target(name: "BiselRecovery", dependencies: ["BiselCrypto", "BiselKeyStore", "BiselVault", "BiselSync"]),
+        .target(name: "BiselBackup", dependencies: ["BiselCrypto", "BiselVault"]),
         .target(name: "BiselCore", dependencies: ["BiselCrypto", "BiselKeyStore", "BiselVault", "BiselSync",
-                                                   "BiselRecovery", "BiselTOTP"],
+                                                   "BiselRecovery", "BiselBackup", "BiselTOTP"],
                 swiftSettings: [.define("BISEL_SOFTWARE_KEYS", .when(traits: ["SoftwareKeys"]))]),
         .target(name: "BiselTestSupport", dependencies: ["BiselCrypto", "BiselVault", "BiselLane", "BiselSync"]),   // dev/test only
         // The CloudKit private-database lane (docs/SYNC-LANES.md §3). It compiles anywhere but only runs in a signed app with the
