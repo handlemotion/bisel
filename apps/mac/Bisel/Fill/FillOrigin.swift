@@ -1,4 +1,5 @@
 import Foundation
+import BiselCore
 
 /// Does the page the cursor is in belong to the login being typed? Without this check, choosing "Bank" while a phishing page is
 /// in front types the bank password into the phishing page (security audit). Applies to Enter and ⌥Enter; ⌘K "Fill …" is the
@@ -10,24 +11,15 @@ enum FillOrigin {
         "org.mozilla.firefox", "app.zen-browser.zen", "com.kagi.kagimacOS",
     ]
 
-    nonisolated static func normalized(_ host: String) -> String {
-        var h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        if h.hasPrefix("www.") { h.removeFirst(4) }
-        return h
-    }
+    nonisolated static func normalized(_ host: String) -> String { SiteMatch.normalized(host) }
 
     /// Hosts of an item's addresses (scheme optional), normalised.
-    nonisolated static func hosts(of urls: [String]) -> [String] {
-        urls.compactMap { raw in
-            let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let host = (URL(string: t.contains("://") ? t : "https://" + t))?.host(), !host.isEmpty else { return nil }
-            return normalized(host)
-        }
-    }
+    nonisolated static func hosts(of urls: [String]) -> [String] { SiteMatch.hosts(of: urls) }
 
-    /// Same site, or a subdomain of one: `login.bank.com` fits `bank.com` and the other way round; `bank.com.evil.net` fits neither.
+    /// Same site, or a subdomain of one: `login.bank.com` fits `bank.com` and the other way round; `bank.com.evil.net` fits neither,
+    /// and neither does `evil.github.io` for a login saved for `github.io` (a public suffix is not a site, see `SiteMatch`).
     nonisolated static func matches(page: String, item: String) -> Bool {
-        page == item || page.hasSuffix("." + item) || item.hasSuffix("." + page)
+        SiteMatch.matches(page: page, item: item, isPublicSuffix: DomainName.isPublicSuffix)
     }
 
     /// Why the secret must not be typed here, or nil. `pageHost` is nil when the app does not expose one.
