@@ -28,11 +28,28 @@ struct ItemRow: Identifiable, Hashable, Sendable {
 }
 
 /// Something the owner must look at: a sync reported an event or an integrity result that could mean a stolen key, a stolen
-/// phrase or a hostile server. Kept until dismissed (the Devices window lists them; the sync indicator turns red).
-struct SecurityAlert: Identifiable, Equatable {
+/// phrase or a hostile server. Kept until dismissed, across relaunches (the Devices window lists them; the sync indicator turns red).
+struct SecurityAlert: Identifiable, Equatable, Codable {
     let id: String
     let text: String
     let date: Date
+    /// A device that joined with the recovery phrase: "New phrase and revoke" (`VaultService.answerRecovery`) acts on it.
+    var recoveredDeviceID: String?
+}
+
+extension UserDefaults {
+    /// A number setting, only within `range`: anything else (missing, out of range, not a number) is `default`.
+    func setting(_ key: String, in range: ClosedRange<Int>, default fallback: Int) -> Int {
+        guard let value = object(forKey: key) as? Int, range.contains(value) else { return fallback }
+        return value
+    }
+}
+
+/// What a revoke did: the report of what the device could have read, and the new recovery phrase when one was made.
+struct RevokeOutcome {
+    let report: RotationReport
+    let phrase: RecoveryPhrase?
+    var phraseError: String?
 }
 
 enum SyncState: Equatable {
@@ -101,19 +118,26 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     @ObservationIgnored private var syncChain: Task<Void, Never>?
     @ObservationIgnored private var otpGatedAt: [String: ContinuousClock.Instant] = [:]
     @ObservationIgnored private var lockMonitor: LockMonitor?
+    /// C5 (SECURITY-REVIEW.md): the first sync after unlocking in this launch reads the whole lane (`sync(audit: true)`).
+    @ObservationIgnored private var auditedThisLaunch = false
     /// Called on lock/unlock so the panel can redraw.
     @ObservationIgnored var onLockStateChange: (() -> Void)?
 
     /// A panel open within this many seconds of the last finished sync does not sync again.
     private static let panelSyncMinInterval: TimeInterval = 10
+    /// When the last full read of the lane finished (seconds since 1970). See `auditDue`.
+    static let lastAuditKey = "sync.lastAuditAt"
+    static let auditInterval: TimeInterval = 24 * 60 * 60
     static let fillWindowKey = "security.fillWindowMinutes"
     static let idleLockKey = "security.idleLockMinutes"
-    static var fillWindowMinutes: Int { UserDefaults.standard.object(forKey: fillWindowKey) as? Int ?? 5 }
-    static var idleLockMinutes: Int { UserDefaults.standard.object(forKey: idleLockKey) as? Int ?? 5 }
+    /// Any process of this user can write these defaults, so a value outside the range the settings offer reads as the default.
+    static var fillWindowMinutes: Int { UserDefaults.standard.setting(fillWindowKey, in: 1...30, default: 5) }
+    static var idleLockMinutes: Int { UserDefaults.standard.setting(idleLockKey, in: 1...30, default: 5) }
 
     init() {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         usage = UsageStore(directory: directory)
+        loadAlerts()
         do {
             let keyStore = BiselEnvironment.makeKeyStore(directory: directory)
             // The core's own window is a backstop (30 min); the app enforces the user's fill window and idle timeout.
@@ -648,7 +672,46 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         return (try? await vault.recentEvents()) ?? []
     }
 
-    func dismissAlert(_ id: String) { securityAlerts.removeAll { $0.id == id } }
+    func dismissAlert(_ id: String) {
+        securityAlerts.removeAll { $0.id == id }
+        saveAlerts()
+    }
+
+    /// "New phrase and revoke" (D7 option c): the device that recovered with the phrase is revoked and the box key replaced
+    /// (Touch ID), then the phrase it used is replaced (Touch ID). Show `phrase` with `PhraseGateView`. If the revoke went
+    /// through and the new phrase did not, `phrase` is nil and `phraseError` says why; the alert stays until both are done.
+    func answerRecovery(_ alert: SecurityAlert) async throws -> RevokeOutcome {
+        guard let id = alert.recoveredDeviceID else { throw BiselVault.VaultError.notConfigured }
+        let outcome = await replacePhrase(after: try await revoke(deviceID: id))
+        if outcome.phrase != nil { dismissAlert(alert.id) }
+        return outcome
+    }
+
+    /// After a revoke: a revoked device keeps the backup key until the phrase changes (SECURITY-REVIEW.md C7).
+    func replacePhrase(after report: RotationReport) async -> RevokeOutcome {
+        do { return RevokeOutcome(report: report, phrase: try await rotateRecovery()) }
+        catch { return RevokeOutcome(report: report, phrase: nil, phraseError: describe(error)) }
+    }
+
+    /// The box is in iCloud (not on this Mac only, not on a Bisel server): a revoked Mac still signed in to the Apple Account can
+    /// still reach its storage until it is removed from that account.
+    var isOnICloud: Bool {
+        laneStatus != .thisDeviceOnly && !["http", "https"].contains(serverURL?.scheme ?? "")
+    }
+
+    private var alertsFile: URL { directory.appendingPathComponent("security-alerts.json") }
+
+    private func loadAlerts() {
+        guard let data = try? Data(contentsOf: alertsFile) else { return }
+        securityAlerts = (try? JSONDecoder().decode([SecurityAlert].self, from: data)) ?? []
+    }
+
+    private func saveAlerts() {
+        do {
+            if securityAlerts.isEmpty { try? FileManager.default.removeItem(at: alertsFile); return }
+            try JSONEncoder().encode(securityAlerts).write(to: alertsFile, options: .atomic)
+        } catch { Log.app.error("could not keep the security alerts: \(describe(error))") }
+    }
 
     /// Turns what a sync reported into alerts. Events caused by this Mac itself are not alarms.
     private func raiseAlerts(_ report: SyncReport, vault: Vault) async {
@@ -657,15 +720,19 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             let text: String
             switch e.type {
             case "recovery":
+                // D7: on iCloud the words and the Apple Account make a full member at once; only the server holds a device back.
                 text = e.subjectId == nil
                     ? "The recovery phrase was used to read your box. If that was not you, replace the recovery phrase and change your important passwords."
+                    : isOnICloud
+                    ? "A device was added with your recovery phrase and can already read your box. If that was not you, choose New phrase and revoke."
                     : "A device was added with your recovery phrase and is held back for now. If that was not you, revoke it in Devices and replace the recovery phrase."
             case "recovery_rotate": text = "The recovery phrase was replaced from another device."
             case "approve": text = "Another device was approved to join your box."
             case "revoke", "rotate": text = "Another device revoked a device or replaced the box key."
             default: continue
             }
-            fresh.append(SecurityAlert(id: "event-\(e.id)", text: text, date: e.date))
+            let recovered = e.type == "recovery" ? e.subjectId : nil
+            fresh.append(SecurityAlert(id: "event-\(e.id)", text: text, date: e.date, recoveredDeviceID: recovered))
         }
         for id in report.rejectedTombstones {
             fresh.append(SecurityAlert(id: "tombstone-\(id)-\(report.headSeq)", text:
@@ -681,6 +748,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         let added = fresh.filter { !known.contains($0.id) }
         guard !added.isEmpty else { return }
         securityAlerts.append(contentsOf: added)
+        saveAlerts()
         Toast.shared.show(added.count == 1 ? added[0].text : "\(added.count) security notices. Open Devices to read them", isError: true, duration: .seconds(8))
     }
 
@@ -717,8 +785,13 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         syncing = true
         syncState = .syncing
         defer { syncing = false }
+        let audit = auditDue
         do {
-            let report = try await vault.sync()
+            let report = try await vault.sync(audit: audit)
+            if audit {
+                auditFinished()
+                Log.app.notice("sync audit: repaired=\(report.repaired) quarantined=\(report.quarantined) incidents=\(report.incidents.count)")
+            }
             pendingChanges = (try? await vault.pendingChanges()) ?? 0
             syncState = .synced(Date())
             if !report.conflicts.isEmpty { lastConflicts = report.conflicts.count }
@@ -744,7 +817,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             pendingChanges = (try? await vault.pendingChanges()) ?? pendingChanges
             switch e {
             case .network(let m): syncState = .offline(m)
-            default: syncState = .failed(describe(e))
+            default:
+                syncState = .failed(describe(e))
+                if audit { auditFinished() }
             }
             Log.app.notice("sync(\(reason)) failed: \(describe(e))")
         } catch let e as LaneError {
@@ -755,8 +830,25 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             Log.app.notice("sync(\(reason)) paused: \(describe(e))")
         } catch {
             syncState = .failed(describe(error))
+            if audit { auditFinished() }   // an integrity error from the full read: shown, and not re-read every minute
             Log.app.error("sync(\(reason)) failed: \(describe(error))")
         }
+    }
+
+    /// C5: iCloud can withhold or drop records, which only a full read of the lane notices (and re-uploads from this Mac). Once
+    /// after unlocking at each launch, then about once a day while unlocked (the 60 s poll checks). Offline or iCloud being
+    /// unavailable does not count as done. A last time in the future (the defaults are writable by this user) counts as due.
+    private var auditDue: Bool {
+        guard phase == .unlocked else { return false }
+        guard auditedThisLaunch else { return true }
+        let last = UserDefaults.standard.double(forKey: Self.lastAuditKey)
+        let since = Date().timeIntervalSince1970 - last
+        return since < 0 || since >= Self.auditInterval
+    }
+
+    private func auditFinished() {
+        auditedThisLaunch = true
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastAuditKey)
     }
 
     // MARK: VaultSearchSource / VaultSecretProvider (the command panel)

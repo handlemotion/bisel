@@ -21,7 +21,8 @@ final class SecureClipboard {
     /// "Clear clipboard after" setting, in seconds (default 30).
     static let clearSecondsKey = "clipboard.clearSeconds"
     static let clearSecondsChoices = [15, 30, 60, 90]
-    static var clearSeconds: Int { UserDefaults.standard.object(forKey: clearSecondsKey) as? Int ?? 30 }
+    /// Any process of this user can write it: outside 10 to 90 s it reads as the default.
+    static var clearSeconds: Int { UserDefaults.standard.setting(clearSecondsKey, in: 10...90, default: 30) }
     static var autoClearInterval: Duration { .seconds(clearSeconds) }
 
     private var clearTask: Task<Void, Never>?
