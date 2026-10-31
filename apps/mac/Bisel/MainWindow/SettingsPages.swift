@@ -139,6 +139,7 @@ struct SyncSettings: View {
                 SyncStatusView(service: service)
                 Caption("Your box is end-to-end encrypted before it reaches iCloud. Apple can't read it.")
             }
+            if service.isOnICloud { JoinRequestsCard(service: service) }
             SettingsCard { DevicesView(service: service) }
             SettingsCard(title: "Self-hosted server") {
                 if service.isLocalOnly {

@@ -118,8 +118,7 @@ struct DevicesView: View {
 
     /// Device names come from the server: drop control and bidirectional-override characters before showing them.
     private static func clean(_ name: String) -> String {
-        let bad = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}"))
-        return String(name.unicodeScalars.filter { !bad.contains($0) }).trimmingCharacters(in: .whitespaces)
+        DisplayText.clean(name).trimmingCharacters(in: .whitespaces)
     }
 
     private static func eventText(_ e: ServerEvent) -> String {
