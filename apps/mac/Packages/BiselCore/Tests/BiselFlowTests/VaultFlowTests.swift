@@ -616,8 +616,10 @@ struct VaultFlowTests {
             await #expect(throws: SyncError.notAuthorized) {
                 try await stranger.vault.recover(server: server.url, phrase: try RecoveryPhrase.generate(), deviceName: "x", boxID: try server.onlyBoxID())
             }
-            // Words that fail the BIP-39 checksum are rejected before any network call.
-            #expect(throws: BiselCryptoError.invalidRecoveryPhrase) { try RecoveryPhrase(phrase.words.reversed().joined(separator: " ")) }
+            // Words that fail the BIP-39 checksum are rejected before any network call. A fixed phrase, because a shuffled random one
+            // passes the 8-bit checksum about 1 time in 256: 24 × "abandon" is all-zero entropy, whose checksum is not zero
+            // (the valid all-zero phrase ends in "art").
+            #expect(throws: BiselCryptoError.invalidRecoveryPhrase) { try RecoveryPhrase(Array(repeating: "abandon", count: 24).joined(separator: " ")) }
             // Input is forgiving about case and whitespace.
             _ = try RecoveryPhrase("  " + phrase.text.uppercased().replacingOccurrences(of: " ", with: "\n") + " ")
 
