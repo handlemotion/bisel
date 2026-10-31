@@ -81,6 +81,13 @@ public final class FakeLane: SyncLane, @unchecked Sendable {
 
     static func tag(_ r: LaneRecord, _ order: Int) -> LaneTag { LaneTag("\(r.rev).\(order)") }
 
+    /// A hard delete the lane reports on the next fetch, as CloudKit does.
+    public func remove(_ refs: [LaneRecordRef]) async throws {
+        lock.withLock {
+            for ref in refs where state.records.removeValue(forKey: ref.id) != nil { state.removed.append(ref) }
+        }
+    }
+
     // MARK: what the store can see and do to itself
 
     public func record(_ id: String) -> LaneRecord? { lock.withLock { state.records[id] } }

@@ -18,6 +18,7 @@ public enum LaneKind: String, Sendable, Codable {
     case head                             // signed epoch / admin-key chain / counters
     case log                              // membership log entry
     case enroll                           // enrollment request / pairing proof
+    case stage                            // a staged key rotation: the journal (`stage`) and its re-wrapped keys (`stage.<epoch>.<n>`)
 }
 
 /// The lane's own concurrency token. Opaque to the engine, which only stores and returns it.
@@ -85,6 +86,8 @@ public enum LaneRejection: Sendable, Equatable {
     case tooLarge
     case quota
     case forbidden
+    /// Another device is part-way through a key rotation on this lane: try again after it committed or gave up.
+    case rotationInProgress
 }
 
 public enum LaneWriteResult: Sendable, Equatable {
@@ -186,6 +189,12 @@ public protocol SyncLane: Sendable {
     func changes() -> AsyncStream<LaneSignal>
     /// Destructive and explicit (migration, detach).
     func erase(confirmed: LaneEraseToken) async throws
+    /// Makes the storage exist (CloudKit: creates the box's zone). Only creating or re-seeding a box calls it: a store that
+    /// vanished must stay missing (`LaneError.storeMissing`) until the person chose to upload the replica again.
+    func prepare() async throws
+    /// Hard-deletes records that are meant to go away (`enroll`, `stage`). Never items or control state: those are only
+    /// ever overwritten, and the verifier treats a hard delete of them as an incident.
+    func remove(_ refs: [LaneRecordRef]) async throws
 }
 
 public extension SyncLane {
@@ -193,4 +202,6 @@ public extension SyncLane {
     func commit(_ atomic: [LaneWrite]) async throws -> [LaneWriteResult] { throw LaneError.unsupported }
     func changes() -> AsyncStream<LaneSignal> { AsyncStream { $0.finish() } }
     func erase(confirmed: LaneEraseToken) async throws { throw LaneError.unsupported }
+    func prepare() async throws {}
+    func remove(_ refs: [LaneRecordRef]) async throws { throw LaneError.unsupported }
 }

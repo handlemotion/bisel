@@ -25,7 +25,7 @@ public enum LaneContract {
         return c.failures
     }
 
-    public static func flow(named name: String) -> ContractFlow? { (flows + hostile).first { $0.name == name } }
+    public static func flow(named name: String) -> ContractFlow? { (flows + storageOnly + hostile).first { $0.name == name } }
 
     /// The flows every lane must pass.
     public static let flows: [ContractFlow] = [
@@ -197,6 +197,12 @@ public enum LaneContract {
             c.expect(try await b.vault.revealPassword(id: synced.id) == "s2", "the migrated edit reaches the other device")
             c.expect(try await b.vault.revealPassword(id: created.id) == "c1", "the migrated new item reaches the other device")
         },
+    ]
+
+    /// Flows of a lane that is only storage (milestone L4): the staged rotation, enrollment over the lane, account changes,
+    /// a deleted store, moving a box onto it. The server keeps these on its side, so they run on `FakeLane` in the flow tests
+    /// and on CloudKit in the signed contract run, never against the server.
+    public static let storageOnly: [ContractFlow] = [
     ]
 
     /// A lane that is only storage and misbehaves (nothing the server lane can be made to do). They drive `FakeLane` directly.

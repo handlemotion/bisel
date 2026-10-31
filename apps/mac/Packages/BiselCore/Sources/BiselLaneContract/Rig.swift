@@ -24,15 +24,19 @@ public struct StorageUnderTest: Sendable {
     public let lose: @Sendable (_ id: String) async throws -> Void
     /// Tears the storage down after the flow (CloudKit: deletes the zone).
     public let close: @Sendable () async throws -> Void
+    /// Another, independent store of the same kind (CloudKit: another zone), for flows that need a second one: the storage of a
+    /// different account, the target of a migration. Closed with this one.
+    public let sibling: @Sendable (_ suffix: String) async throws -> StorageUnderTest
 
     public init(name: String, lane: any SyncLane, fake: FakeLane? = nil, lose: @escaping @Sendable (String) async throws -> Void,
-                close: @escaping @Sendable () async throws -> Void = {}) {
-        self.name = name; self.lane = lane; self.fake = fake; self.lose = lose; self.close = close
+                close: @escaping @Sendable () async throws -> Void = {},
+                sibling: @escaping @Sendable (String) async throws -> StorageUnderTest) {
+        self.name = name; self.lane = lane; self.fake = fake; self.lose = lose; self.close = close; self.sibling = sibling
     }
 
-    public static func fake() -> StorageUnderTest {
-        let fake = FakeLane()
-        return StorageUnderTest(name: "fake", lane: fake, fake: fake, lose: { fake.dropSilently($0) })
+    public static func fake(_ name: String = "fake") -> StorageUnderTest {
+        let fake = FakeLane(name: name)
+        return StorageUnderTest(name: name, lane: fake, fake: fake, lose: { fake.dropSilently($0) }, sibling: { .fake("\(name)-\($0)") })
     }
 }
 
@@ -61,9 +65,10 @@ public final class Rig: @unchecked Sendable {
         }
     }
 
+    /// A device that syncs through this rig's storage when its address is the rig's (`lane://`), and with the server otherwise.
     public func device(_ name: String) throws -> Device {
         guard let lane = storage?.lane else { return try Device(name) }
-        return try Device(name, laneProvider: { _, _ in lane })
+        return try Device(name, laneProvider: { id, _ in id.serverURL?.scheme == "lane" ? lane : nil })
     }
 
     public func bootstrap(_ d: Device) async throws -> RecoveryPhrase {

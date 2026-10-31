@@ -112,7 +112,7 @@ enum LaneContractRun {
 
             failures += await laneProbe(probe)
 
-            for (i, flow) in LaneContract.flows.enumerated() where only.map({ flow.name.contains($0) }) ?? true {
+            for (i, flow) in (LaneContract.flows + LaneContract.storageOnly).enumerated() where only.map({ flow.name.contains($0) }) ?? true {
                 let zone = "\(zonePrefix)-\(i + 1)-\(UUID().uuidString.prefix(6).lowercased())"
                 out.line("flow \(i + 1): \(flow.name) [zone \(zone)]")
                 let started = Date()
@@ -137,7 +137,7 @@ enum LaneContractRun {
             return StorageUnderTest(name: zone, lane: lane, lose: { id in
                 let record = CKRecord.ID(recordName: CloudKitLane.recordName(id), zoneID: lane.zoneID)
                 _ = try await lane.container.privateCloudDatabase.modifyRecords(saving: [], deleting: [record])
-            }, close: { try await lane.erase(confirmed: LaneEraseToken()) })
+            }, close: { try await lane.erase(confirmed: LaneEraseToken()) }, sibling: { storage(zone: "\(zone)-\($0)") })
         }
 
         /// The lane's own CloudKit behaviour, below the box: change tokens, compare-and-set on the change tag, atomic commit,

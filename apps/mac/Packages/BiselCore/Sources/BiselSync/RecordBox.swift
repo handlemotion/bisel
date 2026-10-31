@@ -35,6 +35,8 @@ public struct RecordBox: BoxLane {
     public func commit(_ atomic: [LaneWrite]) async throws -> [LaneWriteResult] { try await storage.commit(atomic) }
     public func changes() -> AsyncStream<LaneSignal> { storage.changes() }
     public func erase(confirmed: LaneEraseToken) async throws { try await storage.erase(confirmed: confirmed) }
+    public func prepare() async throws { try await storage.prepare() }
+    public func remove(_ refs: [LaneRecordRef]) async throws { try await storage.remove(refs) }
 
     /// An item written for an epoch the box has left is refused up front; one that slips through a race is quarantined on read.
     public func write(_ batch: [LaneWrite]) async throws -> [LaneWriteResult] {

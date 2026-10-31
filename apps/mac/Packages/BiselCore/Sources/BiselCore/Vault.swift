@@ -73,6 +73,8 @@ public enum RecoveryError: Error, Sendable, Equatable, LocalizedError {
 
 /// Facade over the core (SPEC §7). One instance per device/store.
 public actor Vault {
+    public typealias LaneProvider = @Sendable (_ identity: LocalIdentity, _ vaultKey: @escaping @Sendable () -> LockedKey?) throws -> (any SyncLane)?
+
     public struct Configuration: Sendable {
         public var location: StoreLocation
         public var keyStore: any DeviceKeyStore
@@ -84,14 +86,15 @@ public actor Vault {
         /// Where small secrets (the server's address) live instead of the plaintext database. With the Secure Enclave key
         /// store this defaults to the Keychain in the same access group.
         public var secrets: (any SecretStore)?
-        /// Builds the lane this device syncs through, from its identity and the vault key in memory. nil: the Bisel server at
-        /// `serverURL` (the only lane that ships today); flows inject their own. A lane that is only storage is wrapped in a
-        /// `RecordBox`, which keeps the box's control state as signed records on it.
-        public var laneProvider: (@Sendable (_ identity: LocalIdentity, _ vaultKey: @escaping @Sendable () -> LockedKey?) throws -> any SyncLane)?
+        /// Builds the lane this device syncs through, from its identity (its `serverURL` is the lane's address) and the vault key
+        /// in memory. Returning nil, or no provider at all: the Bisel server at `serverURL`. The app provides CloudKit
+        /// (`cloudkit://` addresses); flows inject their own. A lane that is only storage is wrapped in a `RecordBox`, which keeps
+        /// the box's control state as signed records on it.
+        public var laneProvider: LaneProvider?
 
         public init(location: StoreLocation, keyStore: any DeviceKeyStore, gate: any BiometricGate = LocalAuthenticationGate(),
                     fillWindow: TimeInterval = 300, deviceKind: String = "mac", secrets: (any SecretStore)? = nil,
-                    laneProvider: (@Sendable (_ identity: LocalIdentity, _ vaultKey: @escaping @Sendable () -> LockedKey?) throws -> any SyncLane)? = nil) {
+                    laneProvider: LaneProvider? = nil) {
             self.location = location; self.keyStore = keyStore; self.gate = gate
             self.fillWindow = fillWindow; self.deviceKind = deviceKind; self.laneProvider = laneProvider
             if let secrets { self.secrets = secrets }
@@ -166,8 +169,7 @@ public actor Vault {
         let id = try requireIdentity()
         guard let server = id.serverURL else { throw VaultError.noServer }
         let held = liveKey()
-        if let provider = config.laneProvider {
-            let made = try provider(id, { held })
+        if let provider = config.laneProvider, let made = try provider(id, { held }) {
             if let box = made as? any BoxLane { return box }
             let key = made.id.rawValue, store = store, keyStore = config.keyStore
             let witness: @Sendable () -> LaneWitness? = {
