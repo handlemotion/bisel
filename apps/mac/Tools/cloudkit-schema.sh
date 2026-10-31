@@ -8,8 +8,8 @@
 #   apps/mac/Tools/cloudkit-schema.sh export                  export Development into the repo file, then lint it
 #   apps/mac/Tools/cloudkit-schema.sh validate                lint, then validate the repo file against Development and show drift
 #   apps/mac/Tools/cloudkit-schema.sh import-development      lint, then import the repo file into Development (e.g. to drop indexes)
-#   apps/mac/Tools/cloudkit-schema.sh validate --production   same as validate, against Production (read-only)
-#   apps/mac/Tools/cloudkit-schema.sh deploy --production     lint, validate, show the diff, ask, then import into Production
+#   apps/mac/Tools/cloudkit-schema.sh validate --production   lint, then show drift against Production (read-only)
+#   apps/mac/Tools/cloudkit-schema.sh deploy --production     lint, show the diff, ask, then import into Production
 #
 # Needs a CloudKit management token saved once with `xcrun cktool save-token --type management` (RELEASE.md, step 4); cktool
 # reads it from the keychain, this script never sees or passes it. Production is only ever touched by `deploy --production`,
@@ -74,7 +74,8 @@ lint() {
   echo "lint OK: R(k STRING, rev INT64, ep INT64, w STRING, sig BYTES, d BYTES), no indexes"
 }
 
-# drift <environment>: the live schema next to the repo file.
+# drift <environment>: the live schema next to the repo file. cktool's validate-schema is Development only ("endpoint not
+# applicable in the environment 'production'"), so Production is checked by exporting it and diffing.
 drift() {
   local live
   live="$(mktemp "${TMPDIR:-/tmp}/bisel-ckschema.XXXXXX")"
@@ -97,8 +98,10 @@ case "$CMD" in
   validate)
     lint "$SCHEMA"
     need_token
-    ck validate-schema --environment "$ENVIRONMENT" --file "$SCHEMA"
-    echo "validate-schema OK against $ENVIRONMENT"
+    if [[ "$ENVIRONMENT" == development ]]; then
+      ck validate-schema --environment development --file "$SCHEMA"
+      echo "validate-schema OK against development"
+    fi
     drift "$ENVIRONMENT" || true ;;
 
   import-development)
@@ -111,8 +114,6 @@ case "$CMD" in
     lint "$SCHEMA"
     need_token
     [[ -t 0 ]] || die "deploy --production asks for a typed confirmation; run it from a terminal."
-    ck validate-schema --environment production --file "$SCHEMA"
-    echo "validate-schema OK against production"
     echo; echo "Production now vs the repo file (lines with + are what the deploy adds):"
     drift production || true
     echo
