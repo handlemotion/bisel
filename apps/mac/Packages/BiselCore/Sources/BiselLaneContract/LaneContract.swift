@@ -326,6 +326,35 @@ public enum LaneContract {
             }
             c.expect(try await a.vault.identity()?.epoch == me.epoch, "the unsigned head announced no rotation")
         },
+        ContractFlow(name: "a revoked device that kept the old admin key cannot replace the recovery material, here or for a device recovering") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a"), b = try rig.device("b")
+            let phrase = try await rig.bootstrap(a)
+            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            let bIdentity = try c.require(try await b.vault.identity())
+            let oldVK = try await b.keyStore.openEnvelope(try c.require(bIdentity.envelope), reason: "test")
+            try await a.vault.revoke(deviceID: bIdentity.deviceID)
+            try await a.vault.sync()
+
+            // Signed with the admin key of the epoch b was cut off in: the real recovery keys, with an envelope holding the old key.
+            let keys = try RecoveryKeys(phrase: phrase)
+            let stale = ControlRecords.Recovery(seq: 99, epoch: 1, pubkey: keys.publicKey.base64URLEncoded(), encPubkey: keys.encryptionPublicKey.base64URLEncoded(),
+                                                envelope: try keys.seal(vaultKey: oldVK, epoch: 1).base64URLEncoded())
+            var record = LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: 1, blob: try ControlRecords.encode(stale),
+                                    writer: bIdentity.deviceID)
+            record.sig = try AdminSigner(vaultKey: oldVK).sign(record.canonical)
+            fake.inject(record)
+
+            let envelopeBefore = try await a.vault.identity()?.recoveryEnvelope
+            c.expect(try await a.vault.sync().quarantined == 1, "the old-epoch recovery record is quarantined")
+            c.expect(try await a.vault.identity()?.recoveryEnvelope == envelopeBefore, "the device keeps the recovery envelope it had")
+            let fresh = try rig.device("fresh")
+            await c.expectThrows("a fresh device does not recover into the key the revoked device holds") {
+                try await rig.recover(fresh, phrase: phrase)
+            }
+        },
     ]
 }
 #endif
