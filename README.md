@@ -26,15 +26,15 @@ cd apps/mac && xcodegen generate --spec project.dev.yml && open BiselDev.xcodepr
 
 `project.dev.yml` builds an unsigned Debug app with software keys, so it runs without an Apple developer account. Never ship from it. The real app comes from `project.yml` (Secure Enclave, iCloud), which needs your own signing team, bundle id and iCloud container in place of mine.
 
-Checks, the same ones CI runs:
+Checks:
 
 ```bash
 pnpm check && pnpm check-types && pnpm test
 cd apps/mac/Packages/BiselCore && swift test --traits SoftwareKeys
-scripts/check-all.sh
+pnpm ci:local
 ```
 
-`pnpm test` runs the server's flow tests against a real Worker on a local D1, and the Swift flow tests start their own local server too, nothing touches Cloudflare. `scripts/check-all.sh` runs everything, the Mac app build included.
+`pnpm test` runs the server's flow tests against a real Worker on a local D1, and the Swift flow tests start their own local server too, nothing touches Cloudflare. `pnpm ci:local` runs what CI runs, the Mac app build included.
 
 ## The repo
 

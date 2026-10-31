@@ -18,11 +18,11 @@ See [Building it](README.md#building-it). Nothing in development touches Cloudfl
 
 ## How CI gates a change
 
-Every pull request runs the GitHub Actions workflow in [.github/workflows](.github/workflows): format and lint (oxfmt, oxlint), type checks, the server flow tests on a local D1, and the Swift core flow tests on macOS. A pull request merges only when CI is green. Run the same checks locally before pushing:
+Every pull request runs [.github/workflows/ci.yml](.github/workflows/ci.yml), which calls `scripts/check-all.sh` in four jobs: Server (format, lint, types, server flow tests on a local D1), Core (the Swift flow tests), App (an unsigned BiselDev build) and Release (no debug hooks in the shipped binary). CodeQL scans the workflows, TypeScript and Swift. A pull request merges only when every check is green, squashed into one commit. Run the same checks locally before pushing:
 
 ```bash
 pnpm check && pnpm check-types && pnpm test
-scripts/check-all.sh   # everything, including the Swift flow suite and the Mac app build
+pnpm ci:local   # all four CI modes of scripts/check-all.sh, including the Swift flow suite and the Mac app build
 ```
 
 ## Style
