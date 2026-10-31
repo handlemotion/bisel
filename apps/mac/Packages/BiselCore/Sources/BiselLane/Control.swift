@@ -64,8 +64,12 @@ public enum ControlRecords {
         public var pubkey: String
         public var encPubkey: String
         public var envelope: String
-        public init(seq: Int, epoch: Int, pubkey: String, encPubkey: String, envelope: String) {
-            self.seq = seq; self.epoch = epoch; self.pubkey = pubkey; self.encPubkey = encPubkey; self.envelope = envelope
+        /// RK-sig's signature over the first admin key of the chain (`anchorMessage`): what a device recovering with the phrase,
+        /// which has seen nothing of the box yet, checks the head against. The envelope is sealed to a public key, so without it
+        /// anyone who can write to the storage could build a box of their own around an envelope the phrase opens.
+        public var anchor: String?
+        public init(seq: Int, epoch: Int, pubkey: String, encPubkey: String, envelope: String, anchor: String? = nil) {
+            self.seq = seq; self.epoch = epoch; self.pubkey = pubkey; self.encPubkey = encPubkey; self.envelope = envelope; self.anchor = anchor
         }
     }
 
@@ -84,6 +88,9 @@ public enum ControlRecords {
     public static func chainMessage(newKey: Data) -> Data { Data("bisel/v1/ak-chain|".utf8) + newKey }
 
     public static func logHash(_ blob: Data) -> String { blob.sha256Hex() }
+
+    /// What the recovery signing key signs to vouch for a box: the first admin key of its chain.
+    public static func anchorMessage(root: Data) -> Data { Data("bisel/v1/recovery-anchor|".utf8) + root }
 
     public static func adminSignatureValid(_ record: LaneRecord, key: Data) -> Bool {
         guard let sig = record.sig, let pub = try? Curve25519.Signing.PublicKey(rawRepresentation: key) else { return false }
@@ -109,6 +116,18 @@ public enum ControlRecords {
 
     /// The admin key in force at `epoch`: the last link at or before it.
     public static func key(at epoch: Int, in links: [AKLink]) -> Data? { links.last { $0.epoch <= epoch }?.ak }
+
+    /// The head in `record` if it holds together: a well-formed chain, the record signed by its last key, and (when this device
+    /// pinned a chain before) still containing the key it pinned. Anyone who can write to the storage can write a head, so a read
+    /// that decides anything (the epoch to write for, which envelope to take) goes through this.
+    public static func verifiedHead(_ record: LaneRecord, pinned: [AKLink]) -> Head? {
+        guard record.kind == .head, record.id == headID, let head = decode(Head.self, record.blob), chainValid(head.aks, epoch: head.epoch),
+              let last = head.aks.last, adminSignatureValid(record, key: last.ak) else { return nil }
+        if let pin = pinned.last {
+            guard head.epoch >= pin.epoch, head.aks.contains(where: { $0.epoch == pin.epoch && $0.ak == pin.ak }) else { return nil }
+        }
+        return head
+    }
 }
 
 /// Everything a device has verified about a lane's control records so far. Persisted per lane (`lane_state.witness`); what

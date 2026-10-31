@@ -97,5 +97,11 @@ final class SecureClipboard {
         ownedChangeCount = nil
         guard let first = snap.items.first else { return }
         for (t, d) in first { pb.setData(d, forType: t) }
+        // What was there may be a secret copied a moment ago: its timer saw the paste's change count and gave up, so restart
+        // it for the restored copy, or the secret would stay until something else is copied.
+        if first[Self.concealedType] != nil {
+            ownedChangeCount = pb.changeCount
+            scheduleClear(expecting: pb.changeCount)
+        }
     }
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds the Mac app in Release (project.yml, no SoftwareKeys trait) and fails if any BISEL_DEV_ string is in the shipped bundle.
-# Debug-only hooks (BISEL_DEV_FLOW, BISEL_DEV_FIXTURE, BISEL_DEV_STEP, ...) are read from the environment inside #if DEBUG /
-# #if BISEL_DEV_FIXTURE; in Release they must be compiled out, or anyone who can set the app's environment could drive it.
+# Builds the Mac app in Release (project.yml, no SoftwareKeys trait) and fails if any BISEL_DEV_ string, or any trace of the
+# software key store, is in the shipped bundle. Debug-only hooks (BISEL_DEV_FLOW, BISEL_DEV_FIXTURE, BISEL_DEV_STEP, ...) are read
+# from the environment inside #if DEBUG / #if BISEL_DEV_FIXTURE; in Release they must be compiled out, or anyone who can set the
+# app's environment could drive it. The software key store (plain-file device keys) exists only with the SoftwareKeys trait.
 #
 #   scripts/check-release-hooks.sh              build Release, then check
 #   scripts/check-release-hooks.sh --no-build   check the bundle from the last build
@@ -21,11 +22,13 @@ for arg in "$@"; do
   esac
 done
 
+LEAKS='BISEL_DEV_[A-Z0-9_]*|BISEL_SOFTWARE_KEYS|BISEL_ALLOW_SOFTWARE_KEYS|software-keys\.json|SoftwareDeviceKeyStore'
+
 # Matches in every Mach-O file of the bundle (main executable, frameworks, dylibs), printed one per line as file:string.
 scan() {
   local app="$1" file names hits=0
   while IFS= read -r file; do
-    names="$(strings -a "$file" 2>/dev/null | grep -o 'BISEL_DEV_[A-Z0-9_]*' | sort -u)"
+    names="$(strings -a "$file" 2>/dev/null | grep -oE "$LEAKS" | sort -u)"
     if [[ -n "$names" ]]; then echo "$names" | sed "s|^|${file#$app/}: |"; hits=1; fi
   done < <(find "$app" -type f \( -perm -u+x -o -name '*.dylib' \) -exec sh -c 'file -b "$1" | grep -q Mach-O && echo "$1"' _ {} \;)
   return $((hits == 0))   # 0 (success) when something was found
@@ -63,8 +66,8 @@ if (( CONTROL )); then
 fi
 
 if found="$(scan "$REL_APP")"; then
-  echo "FAIL: BISEL_DEV_ strings in the Release build:" >&2
+  echo "FAIL: dev hooks or software keys in the Release build:" >&2
   echo "$found" | sed 's/^/  /' >&2
   exit 1
 fi
-echo "PASS: no BISEL_DEV_ strings in $REL_APP"
+echo "PASS: no BISEL_DEV_ strings or software key store in $REL_APP"

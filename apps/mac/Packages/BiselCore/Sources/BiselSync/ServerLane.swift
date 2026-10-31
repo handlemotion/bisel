@@ -13,7 +13,10 @@ public protocol BoxLane: SyncLane {
     func revokeDevice(id: String, admin: AdminSigner) async throws
     /// This device's own envelope and the epoch of the vault key inside it.
     func ownEnvelope() async throws -> (envelope: Data, epoch: Int)
-    func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int, admin: AdminSigner) async throws
+    /// `anchor` signs the box's first admin key with the new recovery signing key (`ControlRecords.Recovery.anchor`); lanes that
+    /// check the recovering device themselves (the server) ignore it.
+    func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int, admin: AdminSigner,
+                        anchor: @Sendable (_ root: Data) throws -> Data) async throws
     /// `admin` authorises (the key in force), `newAdmin` is the key for the new epoch. `written` lists the records the lane
     /// rewrote, with their new positions, when it says so (the server does not: its positions follow from `headSeq`).
     func rotate(baseEpoch: Int, baseSeq: Int, revoke: String?, newAdmin: AdminSigner,
@@ -43,9 +46,12 @@ public struct NewBox: Sendable {
     public var recoveryEncryptionPublicKey: Data
     public var recoveryEnvelope: Data
     public var admin: AdminSigner
-    public init(device: WireDevice, recoveryPublicKey: Data, recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, admin: AdminSigner) {
+    /// RK-sig over `ControlRecords.anchorMessage(root: admin.publicKey)`.
+    public var recoveryAnchor: Data?
+    public init(device: WireDevice, recoveryPublicKey: Data, recoveryEncryptionPublicKey: Data, recoveryEnvelope: Data, admin: AdminSigner,
+                recoveryAnchor: Data? = nil) {
         self.device = device; self.recoveryPublicKey = recoveryPublicKey; self.recoveryEncryptionPublicKey = recoveryEncryptionPublicKey
-        self.recoveryEnvelope = recoveryEnvelope; self.admin = admin
+        self.recoveryEnvelope = recoveryEnvelope; self.admin = admin; self.recoveryAnchor = recoveryAnchor
     }
 }
 
@@ -112,7 +118,8 @@ public struct ServerLane: BoxLane {
     public func admit(_ device: WireDevice, admin: AdminSigner) async throws { try await client.addDevice(device, admin: admin) }
     public func revokeDevice(id: String, admin: AdminSigner) async throws { try await client.revokeDevice(id: id, admin: admin) }
     public func ownEnvelope() async throws -> (envelope: Data, epoch: Int) { try await client.envelope() }
-    public func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int, admin: AdminSigner) async throws {
+    public func rotateRecovery(publicKey: Data, encryptionPublicKey: Data, envelope: Data, epoch: Int, admin: AdminSigner,
+                               anchor: @Sendable (Data) throws -> Data) async throws {
         try await client.rotateRecovery(publicKey: publicKey, encryptionPublicKey: encryptionPublicKey, envelope: envelope, epoch: epoch, admin: admin)
     }
     public func rotate(baseEpoch: Int, baseSeq: Int, revoke: String?, newAdmin: AdminSigner,

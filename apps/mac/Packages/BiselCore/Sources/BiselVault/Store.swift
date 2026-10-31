@@ -159,6 +159,9 @@ public final class LocalStore: Sendable {
     public init(location: StoreLocation, secrets: (any SecretStore)? = nil) throws {
         self.secrets = secrets
         try FileManager.default.createDirectory(at: location.directory, withIntermediateDirectories: true)
+        // Owner only: the database, its WAL and (in dev builds) the software keys live here. Files are created with the process
+        // umask (usually world-readable) and the atomic writes replace them, so the directory is what keeps other users out.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: location.directory.path)
         var config = Configuration()
         config.busyMode = .timeout(5)       // the app and its extensions share this file
         pool = try DatabasePool(path: location.databaseURL.path, configuration: config)
@@ -471,8 +474,11 @@ public final class LocalStore: Sendable {
                     return false
                 }
                 // A new revision (or a delete) replaces content this device holds: keep the old ciphertext for 30 days.
-                // (Same revision, new seq = a key rotation re-wrapping the item: nothing to keep.)
-                if existing.rev != r.rev, !existing.deleted {
+                // (Same revision, new seq = a key rotation re-wrapping the item: only the wrapped key changes, nothing to keep. A
+                // different payload at the same revision is never a rotation: it is someone writing over the record, so keep it.)
+                let rewrap = existing.rev == r.rev
+                    && existing.blob.dropFirst(ItemSealer.wrappedKeyLength) == r.blob.dropFirst(ItemSealer.wrappedKeyLength)
+                if !rewrap, !existing.deleted {
                     try trash(existing, reason: r.deleted ? "remote-delete" : "remote-overwrite", db)
                 }
             }

@@ -292,6 +292,125 @@ public enum LaneContract {
             c.expect(try await a.vault.items().undecryptable.isEmpty, "nothing undecryptable is applied")
             c.expect(try await a.vault.items().items.map(\.title) == ["Bank"], "the box is unchanged")
         },
+        ContractFlow(name: "someone who can only write to the storage cannot make a device adopt a vault key of their choosing and upload under it") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a")
+            _ = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            let me = try c.require(try await a.vault.identity())
+            let enc = try c.require(me.roster.first?.encPubkey)
+
+            // A rotation announced by a head nobody with the admin key signed, an envelope to this device's public key holding a key
+            // the writer picked, and a manifest sealed under that key so it "confirms" it.
+            let evil = BiselRandom.bytes(32)
+            var head = try c.require(ControlRecords.decode(ControlRecords.Head.self, try c.require(fake.record(ControlRecords.headID)).blob))
+            head.epoch += 1
+            fake.inject(LaneRecord(kind: .head, id: ControlRecords.headID, rev: 0, epoch: head.epoch, blob: try ControlRecords.encode(head),
+                                   sig: Data(repeating: 7, count: 64)))
+            fake.inject(LaneRecord(kind: .envelope, id: ControlRecords.envelopeID(epoch: head.epoch, device: me.deviceID), rev: 0, epoch: head.epoch,
+                                   blob: try DeviceEnvelope.seal(vaultKey: evil, toEncryptionKey: enc)))
+            let rev = try c.require(fake.record(ReservedRecord.manifestID)).rev + 1
+            let planted = try ManifestCodec.seal(VaultManifest(), rev: rev, vaultKey: SymmetricKey(data: evil))
+            fake.inject(LaneRecord(kind: .manifest, id: ReservedRecord.manifestID, rev: rev, epoch: head.epoch, blob: planted))
+
+            _ = try await a.vault.save(login("New", password: "new-pw"))
+            _ = try? await a.vault.sync()
+            try await a.vault.unlock()
+            _ = try? await a.vault.sync()
+            _ = try? await a.vault.sync()
+
+            for r in fake.records() where r.isItemLike && r.kind != .tombstone && r.blob != planted {
+                c.expect((try? ItemSealer.open(blob: r.blob, id: r.id, rev: r.rev, vaultKey: SymmetricKey(data: evil))) == nil,
+                         "nothing this device uploads opens under the planted key (\(r.id))")
+            }
+            c.expect(try await a.vault.identity()?.epoch == me.epoch, "the unsigned head announced no rotation")
+            // The planted manifest does not lock the device out either: it publishes its own again and carries on.
+            c.expect(try await a.vault.revealPassword(id: bank.id) == "bank-pw", "the device still opens its box")
+            let manifest = try c.require(fake.record(ReservedRecord.manifestID))
+            c.expect(manifest.blob != planted && manifest.rev > rev, "the device's own manifest replaces the planted one")
+        },
+        ContractFlow(name: "a revoked device that kept the old admin key cannot replace the recovery material, here or for a device recovering, nor wedge sync with its counter") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a"), b = try rig.device("b")
+            let phrase = try await rig.bootstrap(a)
+            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            _ = try await b.vault.save(login("From b", password: "b-pw"))   // b writes, so the box has seen a counter of b's
+            try await b.vault.sync()
+            try await a.vault.sync()
+            let bIdentity = try c.require(try await b.vault.identity())
+            let oldVK = try await b.keyStore.openEnvelope(try c.require(bIdentity.envelope), reason: "test")
+            try await a.vault.revoke(deviceID: bIdentity.deviceID)
+            try await a.vault.sync()
+
+            // Signed with the admin key of the epoch b was cut off in: the real recovery keys, with an envelope holding the old key.
+            let keys = try RecoveryKeys(phrase: phrase)
+            let stale = ControlRecords.Recovery(seq: 99, epoch: 1, pubkey: keys.publicKey.base64URLEncoded(), encPubkey: keys.encryptionPublicKey.base64URLEncoded(),
+                                                envelope: try keys.seal(vaultKey: oldVK, epoch: 1).base64URLEncoded())
+            var record = LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: 1, blob: try ControlRecords.encode(stale),
+                                    writer: bIdentity.deviceID)
+            record.sig = try AdminSigner(vaultKey: oldVK).sign(record.canonical)
+            fake.inject(record)
+            // And its own counter, lower than the one the box saw: on every device that reads as the lane rolling back.
+            var counter = LaneRecord(kind: .head, id: ControlRecords.deviceHeadID(bIdentity.deviceID), rev: 0, epoch: 1,
+                                     blob: try ControlRecords.encode(ControlRecords.DeviceHead(device: bIdentity.deviceID, counter: 0, epoch: 1)),
+                                     writer: bIdentity.deviceID)
+            counter.sig = try b.keyStore.sign(counter.canonical)
+            fake.inject(counter)
+
+            let envelopeBefore = try await a.vault.identity()?.recoveryEnvelope
+            c.expect(try await a.vault.sync().quarantined == 2, "the old-epoch recovery record and the revoked device's counter are quarantined")
+            c.expect(try await a.vault.identity()?.recoveryEnvelope == envelopeBefore, "the device keeps the recovery envelope it had")
+            let fresh = try rig.device("fresh")
+            await c.expectThrows("a fresh device does not recover into the key the revoked device holds") {
+                try await rig.recover(fresh, phrase: phrase)
+            }
+        },
+        ContractFlow(name: "someone who can write to the storage but never held the key cannot build a box the 24 words recover into") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a")
+            let phrase = try await rig.bootstrap(a)
+            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+
+            // Only public material: the recovery keys as the recovery record shows them. A head of their own, signed by an admin key
+            // of their own, and a recovery record whose envelope (sealed to the public recovery key) holds a key they picked.
+            let real = try c.require(ControlRecords.decode(ControlRecords.Recovery.self, try c.require(fake.record(ControlRecords.recoveryID)).blob))
+            let enc = try c.require(Data(base64URLEncoded: real.encPubkey)), sig = try c.require(Data(base64URLEncoded: real.pubkey))
+            let evil = BiselRandom.bytes(32)
+            let admin = try AdminSigner(vaultKey: evil)
+            var head = LaneRecord(kind: .head, id: ControlRecords.headID, rev: 0, epoch: 1,
+                                  blob: try ControlRecords.encode(ControlRecords.Head(epoch: 1, aks: [.init(epoch: 1, ak: admin.publicKey, sig: nil)])))
+            head.sig = try admin.sign(head.canonical)
+            fake.inject(head)
+            let forged = ControlRecords.Recovery(seq: real.seq + 1, epoch: 1, pubkey: real.pubkey, encPubkey: real.encPubkey,
+                                                 envelope: try RecoveryKeys.seal(vaultKey: evil, toEncryptionKey: enc, signingKey: sig, epoch: 1).base64URLEncoded(),
+                                                 anchor: real.anchor)
+            var recovery = LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: 1, blob: try ControlRecords.encode(forged))
+            recovery.sig = try admin.sign(recovery.canonical)
+            fake.inject(recovery)
+
+            let fresh = try rig.device("fresh")
+            await c.expectThrows("the phrase must not recover into a box it never vouched for") { try await rig.recover(fresh, phrase: phrase) }
+        },
+        ContractFlow(name: "a record written over at the same revision by someone without the key can still be taken back") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a")
+            _ = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+
+            // Same id and revision, newer position, junk where the payload was: what a rotation's re-wrap looks like from outside.
+            var junk = try c.require(fake.record(bank.id))
+            junk.blob = junk.blob.prefix(ItemSealer.wrappedKeyLength) + Data(repeating: 6, count: junk.blob.count - ItemSealer.wrappedKeyLength)
+            fake.inject(junk)
+            _ = try await a.vault.sync()
+            c.expect(try await a.vault.items().undecryptable == [bank.id], "sanity: the record now holds the junk")
+            let kept = try await a.vault.trash().first { $0.itemID == bank.id }
+            c.expect(kept?.item.password == "bank-pw", "the version it replaced is kept and can be restored")
+        },
     ]
 }
 #endif

@@ -174,7 +174,8 @@ public actor Vault {
                 ((try? store.laneState(key))?.witness).flatMap { try? JSONDecoder().decode(LaneWitness.self, from: $0) }
             }
             return RecordBox(storage: made, deviceID: id.deviceID, sign: { try keyStore.sign($0) },
-                             members: { witness()?.members ?? [] }, logHint: { witness()?.logN ?? 0 })
+                             members: { witness()?.members ?? [] }, logHint: { witness()?.logN ?? 0 },
+                             pinned: { witness()?.aks ?? [] })
         }
         return ServerLane(client: SyncClient(baseURL: server, signer: DeviceSigner(deviceID: id.deviceID, keyStore: config.keyStore)),
                           boxID: id.boxID, eventsSince: (try? store.laneState(laneKeyHint(id)).eventCursor).flatMap { $0 == 0 ? nil : $0 },
@@ -312,9 +313,11 @@ public actor Vault {
         do {
             let device = WireDevice(id: identity.deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: me.sigPubkey,
                                     encPubkey: me.encPubkey, envelope: envelope)
+            let admin = try AdminSigner(vaultKey: vk)
+            let anchor = try RecoveryKeys(phrase: bundle.phrase).signingKey.signature(for: ControlRecords.anchorMessage(root: admin.publicKey))
             _ = try await lane().create(NewBox(device: device, recoveryPublicKey: bundle.publicKey,
                                                recoveryEncryptionPublicKey: bundle.encryptionPublicKey, recoveryEnvelope: bundle.envelope,
-                                               admin: try AdminSigner(vaultKey: vk)))
+                                               admin: admin, recoveryAnchor: anchor))
         } catch {
             lock()
             try? store.removeAll()
@@ -559,9 +562,17 @@ public actor Vault {
     public func recover(lane recovering: any BoxLane, address: URL, phrase: RecoveryPhrase, deviceName: String, boxID: String? = nil) async throws {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
         let keys = try RecoveryKeys(phrase: phrase)
-        let (recoveryEnvelope, epoch) = try await recovering.recoveryEnvelope()
+        let recoveryEnvelope: Data, epoch: Int, expectedAdmin: Data?
+        if let box = recovering as? RecordBox {
+            // Storage anyone with the account can write: only a box the phrase itself vouched for, and only the key its head ends in.
+            (recoveryEnvelope, epoch, expectedAdmin) = try await box.anchoredRecoveryEnvelope(recoverySigningKey: keys.publicKey)
+        } else {
+            (recoveryEnvelope, epoch) = try await recovering.recoveryEnvelope()
+            expectedAdmin = nil
+        }
         var vk = try keys.open(envelope: recoveryEnvelope, epoch: epoch)
         defer { vk.zeroize() }
+        if let expectedAdmin, try AdminSigner(vaultKey: vk).publicKey != expectedAdmin { throw IntegrityError.keyConfirmationFailed }
         let pub = try config.keyStore.createKeys()
         let deviceID = BiselRandom.identifier()
         let envelope = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: pub.enc)
@@ -589,8 +600,10 @@ public actor Vault {
         var id = try requireIdentity()
         let bundle = try RecoveryService.makeBundle(vaultKey: raw, epoch: id.epoch)
         do {
+            let keys = try RecoveryKeys(phrase: bundle.phrase)
             try await lane().rotateRecovery(publicKey: bundle.publicKey, encryptionPublicKey: bundle.encryptionPublicKey,
-                                            envelope: bundle.envelope, epoch: id.epoch, admin: try adminSigner(vk))
+                                            envelope: bundle.envelope, epoch: id.epoch, admin: try adminSigner(vk),
+                                            anchor: { try keys.signingKey.signature(for: ControlRecords.anchorMessage(root: $0)) })
         } catch RotationError.staleEpoch {
             _ = try? await sync()
             throw RotationError.vaultKeyRotated
@@ -633,10 +646,13 @@ public actor Vault {
     /// Reads the manifest the vault's devices share and folds it into this device's roster and recovery pins.
     /// The manifest is sealed under VK, so only a VK holder could have written it. A manifest that does not open under the
     /// key this device holds is the proof that the key is wrong (a server that swapped the envelope cannot forge one).
-    private func ingestManifest(_ k: LockedKey) throws {
+    private func ingestManifest(_ k: LockedKey, lane: String) throws {
         guard let record = try store.record(ReservedRecord.manifestID), !record.deleted, record.pending == .none else { return }
         let manifest: VaultManifest
         do { manifest = try k.withKey { try ManifestCodec.open(record, vaultKey: $0) } } catch {
+            // Where the admin-key chain vouches for this key, the manifest is what is wrong: anyone who can write to the storage can
+            // put one there. Publish this device's roster again rather than lock every device out of the box.
+            if try chainConfirms(k, lane: lane) == true { try writeManifest(); return }
             lock()
             throw IntegrityError.keyConfirmationFailed
         }
@@ -659,7 +675,21 @@ public actor Vault {
 
     /// The manifest the box's first device wrote is sealed under the real vault key: if it (or, for a box that never had one, an
     /// item the box already held) opens under the key this device received, the key is the box's.
-    private func confirmBoxKey(_ k: LockedKey) throws {
+    ///
+    /// On a lane that keeps the box's control records that proves nothing: whoever picked a key can seal a manifest under it and
+    /// write it there. The key is the box's there when its admin key is the last link of the admin-key chain this device verified
+    /// (a chain that grows only by signatures of the key before), at the epoch this device holds it for.
+    private func confirmBoxKey(_ k: LockedKey, lane: String) throws {
+        if let confirmed = try chainConfirms(k, lane: lane) {
+            guard confirmed else {
+                lock()
+                throw IntegrityError.keyConfirmationFailed
+            }
+            var id = try requireIdentity()
+            id.keyUnconfirmed = false
+            try store.setIdentity(id)
+            return
+        }
         var candidates: [StoredRecord] = []
         if let m = try store.record(ReservedRecord.manifestID), !m.deleted, m.pending == .none { candidates.append(m) }
         if candidates.isEmpty {
@@ -673,6 +703,16 @@ public actor Vault {
         var id = try requireIdentity()
         id.keyUnconfirmed = false
         try store.setIdentity(id)
+    }
+
+    /// Whether `k` is the key the box's verified admin-key chain ends in, at the epoch this device holds it for; nil on a lane that
+    /// keeps no chain (the server).
+    private func chainConfirms(_ k: LockedKey, lane: String) throws -> Bool? {
+        guard let witness = (try store.laneState(lane).witness).flatMap({ try? JSONDecoder().decode(LaneWitness.self, from: $0) }),
+              let current = witness.aks.last else { return nil }
+        let mine = try k.withKey { try VaultAdmin.signingKey(vaultKey: $0).publicKey.rawRepresentation }
+        let epoch = try requireIdentity().epoch
+        return current.ak == mine && witness.epoch == epoch
     }
 
     /// Devices this vault's owner approved, as known to this device.
@@ -833,7 +873,8 @@ public actor Vault {
         }
         guard try store.identity()?.serverURL != nil else { return SyncReport() }   // local-only: nothing to sync with
         let held = liveKey()
-        let engine = LaneEngine(store: store, lane: try lane(), vaultKey: { held })
+        let box = try lane()
+        let engine = LaneEngine(store: store, lane: box, vaultKey: { held })
         var report: SyncReport
         if try store.identity()?.keyUnconfirmed == true {
             // The key came from the server's relay (recovery phrase, or another device's rotation). A server that knows this
@@ -842,7 +883,7 @@ public actor Vault {
             report = try await engine.run(pushing: false, audit: audit)
             if report.rotationAdopted { lock(); return report }   // another rotation arrived: the key in memory is already stale
             guard let held else { return report }   // locked: nothing can be checked, nothing is uploaded
-            try confirmBoxKey(held)
+            try confirmBoxKey(held, lane: box.id.rawValue)
             var next = try await engine.run(audit: audit)
             next.pulled += report.pulled
             next.events = report.events + next.events
@@ -851,7 +892,7 @@ public actor Vault {
             report = try await engine.run(audit: audit)
         }
         if report.rotationAdopted { lock() }   // the key in memory is the rotated-away one; unlock to get the new one
-        else if let held { try ingestManifest(held) }
+        else if let held { try ingestManifest(held, lane: box.id.rawValue) }
         return report
     }
 

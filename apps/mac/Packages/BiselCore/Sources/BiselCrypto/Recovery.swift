@@ -107,9 +107,9 @@ public extension RecoveryPhrase {
     static func quizPositions(count: Int = 3) -> [Int] {
         var pool = Array(1...24)
         var out: [Int] = []
+        var rng = SystemRandomNumberGenerator()
         for _ in 0..<min(count, pool.count) {
-            let i = Int(BiselRandom.bytes(1)[0]) % pool.count
-            out.append(pool.remove(at: i))
+            out.append(pool.remove(at: Int.random(in: 0..<pool.count, using: &rng)))   // uniform: a byte mod 24 is not
         }
         return out.sorted()
     }
