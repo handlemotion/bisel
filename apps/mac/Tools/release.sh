@@ -127,6 +127,11 @@ ent() { /usr/libexec/PlistBuddy -c "Print :$1" /dev/stdin <<<"$ents" 2>/dev/null
   || die "com.apple.developer.icloud-container-environment is not Production: the app would talk to the Development schema."
 ent com.apple.developer.icloud-container-identifiers | grep -q "$CONTAINER" || die "the iCloud container entitlement is missing."
 [[ "$(ent com.apple.developer.ubiquity-kvstore-identifier)" == "$TEAM.$BUNDLE_ID" ]] || die "the iCloud key-value storage entitlement is missing."
+# They come from the profile (CODE_SIGN_INJECT_BASE_ENTITLEMENTS is NO in Release). Without them persistent Secure Enclave keys and
+# the data-protection keychain fail with -34018, so the app could not create or open device keys.
+[[ "$(ent com.apple.application-identifier)" == "$TEAM.$BUNDLE_ID" ]] || die "com.apple.application-identifier is not $TEAM.$BUNDLE_ID: the keychain would fail with -34018."
+[[ "$(ent com.apple.developer.team-identifier)" == "$TEAM" ]] || die "com.apple.developer.team-identifier is not $TEAM: the keychain would fail with -34018."
+ent com.apple.security.get-task-allow | grep -q true && die "get-task-allow is in the signed entitlements."
 [[ -f "$APP/Contents/embedded.provisionprofile" ]] || die "no embedded provisioning profile: macOS would kill the app at launch."
 "$APPLE/Tools/check-release.sh" "$APP"   # get-task-allow, software keys, fixture and BISEL_DEV_ hooks
 

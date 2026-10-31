@@ -121,6 +121,16 @@ record types until you deploy them, and the shipped app cannot save a record unt
 
 Check: `apps/mac/Tools/cloudkit-schema.sh validate --production` reports no drift between Production and the repo file.
 
+### Decision before the first signed release: the keychain access group
+
+`SecureEnclaveDeviceKeyStore` and `KeychainSecretStore` pass `accessGroup: nil`, so device keys and secrets live in the default
+group, the application identifier `ZVGTVNUPVA.app.bisel.mac`. That works for this app alone. A planned AutoFill extension or
+iPhone app could not read them, and moving items to another group later strands the device keys already created (each Mac
+would have to re-enroll). If they should be shared, pin a group such as `$(AppIdentifierPrefix)app.bisel` in
+`keychain-access-groups` in `Bisel.entitlements` **and** pass it as `accessGroup` in `Bisel/Core/Environment.swift` and the
+secret store, before the first Developer ID build reaches a real box. Not done in the release-signing PR because it changes
+app code.
+
 ## Each release
 
 1. On an up-to-date, clean `main`. Bump `CFBundleShortVersionString` (and `CFBundleVersion`) in `project.yml` by PR first.
@@ -134,7 +144,7 @@ Check: `apps/mac/Tools/cloudkit-schema.sh validate --production` reports no drif
 
    It stops early, with the step to take, when the certificate, the profile or the notary profile is missing. Then it archives
    (Release, Developer ID), exports with `Tools/ExportOptions.plist`, and verifies before uploading anything: Developer ID authority,
-   hardened runtime, secure timestamp, `icloud-container-environment = Production`, the iCloud and key-value storage entitlements,
+   hardened runtime, secure timestamp, `icloud-container-environment = Production`, the iCloud and key-value storage entitlements, the application and team identifiers the keychain needs,
    the embedded profile, and `Tools/check-release.sh` (no `get-task-allow`, no software keys, no debug hooks). It notarizes the app
    (`notarytool submit --wait`), staples it, requires `spctl -a -vv` to say `source=Notarized Developer ID` and
    `codesign --verify --deep --strict` to pass, then builds the DMG, signs, notarizes, staples and assesses that too. Output is in
