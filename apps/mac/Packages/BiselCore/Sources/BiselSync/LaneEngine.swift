@@ -120,9 +120,16 @@ public struct LaneEngine: Sendable {
                 if reserved, vaultKey() == nil { skipped.insert(rec.id); continue }
                 let expect: LaneExpect = rec.baseRev == 0 ? .absent
                     : .tag(LaneTag(try store.laneAck(laneKey, id: rec.id)?.tag ?? "\(rec.baseRev).0"))
-                let outcome: LaneWriteResult
+                var outcome: LaneWriteResult
                 do {
                     outcome = try await lane.write([LaneWrite(record: laneRecord(rec, epoch: epoch), expect: expect)])[0]
+                    // The lane still holds the revision this edit was made on; only its tag was not known here (the
+                    // acknowledgement was lost, and the lane's tags, like CloudKit's, cannot be rebuilt from the revision).
+                    // Nobody else's edit landed in between, so write on top of it instead of making a "(conflict)" copy.
+                    if case .conflict(let current?) = outcome, rec.baseRev > 0, current.rev == rec.baseRev,
+                       let tag = current.tag, expect != .tag(tag) {
+                        outcome = try await lane.write([LaneWrite(record: laneRecord(rec, epoch: epoch), expect: .tag(tag))])[0]
+                    }
                 } catch SyncError.server(_, let code) where reserved && code == "admin_signature_required" {
                     skipped.insert(rec.id)
                     continue
