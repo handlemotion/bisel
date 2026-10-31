@@ -395,6 +395,22 @@ public enum LaneContract {
             let fresh = try rig.device("fresh")
             await c.expectThrows("the phrase must not recover into a box it never vouched for") { try await rig.recover(fresh, phrase: phrase) }
         },
+        ContractFlow(name: "a record written over at the same revision by someone without the key can still be taken back") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a")
+            _ = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+
+            // Same id and revision, newer position, junk where the payload was: what a rotation's re-wrap looks like from outside.
+            var junk = try c.require(fake.record(bank.id))
+            junk.blob = junk.blob.prefix(ItemSealer.wrappedKeyLength) + Data(repeating: 6, count: junk.blob.count - ItemSealer.wrappedKeyLength)
+            fake.inject(junk)
+            _ = try await a.vault.sync()
+            c.expect(try await a.vault.items().undecryptable == [bank.id], "sanity: the record now holds the junk")
+            let kept = try await a.vault.trash().first { $0.itemID == bank.id }
+            c.expect(kept?.item.password == "bank-pw", "the version it replaced is kept and can be restored")
+        },
     ]
 }
 #endif

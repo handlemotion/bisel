@@ -471,8 +471,11 @@ public final class LocalStore: Sendable {
                     return false
                 }
                 // A new revision (or a delete) replaces content this device holds: keep the old ciphertext for 30 days.
-                // (Same revision, new seq = a key rotation re-wrapping the item: nothing to keep.)
-                if existing.rev != r.rev, !existing.deleted {
+                // (Same revision, new seq = a key rotation re-wrapping the item: only the wrapped key changes, nothing to keep. A
+                // different payload at the same revision is never a rotation: it is someone writing over the record, so keep it.)
+                let rewrap = existing.rev == r.rev
+                    && existing.blob.dropFirst(ItemSealer.wrappedKeyLength) == r.blob.dropFirst(ItemSealer.wrappedKeyLength)
+                if !rewrap, !existing.deleted {
                     try trash(existing, reason: r.deleted ? "remote-delete" : "remote-overwrite", db)
                 }
             }
