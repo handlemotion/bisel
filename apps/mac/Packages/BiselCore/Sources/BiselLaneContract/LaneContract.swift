@@ -17,15 +17,16 @@ public struct ContractFlow: Sendable {
 
 public enum LaneContract {
     /// Runs one flow on a fresh box and returns what it found wrong (empty: it passed).
-    public static func run(_ flow: ContractFlow, on lane: ContractLane) async -> [Checks.Failure] {
+    /// `serverForMoves`: a flow that moves a box onto the storage may start the real server as where it comes from.
+    public static func run(_ flow: ContractFlow, on lane: ContractLane, serverForMoves: Bool = false) async -> [Checks.Failure] {
         let c = Checks()
-        do { try await Rig.with(lane) { try await flow.body($0, c) } }
+        do { try await Rig.with(lane, serverForMoves: serverForMoves) { try await flow.body($0, c) } }
         catch is Checks.Stop {}
         catch { c.fail("unexpected error: \(String(reflecting: error))") }
         return c.failures
     }
 
-    public static func flow(named name: String) -> ContractFlow? { (flows + hostile).first { $0.name == name } }
+    public static func flow(named name: String) -> ContractFlow? { (flows + storageOnly + hostile).first { $0.name == name } }
 
     /// The flows every lane must pass.
     public static let flows: [ContractFlow] = [
@@ -198,6 +199,382 @@ public enum LaneContract {
             c.expect(try await b.vault.revealPassword(id: created.id) == "c1", "the migrated new item reaches the other device")
         },
     ]
+
+    /// Flows of a lane that is only storage (milestone L4): the staged rotation, enrollment over the lane, account changes,
+    /// a deleted store, moving a box onto it. The server keeps these on its side, so they run on `FakeLane` in the flow tests
+    /// and on CloudKit in the signed contract run, never against the server.
+    public static let storageOnly: [ContractFlow] = [
+        ContractFlow(name: "signing out pauses the lane with edits kept, another account is never uploaded to, and moving the box to it loses nothing") { rig, c in
+            let account = try c.require(rig.account)
+            let a = try rig.device("a"), b = try rig.device("b")
+            let phrase = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+
+            // Signed out: nothing syncs, nothing is lost, and it resumes by itself.
+            account.signIn(.signedOut("no iCloud account"))
+            var edit = try await a.vault.item(id: bank.id); edit.password = "while-signed-out"
+            _ = try await a.vault.save(edit)
+            await c.expectThrows("a signed-out account cannot sync") { try await a.vault.sync() }
+            let paused = try await a.vault.laneStatus()
+            c.expect(paused == .accountUnavailable("no iCloud account"), "the lane reads as paused (\(paused))")
+            c.expect(try await a.vault.pendingChanges() == 1, "the edit stays pending")
+            account.signIn(.first)
+            try await a.vault.sync()
+            c.expect(try await a.vault.laneStatus() == .active, "the lane resumes once the account is back")
+            try await b.vault.sync()
+            c.expect(try await b.vault.revealPassword(id: bank.id) == "while-signed-out", "the edit made while signed out arrives")
+
+            // Another account: never uploaded to, until the person moves the box there.
+            account.signIn(.second)
+            let offline = try await a.vault.save(login("Made on the new account", password: "new-acct"))
+            do { try await a.vault.sync(); c.fail("a sync must not run against another account") } catch LaneError.accountChanged {}
+            c.expect(try await a.vault.laneStatus() == .accountChanged, "the lane reads as on another account")
+            // The other account has no zone at all on CloudKit (missing), an empty store on the fake: either way, nothing of ours.
+            let reached = try await { () async throws -> [StoredRecord] in
+                do { return try await rig.records(as: a, c) } catch LaneError.storeMissing { return [] }
+            }()
+            c.expect(reached.isEmpty, "nothing reached the other account's storage")
+            let moved = try await a.vault.enableLane(rig.address)
+            c.expect(moved.created, "the box is put on the new account's storage")
+            c.expect(try await a.vault.laneStatus() == .active, "the lane is active on the new account")
+            c.expect(try await a.vault.pendingChanges() == 0, "nothing left pending after the move")
+            c.expect(try await rig.records(as: a, c).count >= 3, "the new storage holds the items and the manifest")
+            // The other device signed in to the same new account joins the box already there.
+            do { try await b.vault.sync(); c.fail("b must not sync against another account either") } catch LaneError.accountChanged {}
+            let joined = try await b.vault.enableLane(rig.address)
+            c.expect(!joined.created, "b finds the box a put there and joins it")
+            c.expect(try await b.vault.revealPassword(id: offline.id) == "new-acct", "b reads what a made")
+            let fresh = try rig.device("fresh")
+            try await rig.recover(fresh, phrase: phrase)
+            try await fresh.vault.sync()
+            c.expect(try await fresh.vault.revealPassword(id: bank.id) == "while-signed-out", "the 24 words recover the box on the new account")
+        },
+
+        ContractFlow(name: "storage deleted by the person is noticed, never recreated behind their back, and put back from the replica without losing an edit") { rig, c in
+            let lane = try c.require(rig.account)
+            let a = try rig.device("a"), b = try rig.device("b")
+            let phrase = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            _ = try await a.vault.save(login("Mail", password: "mail-pw"))
+            try await a.vault.sync()
+            try await b.vault.sync()
+
+            try await lane.erase(confirmed: LaneEraseToken())   // "Delete Bisel data" in iCloud settings
+            var edit = try await b.vault.item(id: bank.id); edit.password = "after-the-delete"
+            _ = try await b.vault.save(edit)
+            do { try await b.vault.sync(); c.fail("a deleted store must be reported") } catch LaneError.storeMissing {}
+            let missing = try await b.vault.laneStatus()
+            c.expect(missing == .storeMissing, "the lane reads as deleted (\(missing))")
+            do { _ = try await lane.fetch(since: nil, limit: 1); c.fail("the failed sync must not have recreated the store") } catch LaneError.storeMissing {}
+            c.expect(try await b.vault.pendingChanges() == 1, "the edit stays pending")
+
+            // The person uploads a's copy again; b carries on, after accepting the reset if it noticed one.
+            let put = try await a.vault.enableLane(rig.address)
+            c.expect(put.created && put.uploaded >= 3, "the replica goes back up (\(put.uploaded) records)")
+            do { try await b.vault.sync(audit: true) } catch is IntegrityError {
+                try await b.vault.acknowledgeServerReset()
+                try await b.vault.sync()
+            }
+            c.expect(try await b.vault.pendingChanges() == 0, "b's edit made during the outage is uploaded")
+            try await a.vault.sync()
+            c.expect(try await a.vault.revealPassword(id: bank.id) == "after-the-delete", "and reaches a")
+            let fresh = try rig.device("fresh")
+            try await rig.recover(fresh, phrase: phrase)
+            try await fresh.vault.sync()
+            c.expect(try await fresh.vault.items().items.map(\.title).sorted() == ["Bank", "Mail"], "the 24 words recover the box put back")
+        },
+
+        ContractFlow(name: "a box moves onto the storage lane with nothing lost, its old lane left alone, and the other device follows by itself") { rig, c in
+            try await rig.withMoveSource { source in
+                let a = try rig.device("a"), b = try rig.device("b")
+                let phrase = try await source.bootstrap(a)
+                let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+                let gone = try await a.vault.save(login("Deleted", password: "gone"))
+                try await a.vault.sync()
+                try await source.enroll(b, through: a)
+                try await a.vault.delete(id: gone.id)
+                try await a.vault.sync()
+                var edit = try await b.vault.item(id: bank.id); edit.password = "b-before-the-move"
+                _ = try await b.vault.save(edit)
+                try await b.vault.sync()
+                try await a.vault.sync()
+
+                // Moving needs the 24 words when the box never lived on storage that keeps its own control records.
+                if source.server != nil {
+                    await c.expectThrows("a box from the server is not moved without the phrase") { try await a.vault.enableLane(rig.address) }
+                }
+                try await a.vault.enableLane(rig.address, phrase: phrase)
+                c.expect(try await a.vault.identity()?.serverURL == rig.address, "a now syncs through the storage lane")
+                c.expect(try await a.vault.pendingChanges() == 0, "nothing left pending on a")
+                let held = try await rig.records(as: a, c)
+                c.expect(held.contains { $0.id == bank.id } && held.contains { $0.id == gone.id && $0.deleted }, "items and tombstones are on the lane")
+
+                // b is still on the old lane; an edit made there before it notices still arrives.
+                let late = try await b.vault.save(login("Made on the old lane", password: "late"))
+                try await b.vault.sync()   // pushes to the old lane, sees the move in the sealed manifest
+                try await b.vault.sync()   // follows
+                c.expect(try await b.vault.identity()?.serverURL == rig.address, "b followed the move")
+                try await a.vault.sync()
+                c.expect(try await a.vault.revealPassword(id: late.id) == "late", "b's late edit reaches a on the new lane")
+                c.expect(try await a.vault.revealPassword(id: bank.id) == "b-before-the-move", "b's earlier edit came along")
+                c.expect(try await b.vault.pendingChanges() == 0, "nothing left pending on b")
+
+                let fresh = try rig.device("fresh")
+                try await rig.recover(fresh, phrase: phrase)
+                try await fresh.vault.sync()
+                c.expect(try await fresh.vault.items().items.map(\.title).sorted() == ["Bank", "Made on the old lane"], "the 24 words recover the moved box")
+            }
+        },
+        ContractFlow(name: "a new device on the same account joins through the lane with the 8 words, and the lane keeps no request afterwards") { rig, c in
+            let storage = try c.require(rig.storage)
+            let a = try rig.device("a"), b = try rig.device("b")
+            _ = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+
+            let offer = try await b.vault.prepareEnrollment(lane: rig.address, deviceName: b.name)
+            do { try await b.vault.completeEnrollment(); c.fail("nothing is taken before the approval") } catch EnrollmentError.notApprovedYet {}
+
+            try await a.vault.sync()
+            let pending = try c.require(try await a.vault.pendingEnrollments().first { $0.request.deviceID == offer.request.deviceID },
+                                        "the approver lists the request it saw on the lane")
+            c.expect(pending.request.fingerprint == offer.fingerprint, "the listed request carries the new device's own keys")
+            c.expect(!pending.isExpired, "a request just seen is not expired")
+            try await a.vault.approveEnrollment(pending, pairing: try PairingSecret(words: offer.secret.words))
+
+            try await b.vault.completeEnrollment()
+            try await b.vault.unlock()
+            try await b.vault.confirmEnrollment(code: try await a.vault.verificationCode())
+            try await b.vault.sync()
+            c.expect(try await b.vault.revealPassword(id: bank.id) == "bank-pw", "the new device reads the box")
+            c.expect(try await b.vault.identity()?.pairingSecret == nil, "the pairing secret is gone once the device joined")
+
+            try await a.vault.sync()
+            c.expect(try await a.vault.pendingEnrollments().isEmpty, "the approver lists nothing once the device joined")
+            c.expect(try await enrollRecords(storage.lane).isEmpty, "the lane holds no enroll records afterwards")
+        },
+
+        ContractFlow(name: "a request whose keys were swapped, or the wrong words, are never approved, and a new device takes no envelope nobody with the words approved") { rig, c in
+            let lane = try c.require(rig.storage).lane
+            let a = try rig.device("a"), b = try rig.device("b")
+            _ = try await rig.bootstrap(a)
+            try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            let offer = try await b.vault.prepareEnrollment(lane: rig.address, deviceName: b.name)
+            let bID = offer.request.deviceID
+
+            // Someone with the storage account rewrites the request with keys of their own: same device id, their own valid
+            // signature, the new device's proof copied over.
+            let genuine = try c.require(try await lane.read([LaneRecordRef(kind: .enroll, id: ControlRecords.enrollID(bID))]).first ?? nil,
+                                        "the request is on the lane")
+            var request = try c.require(ControlRecords.decode(ControlRecords.EnrollRequest.self, genuine.blob))
+            let mallorySig = P256.Signing.PrivateKey(), malloryEnc = P256.KeyAgreement.PrivateKey()
+            request.sigPubkey = mallorySig.publicKey.x963Representation.base64URLEncoded()
+            request.encPubkey = malloryEnc.publicKey.x963Representation.base64URLEncoded()
+            var swapped = LaneRecord(kind: .enroll, id: genuine.id, rev: 0, epoch: genuine.epoch, blob: try ControlRecords.encode(request), writer: bID)
+            swapped.sig = try mallorySig.signature(for: swapped.canonical).rawRepresentation
+            try await put(swapped, on: lane, c)
+
+            try await a.vault.sync()
+            let forged = try c.require(try await a.vault.pendingEnrollments().first { $0.request.deviceID == bID }, "the rewritten request is listed")
+            c.expect(forged.request.fingerprint != offer.fingerprint, "sanity: the listed request carries the swapped keys")
+            do { try await a.vault.approveEnrollment(forged, pairing: offer.secret); c.fail("swapped keys must not be approved") }
+            catch EnrollmentError.pairingMismatch {}
+
+            // The genuine request, with words the person mistyped.
+            try await put(genuine, on: lane, c)
+            try await a.vault.sync()
+            let real = try c.require(try await a.vault.pendingEnrollments().first { $0.request.deviceID == bID }, "the genuine request is listed")
+            c.expect(real.request.fingerprint == offer.fingerprint, "sanity: the genuine request is back")
+            do { try await a.vault.approveEnrollment(real, pairing: PairingSecret.generate()); c.fail("the wrong words must not approve") }
+            catch EnrollmentError.pairingMismatch {}
+
+            c.expect(try await a.vault.devices().allSatisfy { $0.id != bID }, "the device is not a member")
+            c.expect(try await a.vault.roster().allSatisfy { $0.deviceID != bID }, "the device is not in the roster")
+            c.expect(try await lane.read([LaneRecordRef(kind: .envelope, id: ControlRecords.envelopeID(epoch: 1, device: bID))]).first! == nil,
+                     "no envelope was sealed to anyone")
+            do { try await b.vault.completeEnrollment(); c.fail("nothing was approved") } catch EnrollmentError.notApprovedYet {}
+
+            // A holder of the box key (a device, or one that kept the key) seals an envelope to the new device, with an approval
+            // that carries the right pairing MAC but a signature nobody in the box made: not an approval.
+            let aEnvelope = try c.require(try await a.vault.identity()?.envelope)
+            let vk = try await a.keyStore.openEnvelope(aEnvelope, reason: "test")
+            let admin = try AdminSigner(vaultKey: vk)
+            let planted = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: offer.request.encPubkey)
+            try await put(try adminSigned(LaneRecord(kind: .envelope, id: ControlRecords.envelopeID(epoch: 1, device: bID), rev: 0, epoch: 1, blob: planted),
+                                          by: admin), on: lane, c)
+            let rightMAC = offer.secret.approval(deviceID: bID, envelopeHash: planted.sha256Hex(), rootAdminKey: admin.publicKey, epoch: 1)
+            try await put(try approvalRecord(bID, envelope: planted, epoch: 1, mac: rightMAC, by: AdminSigner(key: .init())), on: lane, c)
+            do { try await b.vault.completeEnrollment(); c.fail("an approval the box did not sign is no approval") } catch EnrollmentError.notApprovedYet {}
+
+            // Someone who cannot see the words builds a box of their own around the new device's public keys: their head, their
+            // admin key, an envelope with their key, an approval they signed. Everything checks out but the pairing MAC.
+            var theirs = BiselRandom.bytes(32)
+            defer { theirs.zeroize() }
+            let theirAdmin = try AdminSigner(vaultKey: theirs)
+            let head = ControlRecords.Head(epoch: 1, aks: [.init(epoch: 1, ak: theirAdmin.publicKey, sig: nil)])
+            try await put(try adminSigned(LaneRecord(kind: .head, id: ControlRecords.headID, rev: 0, epoch: 1, blob: try ControlRecords.encode(head)),
+                                          by: theirAdmin), on: lane, c)
+            let theirEnvelope = try DeviceEnvelope.seal(vaultKey: theirs, toEncryptionKey: offer.request.encPubkey)
+            try await put(try adminSigned(LaneRecord(kind: .envelope, id: ControlRecords.envelopeID(epoch: 1, device: bID), rev: 0, epoch: 1,
+                                                     blob: theirEnvelope), by: theirAdmin), on: lane, c)
+            let guessed = PairingSecret.generate().approval(deviceID: bID, envelopeHash: theirEnvelope.sha256Hex(),
+                                                            rootAdminKey: theirAdmin.publicKey, epoch: 1)
+            try await put(try approvalRecord(bID, envelope: theirEnvelope, epoch: 1, mac: guessed, by: theirAdmin), on: lane, c)
+            do { try await b.vault.completeEnrollment(); c.fail("an envelope nobody with the words approved is not taken") }
+            catch EnrollmentError.approvalUnproven {}
+            c.expect(await b.vault.isConfigured == false, "the new device holds no envelope")
+            c.expect(try await b.vault.identity()?.pairingSecret != nil, "the new device still waits for the real approval")
+        },
+        ContractFlow(name: "a rotation the lane stops taking part-way leaves a box every device still reads at the old key, and the same revoke succeeds once the lane takes writes again") { rig, c in
+            let flaky = try c.require(rig.flaky)
+            let a = try rig.device("a"), b = try rig.device("b"), d = try rig.device("c")
+            _ = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            try await rig.enroll(d, through: a)
+            try await a.vault.sync()
+            let bIdentity = try c.require(try await b.vault.identity())
+            let oldVK = try await b.keyStore.openEnvelope(try c.require(bIdentity.envelope), reason: "test")
+
+            // The journal and the one chunk of staged keys go in, then the lane stops taking writes: the new envelopes never land.
+            flaky.failWrites(after: 2)
+            await c.expectThrows("the rotation fails while the lane takes no writes") { try await a.vault.revoke(deviceID: bIdentity.deviceID) }
+            flaky.heal()
+            c.expect(try await rig.stored(.stage).isEmpty, "the failed attempt leaves nothing staged on the lane")
+            for x in [a, b, d] {
+                c.expect(!(try await x.vault.sync().rotationAdopted), "\(x.name) sees no rotation")
+                c.expect(try await x.vault.identity()?.epoch == 1, "\(x.name) is still at the old key")
+                c.expect(try await x.vault.revealPassword(id: bank.id) == "bank-pw", "\(x.name) still reads the box")
+            }
+            var edit = try await d.vault.item(id: bank.id); edit.password = "between-attempts"
+            _ = try await d.vault.save(edit)
+            c.expect(try await d.vault.sync().pushed == 1, "nothing left behind holds other devices' edits off")
+
+            try await a.vault.revoke(deviceID: bIdentity.deviceID)
+            c.expect(try await rig.stored(.stage).isEmpty, "a finished rotation leaves nothing staged")
+            let after = try await rig.records(as: a, c).filter { !$0.deleted }
+            c.expect(after.allSatisfy { (try? ItemSealer.open(blob: $0.blob, id: $0.id, rev: $0.rev, vaultKey: SymmetricKey(data: oldVK))) == nil },
+                     "everything the lane holds is closed to the revoked device's key")
+            c.expect(try await d.vault.sync().rotationAdopted, "the remaining device adopts the rotation")
+            try await d.vault.unlock()
+            c.expect(try await d.vault.revealPassword(id: bank.id) == "between-attempts", "the remaining device reads under the new key")
+        },
+
+        ContractFlow(name: "a lane that silently drops a rotation's staged records never gets its commit: the box stays at the old key until the lane keeps writes again") { rig, c in
+            let flaky = try c.require(rig.flaky)
+            let a = try rig.device("a"), b = try rig.device("b"), d = try rig.device("c")
+            _ = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            try await rig.enroll(d, through: a)
+            try await a.vault.sync()
+            let bID = try c.require(try await b.vault.identity()?.deviceID)
+
+            // The journal is kept; the staged keys and envelopes are reported taken and never stored.
+            flaky.failWrites(after: 1, silently: true)
+            do { _ = try await a.vault.revoke(deviceID: bID); c.fail("a rotation the lane did not keep must not commit") }
+            catch RotationError.laneDroppedWrites {}
+            flaky.heal()
+            let head = try c.require(try await rig.stored(.head).first { $0.id == ControlRecords.headID }, "the lane holds a head")
+            c.expect(ControlRecords.decode(ControlRecords.Head.self, head.blob)?.epoch == 1, "the head never moved")
+            c.expect(try await rig.stored(.stage).isEmpty, "the refused attempt leaves nothing staged")
+            for x in [a, d] {
+                c.expect(!(try await x.vault.sync().rotationAdopted), "\(x.name) sees no rotation")
+                c.expect(try await x.vault.revealPassword(id: bank.id) == "bank-pw", "\(x.name) still reads the box at the old key")
+            }
+
+            try await a.vault.revoke(deviceID: bID)
+            c.expect(try await d.vault.sync().rotationAdopted, "once the lane keeps writes the revoke goes through")
+            try await d.vault.unlock()
+            c.expect(try await d.vault.revealPassword(id: bank.id) == "bank-pw", "the remaining device reads under the new key")
+        },
+
+        ContractFlow(name: "a rotation that stops right after its commit is reported incomplete, and another unlocked device finishes it for every device") { rig, c in
+            let flaky = try c.require(rig.flaky)
+            let a = try rig.device("a"), b = try rig.device("b"), d = try rig.device("c")
+            let phrase = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            let mail = try await a.vault.save(login("Mail", password: "mail-pw"))
+            let gone = try await a.vault.save(login("Gone", password: "gone-pw"))
+            try await a.vault.sync()
+            try await a.vault.delete(id: gone.id)
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            try await rig.enroll(d, through: a)
+            try await a.vault.sync()
+            let bIdentity = try c.require(try await b.vault.identity())
+            let oldVK = try await b.keyStore.openEnvelope(try c.require(bIdentity.envelope), reason: "test")
+
+            // The journal, one chunk, an envelope for each device that stays and the commit (head, recovery, log entry) go in;
+            // every fold after that fails.
+            flaky.failWrites(after: 1 + 1 + 2 + 3)
+            let report = try await a.vault.revoke(deviceID: bIdentity.deviceID)
+            flaky.heal()
+            c.expect(report.epoch == 2, "the rotation committed (epoch \(report.epoch))")
+            c.expect(report.incomplete, "a rotation whose fold failed says so")
+            c.expect(try await a.vault.revealPassword(id: mail.id) == "mail-pw", "the rotator reads everything under the new key")
+            c.expect(!(try await rig.stored(.stage).isEmpty), "the staged keys wait on the lane")
+
+            c.expect(try await d.vault.sync().rotationAdopted, "the remaining device adopts the rotation")
+            c.expect(try await d.vault.sync().rotationPending, "locked, it sees the rotation is unfinished")
+            try await d.vault.unlock()
+            let finished = try await d.vault.sync()
+            c.expect(finished.folded >= 3 && !finished.rotationPending, "the unlocked device finishes the fold (folded \(finished.folded))")
+            c.expect(try await d.vault.revealPassword(id: bank.id) == "bank-pw", "it reads the items the rotator did not fold")
+            c.expect(try await d.vault.revealPassword(id: mail.id) == "mail-pw", "it reads the items the rotator did not fold")
+            c.expect(try await rig.stored(.stage).isEmpty, "nothing is left staged on the lane")
+            let after = try await rig.records(as: a, c).filter { !$0.deleted }
+            c.expect(after.allSatisfy { (try? ItemSealer.open(blob: $0.blob, id: $0.id, rev: $0.rev, vaultKey: SymmetricKey(data: oldVK))) == nil },
+                     "everything the lane holds is closed to the revoked device's key")
+
+            let fresh = try rig.device("fresh")
+            try await rig.recover(fresh, phrase: phrase)
+            try await fresh.vault.sync()
+            c.expect(try await fresh.vault.revealPassword(id: bank.id) == "bank-pw", "the phrase recovers the finished box")
+            c.expect(try await fresh.vault.items().items.map(\.title).sorted() == ["Bank", "Mail"], "with the delete still in it")
+            c.expect(try await fresh.vault.items().undecryptable.isEmpty, "and nothing it cannot open")
+            try await a.vault.sync()
+            c.expect(try await a.vault.revealPassword(id: bank.id) == "bank-pw", "the rotator carries on")
+        },
+    ]
+
+    /// The `enroll` records a lane holds.
+    private static func enrollRecords(_ lane: any SyncLane) async throws -> [LaneRecord] {
+        var out: [LaneRecord] = []
+        var cursor: LaneCursor?
+        while true {
+            let page = try await lane.fetch(since: cursor, limit: 200)
+            out += page.upserts.filter { $0.kind == .enroll }
+            cursor = page.cursor
+            if !page.hasMore { return out }
+        }
+    }
+
+    /// Writes a record straight to the storage, as anyone with the account can.
+    private static func put(_ record: LaneRecord, on lane: any SyncLane, _ c: Checks) async throws {
+        guard case .accepted = try await lane.write([LaneWrite(record: record, expect: .any)])[0] else {
+            c.fail("the storage refused \(record.id)"); throw Checks.Stop()
+        }
+    }
+
+    private static func adminSigned(_ record: LaneRecord, by admin: AdminSigner) throws -> LaneRecord {
+        var r = record
+        r.sig = try admin.sign(r.canonical)
+        return r
+    }
+
+    private static func approvalRecord(_ device: String, envelope: Data, epoch: Int, mac: Data, by admin: AdminSigner) throws -> LaneRecord {
+        let approval = ControlRecords.EnrollApproval(deviceID: device, epoch: epoch, envelopeHash: envelope.sha256Hex(), mac: mac.base64URLEncoded())
+        return try adminSigned(LaneRecord(kind: .enroll, id: ControlRecords.enrollApprovedID(device), rev: 0, epoch: epoch,
+                                          blob: try ControlRecords.encode(approval)), by: admin)
+    }
 
     /// A lane that is only storage and misbehaves (nothing the server lane can be made to do). They drive `FakeLane` directly.
     public static let hostile: [ContractFlow] = [

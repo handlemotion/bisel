@@ -18,6 +18,7 @@ public enum LaneKind: String, Sendable, Codable {
     case head                             // signed epoch / admin-key chain / counters
     case log                              // membership log entry
     case enroll                           // enrollment request / pairing proof
+    case stage                            // a staged key rotation: the journal (`stage`) and its re-wrapped keys (`stage.<epoch>.<n>`)
 }
 
 /// The lane's own concurrency token. Opaque to the engine, which only stores and returns it.
@@ -85,6 +86,8 @@ public enum LaneRejection: Sendable, Equatable {
     case tooLarge
     case quota
     case forbidden
+    /// Another device is part-way through a key rotation on this lane: try again after it committed or gave up.
+    case rotationInProgress
 }
 
 public enum LaneWriteResult: Sendable, Equatable {
@@ -169,6 +172,8 @@ public enum LaneError: Error, Sendable, Equatable {
     case accountChanged
     /// The storage the lane names is gone (CloudKit: the zone was deleted). The replica can re-seed it.
     case storeMissing
+    /// The storage already holds a different box: nothing is written over it.
+    case occupied
 }
 
 public protocol SyncLane: Sendable {
@@ -186,6 +191,12 @@ public protocol SyncLane: Sendable {
     func changes() -> AsyncStream<LaneSignal>
     /// Destructive and explicit (migration, detach).
     func erase(confirmed: LaneEraseToken) async throws
+    /// Makes the storage exist (CloudKit: creates the box's zone). Only creating or re-seeding a box calls it: a store that
+    /// vanished must stay missing (`LaneError.storeMissing`) until the person chose to upload the replica again.
+    func prepare() async throws
+    /// Hard-deletes records that are meant to go away (`enroll`, `stage`). Never items or control state: those are only
+    /// ever overwritten, and the verifier treats a hard delete of them as an incident.
+    func remove(_ refs: [LaneRecordRef]) async throws
 }
 
 public extension SyncLane {
@@ -193,4 +204,18 @@ public extension SyncLane {
     func commit(_ atomic: [LaneWrite]) async throws -> [LaneWriteResult] { throw LaneError.unsupported }
     func changes() -> AsyncStream<LaneSignal> { AsyncStream { $0.finish() } }
     func erase(confirmed: LaneEraseToken) async throws { throw LaneError.unsupported }
+    func prepare() async throws {}
+    func remove(_ refs: [LaneRecordRef]) async throws { throw LaneError.unsupported }
+}
+
+extension LaneError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .unsupported: return "This place to sync cannot do that."
+        case .accountUnavailable(let reason): return "iCloud is not available (\(reason)). Your box keeps working on this Mac; changes sync when iCloud is back."
+        case .accountChanged: return "A different Apple Account is signed in to iCloud. Nothing was uploaded to it."
+        case .storeMissing: return "Your box's data in iCloud was deleted. This Mac still has its copy."
+        case .occupied: return "That iCloud storage already holds a different box."
+        }
+    }
 }

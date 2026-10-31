@@ -110,7 +110,7 @@ struct SetupView: View {
         error = nil
         let name = deviceName
         Task {
-            do { try await service.bootstrapLocal(deviceName: name) } catch { self.error = describe(error) }
+            do { try await service.createBox(deviceName: name) } catch { self.error = describe(error) }
         }
     }
 

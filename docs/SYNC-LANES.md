@@ -1,6 +1,6 @@
 # Sync lanes: design and feasibility (CloudKit lane)
 
-Status: design. L1 and L2 are built (what changed from the design: §14); L3, the CloudKit spike, is built and was run against real CloudKit (§15); L4 onwards is not. Companion to `SPEC.md` (§4 crypto, §6 server, §7 BiselCore). When a milestone below lands, move the settled parts into `SPEC.md` in the same change.
+Status: design. L1 and L2 are built (what changed from the design: §14); L3, the CloudKit spike, is built and was run against real CloudKit (§15); L4 (CloudKit as the default lane: staged rotation, enrollment, account and store states, moves) is built (§16); L5 onwards is not. Companion to `SPEC.md` (§4 crypto, §6 server, §7 BiselCore). When a milestone below lands, move the settled parts into `SPEC.md` in the same change.
 
 Today the Bisel server is the only place a box syncs through. A **lane** is a replica location for a box's ciphertext. The goal: a CloudKit private-database lane so a box can live in the owner's iCloud with no Bisel server involved, the server lane kept optional, both able to run at once. Same crypto, same key hierarchy, same recovery phrase.
 
@@ -360,7 +360,7 @@ Avoid:
 - **D3. Raw CloudKit operations vs CKSyncEngine.** Decided: raw `CKDatabase` calls behind `CloudKitLane` (evidence in §15).
 - **D4. Second copy for CloudKit-only boxes**: forced reminder to export `.bisel-backup`, or require the server lane, or accept the risk.
 - **D5. Freshness witness.** Decided: iCloud KVS now, the server head later if a server lane exists. Built (§8).
-- **D6. PAKE**: ship QR/8-word pairing now; add SPAKE2 only if a vetted Swift implementation is found. OK?
+- **D6. PAKE**: QR/8-word pairing shipped in L4 (§16); SPAKE2 only if a vetted Swift implementation is found.
 - **D7. Recovery hold-back** is advisory on CloudKit. Acceptable, or should phrase recovery on a CloudKit-only box require a second enrolled device's approval?
 - **D8. Lane UI** (L5) needs your design: where lane state, rotation incompleteness and rollback alarms appear.
 
@@ -393,11 +393,11 @@ The verifier pins the AK chain from the first head (anchored on the AK derived f
 
 **Freshness.** The signed per-writer counters from §8 are in; `setHash` (withholding detection) is **not**. A silent restore of the whole store keeps its own cursor numbering, so reading only what is new sees nothing: `sync(audit: true)` (full read, compare counters, log tail, and every record this device was told the lane holds) is what finds it, and the app should run one about daily. The server lane keeps its `head_seq` check; both feed the same `IntegrityError.serverRolledBack` and the same `acknowledgeServerReset` + reseed heal.
 
-**Rotation on a storage lane** is one atomic `commit` (items and tombstones re-wrapped, new envelopes, recovery, the `rotate` log entry, the new head), refused if the lane's `atomicBatch` is too small. The staged form of §5 is L4 (CloudKit). `revokeWithoutRotation` does not exist on a storage lane (`LaneError.unsupported`).
+**Rotation on a storage lane** (L2; replaced by the staged commit in L4, §16) was one atomic `commit` (items and tombstones re-wrapped, new envelopes, recovery, the `rotate` log entry, the new head), refused if the lane's `atomicBatch` is too small. The staged form of §5 is L4 (CloudKit). `revokeWithoutRotation` does not exist on a storage lane (`LaneError.unsupported`).
 
 **Known limits (left for L4, not hidden)**
 
-- A forged record **overwriting** `head` (or `recovery`) is quarantined, but this device does not yet re-publish the genuine one from its witness, so rotation on that box is blocked until it is. Log slots planted by an attacker are replaced by the next genuine append.
+- (Status of these after L4: §16.) A forged record **overwriting** `head` (or `recovery`) is quarantined, but this device does not yet re-publish the genuine one from its witness, so rotation on that box is blocked until it is. Log slots planted by an attacker are replaced by the next genuine append.
 - The membership log and envelopes are not repaired after a restore; a device approved after the snapshot has to be approved again. Items are healed.
 - ~~`ownEnvelope` does not check the envelope's signature (key confirmation against the manifest, which exists, covers it).~~ Wrong, fixed 2026-10-31 (SECURITY-REVIEW P1): whoever picks a key can seal a manifest under it. `RecordBox` now verifies the head (chain, signature, pin) and the envelope, and a key adopted on a storage lane is confirmed by its admin key ending the verified chain. Recovery requires the phrase's `anchor` over the chain's first admin key.
 - A stale-epoch write that slips past the up-front epoch check (a race with a rotation) is quarantined on read, not re-sent by its writer until that writer has adopted the rotation.
@@ -451,7 +451,7 @@ BISEL_DEV_LANE_CONTRACT_ONLY=conflict apps/mac/Tools/run-cloudkit-contract.sh   
 3. Rotation needs one atomic save with a known record set. `atomically: true` in one zone worked (probe, and flow 4's rotation commit); `CKSyncEngine` chooses its own batches.
 4. What raw costs: the lane is about 450 lines including retry, chunking and the subscription, all exercised above except the error branches CloudKit never returned. What `CKSyncEngine` would add for free (scheduling, push and account events) is small here: the app already schedules sync and the subscription is 10 lines.
 
-**What L4 still has to do**
+**What L4 still had to do** (done unless §16 says otherwise)
 
 - Engine: turn `LaneError.accountUnavailable` / `.accountChanged` / `.storeMissing` and `LaneChanges.reset` into lane states (paused, re-seed) instead of a failed sync. Pin `identity()` in `lane_state` when the lane is enabled. Staged rotation for boxes over 350 records. Enrollment over `enroll.*` / `env.*` with the pairing proof. Two lanes at once (the per-lane revision question in §14). The `setHash` withholding check.
 - App: a lane factory in the signed build (`#if canImport(BiselCloudKit)` or a build flag, never in BiselDev), `subscribe()` on enable, push registration and `CloudKitLane.handleRemoteNotification` in `AppDelegate`, `changes()` triggering a sync, enable/detach (§9). The settings UI is L5 and is Rodrigo's.
@@ -463,3 +463,103 @@ BISEL_DEV_LANE_CONTRACT_ONLY=conflict apps/mac/Tools/run-cloudkit-contract.sh   
 2. **Push.** After (1), add `com.apple.developer.aps-environment` = `development` to the contract build's entitlements (and to `Bisel.entitlements` when L4 wires the lane), then build once with `-allowProvisioningUpdates`. Xcode enables Push Notifications on App ID `app.bisel.mac` and regenerates the development profile. Then re-run the contract and check `push: N remote notification(s) received`. Delivery to the writing device is unverified; a second device on the same Apple ID settles it. A Developer ID build needs the push capability in its Developer ID profile too, and `aps-environment` = `production`.
 3. **Production schema.** CloudKit Console → `iCloud.app.bisel` → Development: record type `R` now exists with `k` (String), `rev` (Int64), `ep` (Int64), `w` (String), `sig` (Bytes), `d` (Bytes). Check it, then **Deploy Schema Changes to Production**. No indexes are needed (zone-change fetches only, no queries). Fields cannot be removed from Production afterwards.
 4. **Developer ID** certificate and provisioning profile with iCloud (and push): unchanged from the entitlement spike in §3.
+
+## 16. What L4 built: CloudKit as the default lane (2026-10-31)
+
+Code in `apps/mac/Packages/BiselCore` (`BiselSync/RecordBox.swift`, `BiselSync/LaneEngine.swift`, `BiselCore/Vault.swift`,
+`BiselCrypto/PairingSecret.swift`, `BiselLane/Control.swift`) and the app (`Bisel/Core/CloudBox.swift`, `VaultService`). The API
+note for the UI, with every state and error the UI must show, is `apps/mac/Packages/BiselCore/LANES.md`.
+
+**Staged rotation (§5).** `RecordBox.rotate` no longer needs an atomic commit as large as the box. Records of kind `stage`:
+the journal `stage` (from, to, nonce, rotator, new admin key, start time, chunk count; signed by the admin key of `from`) and chunks
+`stage.<to>.<n>` (the new 60-byte wraps and tombstone markers, about 128 KiB each, signed by the new admin key). Order: journal by
+compare-and-set (a concurrent rotator loses it: `RotationError.inProgress`) → chunks and the new epoch's envelopes → every one read
+back (a lane that drops writes silently never gets a commit: `RotationError.laneDroppedWrites`) → the items re-checked against the
+snapshot → **one atomic commit of three records** (head, recovery, the `rotate` log entry) → the head read back → the fold (each
+item rewritten with its staged wrap, compare-and-set on its tag) → journal and chunks removed. Until the commit every item still
+opens under the old key; after it, `RecordBox.finishRotation` lets any unlocked device holding the new key finish the fold
+(`Vault.sync` calls it; `SyncReport.folded`, `.rotationPending`, `RotationReport.incomplete`). While a fresh journal (under 15 min) is
+open, other devices' item writes get `LaneRejection.rotationInProgress` and stay pending; `admit`, `rotateRecovery` and
+`recoveryRegister` throw `.inProgress`. A stale journal is taken over or cleaned up. N-epoch envelopes are kept (removing them
+would read as an incident, and they give a revoked device nothing it did not have). Limit kept from §14: an edit by a device that
+read the head before the journal existed can still land between the re-check and the commit; it is quarantined as a stale-epoch write.
+
+**Enrollment over the lane (§4, D6: QR / 8 words now, no PAKE).** `PairingSecret`: 88 random bits, 8 BIP-39 words or the QR
+`bisel-pair:1:<device>:<secret>`; key = HKDF-SHA256(secret, "bisel/v1/enroll"). The new device writes `enroll.<device>` (its public
+keys, `createdAt`, proof = HMAC over device id, both keys and `createdAt`; signed with its own DK-sig). The approver's engine keeps
+self-signed requests it sees (newest 8, with this device's receive time; expiry 15 min on the approver's clock), the person types the
+words, the proof must hold for exactly those keys (`EnrollmentError.pairingMismatch` otherwise: wrong words or swapped keys), then the
+usual admit (envelope + log), and `enroll.<device>.approved` (AK-signed HMAC over the sha256 of the envelope it sealed, the chain's root
+admin key and the epoch). The new device takes its envelope only with a valid approval it can check with its own copy of the secret
+(`.notApprovedYet` / `.approvalUnproven`), deletes both records, then the 40-bit verification code is compared as before. The
+pairing MAC runs both ways, so an attacker with write access to the zone can neither get a swapped key approved nor hand the new device
+an envelope of their own.
+
+**Accounts and deleted storage (§6).** `LaneEngine` pins `identity()` in `lane_state.identity` on the first sync and refuses storage
+that now belongs to someone else (`LaneError.accountChanged`) before anything is pushed or read into the replica. The outcome of the
+last sync is kept in `lane_state.state` and read by `Vault.laneStatus()`: `.accountUnavailable(reason)` (signed out, edits pending,
+resumes by itself), `.accountChanged`, `.storeMissing`, `.moved(to:)`. Writes no longer create the CloudKit zone (`SyncLane.prepare`,
+called only when a box is created or put back), so a zone the person deleted stays deleted until they choose to upload again, and a
+deleted zone reads as `storeMissing` from fetch, read and write alike.
+
+**Moves (§9).** `Vault.enableLane(_:phrase:)` is the one way a box gets onto storage that does not hold it: from the server or "this
+Mac only" (a migration), back onto the same address after `.storeMissing`, or onto the account now signed in after `.accountChanged`.
+It syncs the old lane first (pending edits must be up: `MigrationError.pendingChanges`), writes the control records at the box's
+current epoch (`RecordBox.adopt`: recovery, an envelope for every approved device that was not revoked, a fresh log, the head last),
+uploads the replica and reads the lane back in full (`.incomplete` and nothing switched if a record is missing), then switches. The
+admin-key chain must be vouched for by the recovery key: a chain this device verified on a storage lane with an anchor it verified
+(kept in `LocalIdentity.recoveryAnchor`) carries over; otherwise the 24 words sign a new chain rooted at the current admin key
+(`.phraseRequired`, `.wrongPhrase`). Storage holding another box is refused (`LaneError.occupied`); storage already holding this box is
+joined. The sealed manifest carries `lane` and `laneGeneration`; a move writes it to the old lane before switching, and every other
+device follows on its next unlocked sync once it can reach the new lane (checked: the head there ends in the admin key of the key it
+holds, `MigrationError.notInvited` otherwise). Edits it made on the old lane in the meantime go up with its replica (higher revisions
+win; a different payload at the same revision lands in the trash, never silently lost). The old lane is detached, not erased.
+`Vault.detachLane()` makes a box "this Mac only" again; iCloud → server is detach plus `connectServer`. After `enableLane` re-seeds a
+store, other devices may see a rolled-back position once: the existing `acknowledgeServerReset` heal applies. An engine fix belongs
+here: a pending edit whose record the lane does not hold at all is written as it is on lanes that repair, instead of being re-sealed
+at revision 1 where every device holding a newer revision would ignore it.
+
+**The app (CloudKit first).** Under `BISEL_CLOUDKIT` (set in `project.yml` for the signed Bisel target, absent from BiselDev and the
+contract spec): `CloudBox` maps `cloudkit://iCloud.app.bisel/box-<id>` addresses to one cached `CloudKitLane` per zone (the change tags
+survive between syncs) and is the vault's `laneProvider`; "Create a box" (`VaultService.createBox`) creates the box in iCloud when an
+account is signed in and on this Mac only otherwise; "I already have one" tries the boxes in this iCloud account before the server;
+`moveToICloud`, `putBoxInICloudAgain`, `stopSyncing`, `startICloudEnrollment` / `finishICloudEnrollment` / `pendingEnrollments` /
+`approve` are the logic behind Rodrigo's screens (none was changed; the one call site that moved is `SetupView.create`). `AppDelegate`
+registers for remote notifications and hands them to `CloudKitLane.handleRemoteNotification`; every push and account change triggers a
+sync. The server lane works as before and is opt-in (`connectServer`). D4: the backup reminder integration point is marked in
+`VaultService.performSync` for when the `.bisel-backup` work lands. Storage lanes keep local history (`keepsLocalHistory`), as a box
+without a server always did.
+
+**Contract.** `LaneContract.storageOnly` (eight flows, on `FakeLane` in the flow tests and on CloudKit in the signed run; never the
+server, which keeps these on its side): rotation through a loud failure while staging; a lane that silently drops staged records;
+a fold cut off after the commit and finished by another device; enrollment with the 8 words; swapped keys, wrong words and forged
+approvals; sign-out and another account (paused, never uploaded to, moved without loss, the second device joins, the phrase recovers);
+a deleted store (noticed, not recreated, put back, the other device's outage edit kept); a move from the server (the flow tests start
+the real server; the signed run moves from a second zone instead) with the other device following and its late edit kept. Test
+support: `FlakyLane` (fails or silently drops writes after a budget) and `AccountLane` (signed out / another account, over any
+storage) wrap every rig's storage; `FakeLane.erase` models a deleted zone.
+
+**Evidence on real CloudKit** (this Mac, Development environment, signed Debug app from `project.contract.yml`,
+`apps/mac/Tools/run-cloudkit-contract.sh`; logs `cloudkit-l4-run{1,2,3}.log` in the shared notes folder):
+
+- Run 1: probe 13/13, flows 1–4 passed, then the Mac lost its network (`NSURLErrorDomain -1009`, "offline") and flows 5–14 failed
+  on that, not on the lane.
+- Run 2 (about 11 min): probe 13/13, flows 1–6 and 8–14 PASS: every new storage-only flow except one ran green on CloudKit (deleted
+  zone 72 s, move 85 s, enrollment 35 s and 30 s, the three rotation flows 60–66 s). Flow 7 (accounts) failed with
+  `LaneError.storeMissing`: on CloudKit "another account" has no zone at all, where the fake had an empty store. The lane was right;
+  the flow's "nothing reached the other account" check now reads a missing store as empty.
+- Run 3 (flow 7 only): the first attempt hit a dropped connection (`networkFailure`, `-1005`), which `CloudKitLane` now retries like
+  a rate limit (being offline is still not retried); the second passed (30 s). `RESULT: ALL PASSED`.
+- Each run ended with every `bisel-l3-spike-*` zone deleted (the private database holds only `_defaultZone`). Push registration
+  still fails without the `aps-environment` entitlement and no push arrived (unchanged from §15).
+- `swift test --traits SoftwareKeys`: 59 tests in 6 suites pass, the eight storage-only flows on `FakeLane` (and the move flow
+  against the real local server as the source).
+
+**Not done in L4**
+
+- Two lanes at once with independent revisions (§14): a move switches the box, it does not run both. Devices on another Apple ID
+  cannot follow a move to iCloud (`.moved(to:)`); they keep the old lane.
+- The `setHash` withholding check (§8). Production schema deployment and Developer ID (Rodrigo, §15). Push delivery (needs the
+  `aps-environment` entitlement, §15).
+- An account change on one Mac splits that Mac from the others until they move too; the UI must say so (LANES.md).
+- Recovery hold-back stays advisory (D7). Stage records and enrollment records are visible metadata to Apple, like the rest (§7).

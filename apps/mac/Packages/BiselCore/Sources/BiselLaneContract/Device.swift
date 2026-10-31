@@ -10,12 +10,12 @@ public struct Device: Sendable {
     public let keyStore: SoftwareDeviceKeyStore
     public let gate: RecordingGate
     public let vault: Vault
-    public let laneProvider: (@Sendable (LocalIdentity, @escaping @Sendable () -> LockedKey?) throws -> any SyncLane)?
+    public let laneProvider: Vault.LaneProvider?
     public let freshnessWitness: (any FreshnessWitness)?
 
     /// `laneProvider` nil: the device syncs with the Bisel server at its identity's address.
     public init(_ name: String, gate: RecordingGate = RecordingGate(), fillWindow: TimeInterval = 300,
-                laneProvider: (@Sendable (LocalIdentity, @escaping @Sendable () -> LockedKey?) throws -> any SyncLane)? = nil,
+                laneProvider: Vault.LaneProvider? = nil,
                 freshnessWitness: (any FreshnessWitness)? = nil) throws {
         self.name = name
         self.laneProvider = laneProvider

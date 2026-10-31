@@ -13,6 +13,8 @@ public final class FakeLane: SyncLane, @unchecked Sendable {
         var order = 0
         var removed: [LaneRecordRef] = []
         var reordering = false
+        /// The store was deleted (`erase`): every call fails with `LaneError.storeMissing` until `prepare` makes it again.
+        var missing = false
     }
 
     /// A copy of everything the lane holds: restoring one is the lane being rolled back to an older snapshot.
@@ -28,7 +30,24 @@ public final class FakeLane: SyncLane, @unchecked Sendable {
     public var capabilities: LaneCapabilities { .init(atomicBatch: 1000, enforcesExpect: true, repairs: true) }
     public func identity() async throws -> LaneIdentity { LaneIdentity(name) }
 
+    /// Deleted like a CloudKit zone the person removed in iCloud settings: gone until a box is put on it again. Positions keep
+    /// growing across the deletion, so a device holding an old cursor reads what is written afterwards.
+    public func erase(confirmed: LaneEraseToken) async throws {
+        lock.withLock {
+            state.records = [:]
+            state.removed = []
+            state.missing = true
+        }
+    }
+
+    public func prepare() async throws { lock.withLock { state.missing = false } }
+
+    private func present() throws {
+        if lock.withLock({ state.missing }) { throw LaneError.storeMissing }
+    }
+
     public func fetch(since: LaneCursor?, limit: Int) async throws -> LaneChanges {
+        try present()
         let from = since.flatMap { Int($0.rawValue) } ?? 0
         return lock.withLock {
             let page = state.records.values.filter { $0.order > from }.sorted { $0.order < $1.order }
@@ -42,15 +61,18 @@ public final class FakeLane: SyncLane, @unchecked Sendable {
     }
 
     public func read(_ refs: [LaneRecordRef]) async throws -> [LaneRecord?] {
-        lock.withLock { refs.map { ref in state.records[ref.id].flatMap { $0.kind == ref.kind ? $0 : nil } } }
+        try present()
+        return lock.withLock { refs.map { ref in state.records[ref.id].flatMap { $0.kind == ref.kind ? $0 : nil } } }
     }
 
     public func write(_ batch: [LaneWrite]) async throws -> [LaneWriteResult] {
-        lock.withLock { batch.map { put($0) } }
+        try present()
+        return lock.withLock { batch.map { put($0) } }
     }
 
     public func commit(_ atomic: [LaneWrite]) async throws -> [LaneWriteResult] {
-        lock.withLock {
+        try present()
+        return lock.withLock {
             let failures = atomic.map { check($0) }
             if failures.contains(where: { $0 != nil }) {
                 return failures.map { $0.map { .conflict(current: $0.current) } ?? .rejected(.forbidden) }
@@ -80,6 +102,14 @@ public final class FakeLane: SyncLane, @unchecked Sendable {
     }
 
     static func tag(_ r: LaneRecord, _ order: Int) -> LaneTag { LaneTag("\(r.rev).\(order)") }
+
+    /// A hard delete the lane reports on the next fetch, as CloudKit does.
+    public func remove(_ refs: [LaneRecordRef]) async throws {
+        try present()
+        lock.withLock {
+            for ref in refs where state.records.removeValue(forKey: ref.id) != nil { state.removed.append(ref) }
+        }
+    }
 
     // MARK: what the store can see and do to itself
 

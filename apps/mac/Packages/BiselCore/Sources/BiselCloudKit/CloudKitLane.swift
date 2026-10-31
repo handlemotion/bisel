@@ -89,7 +89,9 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
 
     // MARK: zone and subscription
 
-    /// Creates the zone if it does not exist (saving an existing zone is a no-op).
+    /// Creates the zone if it does not exist (saving an existing zone is a no-op). Writes never do this themselves: a zone the
+    /// person deleted (iCloud settings) stays deleted, and every call reports `LaneError.storeMissing`, until they chose to upload
+    /// the box again (`Vault.enableLane`).
     public func prepare() async throws {
         if lock.withLock({ zoneReady }) { return }
         let (saved, _) = try await retrying { try await self.database.modifyRecordZones(saving: [CKRecordZone(zoneID: self.zoneID)], deleting: []) }
@@ -116,6 +118,23 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
     }
 
     public func changes() -> AsyncStream<LaneSignal> { CloudKitSignals.shared.stream() }
+    /// The same signals without a lane at hand: every push of the subscription and every iCloud account change.
+    public static func signals() -> AsyncStream<LaneSignal> { CloudKitSignals.shared.stream() }
+
+    /// Hard-deletes `enroll.*` / `stage*` records once they served (the verifier does not count those as incidents).
+    public func remove(_ refs: [LaneRecordRef]) async throws {
+        try await ready()
+        for chunk in refs.chunked(Self.chunkRecords) where !chunk.isEmpty {
+            let ids = chunk.map { CKRecord.ID(recordName: Self.recordName($0.id), zoneID: zoneID) }
+            let (_, deleted) = try await retrying {
+                try await self.database.modifyRecords(saving: [], deleting: ids, savePolicy: .changedKeys, atomically: false)
+            }
+            for (id, result) in deleted {
+                if case .failure(let error) = result, (error as? CKError)?.code != .unknownItem { _ = try outcome(of: error) }
+                lock.withLock { known[id.recordName] = nil }
+            }
+        }
+    }
 
     /// Deletes the zone and everything in it.
     public func erase(confirmed: LaneEraseToken) async throws {
@@ -181,13 +200,22 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
         var out: [String: CKRecord] = [:]
         for chunk in Array(Set(names)).chunked(200) where !chunk.isEmpty {
             let ids = chunk.map { CKRecord.ID(recordName: $0, zoneID: zoneID) }
-            let results = try await retrying { try await self.database.records(for: ids, desiredKeys: nil) }
+            let results: [CKRecord.ID: Result<CKRecord, any Error>]
+            do { results = try await retrying { try await self.database.records(for: ids, desiredKeys: nil) } }
+            catch let error as CKError where error.code == .zoneNotFound || error.code == .userDeletedZone {
+                lock.withLock { zoneReady = false }
+                throw LaneError.storeMissing
+            }
             for (id, result) in results {
                 switch result {
                 case .success(let record):
                     remember(record)
                     out[id.recordName] = record
-                case .failure(let error as CKError) where error.code == .unknownItem || error.code == .zoneNotFound:
+                case .failure(let error as CKError) where error.code == .zoneNotFound || error.code == .userDeletedZone:
+                    // The whole zone is gone, not this record: say so instead of reading it as an empty box.
+                    lock.withLock { zoneReady = false }
+                    throw LaneError.storeMissing
+                case .failure(let error as CKError) where error.code == .unknownItem:
                     lock.withLock { known[id.recordName] = nil }
                 case .failure(let error):
                     throw error
@@ -203,7 +231,6 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
     /// against the change tag the write expects (`.absent`: a new record; `.any`: whatever the server holds right now).
     public func write(_ batch: [LaneWrite]) async throws -> [LaneWriteResult] {
         try await ready()
-        try await prepare()
         var results = [LaneWriteResult?](repeating: nil, count: batch.count)
         var pending = try await resolve(batch, into: &results)
         for _ in 0..<3 where !pending.isEmpty {
@@ -238,7 +265,6 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
     public func commit(_ atomic: [LaneWrite]) async throws -> [LaneWriteResult] {
         guard atomic.count <= Self.atomicLimit else { throw LaneError.unsupported }
         try await ready()
-        try await prepare()
         var results = [LaneWriteResult?](repeating: nil, count: atomic.count)
         let pending = try await resolve(atomic, into: &results)
         if results.contains(where: { $0 != nil }) { return results.map { $0 ?? .rejected(.forbidden) } }
@@ -334,12 +360,13 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
 
     // MARK: plumbing
 
-    /// Retries what CloudKit asks to be retried (rate limits, a busy zone, a service hiccup), honouring `retryAfterSeconds`.
+    /// Retries what CloudKit asks to be retried (rate limits, a busy zone, a service hiccup, a dropped connection), honouring
+    /// `retryAfterSeconds`. Being offline (`networkUnavailable`) is not retried: the sync fails and the next one tries again.
     private func retrying<T>(_ operation: () async throws -> T) async throws -> T {
         var attempt = 0
         while true {
             do { return try await operation() }
-            catch let error as CKError where attempt < 4 && [.requestRateLimited, .zoneBusy, .serviceUnavailable].contains(error.code) {
+            catch let error as CKError where attempt < 4 && [.requestRateLimited, .zoneBusy, .serviceUnavailable, .networkFailure].contains(error.code) {
                 attempt += 1
                 try await Task.sleep(for: .seconds(error.retryAfterSeconds ?? Double(attempt)))
             }
@@ -392,6 +419,7 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
         if id == ControlRecords.recoveryID { return .recovery }
         if ControlRecords.logNumber(id) != nil { return .log }
         if id.hasPrefix("enroll.") { return .enroll }
+        if id == "stage" || id.hasPrefix("stage.") { return .stage }
         if ControlRecords.envelopeParts(id) != nil { return .envelope }
         if id == ReservedRecord.manifestID { return .manifest }
         return .item

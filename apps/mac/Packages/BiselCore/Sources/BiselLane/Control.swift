@@ -80,6 +80,118 @@ public enum ControlRecords {
         public init(device: String, counter: Int, epoch: Int) { self.device = device; self.counter = counter; self.epoch = epoch }
     }
 
+    // MARK: enrollment over the lane (§4)
+    //
+    //   enroll.<device>           the new device's request, signed by its own DK-sig (the key inside it)
+    //   enroll.<device>.approved  the approver's pairing MAC over the envelope it sealed, signed by the AK of the head's epoch
+    //
+    // Both are deleted by the new device once it took its envelope; the verifier passes them through untouched.
+
+    public static func enrollID(_ device: String) -> String { "enroll.\(device)" }
+    public static func enrollApprovedID(_ device: String) -> String { "enroll.\(device).approved" }
+    /// The device of a request id (`enroll.<device>`); nil for an approval or anything else.
+    public static func deviceOfEnrollRequest(_ id: String) -> String? {
+        guard id.hasPrefix("enroll."), !id.hasSuffix(".approved") else { return nil }
+        let device = String(id.dropFirst(7))
+        return device.isEmpty || device.contains(".") ? nil : device
+    }
+
+    public struct EnrollRequest: Codable, Sendable, Equatable {
+        public var v = 1
+        public var deviceID: String
+        public var name: String
+        public var kind: String
+        public var sigPubkey: String
+        public var encPubkey: String
+        /// Unix seconds on the new device's clock. Bound into the proof; never used for expiry (the approver's clock is).
+        public var createdAt: Int
+        /// `PairingSecret.proof` over the device id, both keys and `createdAt`.
+        public var proof: String
+        public init(deviceID: String, name: String, kind: String, sigPubkey: String, encPubkey: String, createdAt: Int, proof: String) {
+            self.deviceID = deviceID; self.name = name; self.kind = kind; self.sigPubkey = sigPubkey; self.encPubkey = encPubkey
+            self.createdAt = createdAt; self.proof = proof
+        }
+    }
+
+    public struct EnrollApproval: Codable, Sendable, Equatable {
+        public var deviceID: String
+        public var epoch: Int
+        /// SHA-256 (hex) of the envelope blob the approver sealed.
+        public var envelopeHash: String
+        /// `PairingSecret.approval` over the device id, `envelopeHash`, the root admin key and `epoch`.
+        public var mac: String
+        public init(deviceID: String, epoch: Int, envelopeHash: String, mac: String) {
+            self.deviceID = deviceID; self.epoch = epoch; self.envelopeHash = envelopeHash; self.mac = mac
+        }
+    }
+
+    /// The request in `record` if it holds together: an `enroll.<device>` record naming that device, signed by the signing key it
+    /// carries. That proves only that whoever wrote it holds that key; whether the key is the new device's is the proof's job.
+    public static func verifiedEnrollRequest(_ record: LaneRecord) -> EnrollRequest? {
+        guard record.kind == .enroll, let device = deviceOfEnrollRequest(record.id), let request = decode(EnrollRequest.self, record.blob),
+              request.deviceID == device, let sig = Data(base64URLEncoded: request.sigPubkey), Data(base64URLEncoded: request.encPubkey) != nil,
+              Data(base64URLEncoded: request.proof) != nil, deviceSignatureValid(record, sigPubkey: sig) else { return nil }
+        return request
+    }
+
+    // MARK: staged rotation (docs/SYNC-LANES.md §5)
+    //
+    //   stage                 the journal of a rotation from `from` to `to`, signed by the admin key of `from`
+    //   stage.<to>.<n>        the re-wrapped item keys, signed by the new admin key (the one the committed head ends in)
+    //
+    // A lane whose atomic commit is smaller than the box cannot switch keys in one write. The rotator stages the new wraps next to
+    // the items (which stay readable under the old key), commits head, recovery and log entry atomically, then folds the staged
+    // keys into the items. Any device holding the new key can finish the fold.
+
+    public static let stageID = "stage"
+    public static func stageChunkID(epoch: Int, n: Int) -> String { "stage.\(epoch).\(n)" }
+    /// A journal older than this belongs to a rotator that gave up or died: another device may take over (or clean up after it).
+    public static let stageTTL = 15 * 60
+
+    public struct StageJournal: Codable, Sendable, Equatable {
+        public var from: Int
+        public var to: Int
+        /// Ties the chunks to this attempt: a chunk left behind by an earlier one is never folded.
+        public var nonce: String
+        public var rotator: String?
+        /// The admin key of `to` (base64url), the one the chunks are signed with.
+        public var newAK: String
+        public var startedAt: Int
+        public var chunks: Int
+        public init(from: Int, to: Int, nonce: String, rotator: String?, newAK: String, startedAt: Int, chunks: Int) {
+            self.from = from; self.to = to; self.nonce = nonce; self.rotator = rotator; self.newAK = newAK; self.startedAt = startedAt; self.chunks = chunks
+        }
+        /// Read off the rotator's clock: one far in the future counts as stale too, so a wrong clock cannot block a box for long.
+        public func isFresh(now: Int) -> Bool { abs(now - startedAt) < ControlRecords.stageTTL }
+    }
+
+    public struct StageChunk: Codable, Sendable, Equatable {
+        public var epoch: Int
+        public var nonce: String
+        public var items: [StagedKey]
+        public init(epoch: Int, nonce: String, items: [StagedKey]) { self.epoch = epoch; self.nonce = nonce; self.items = items }
+    }
+
+    /// One item's new wrap: the 60-byte wrapped item key, or for a tombstone the whole new marker (base64url). `rev` is the
+    /// revision it was built for; the fold leaves an item that moved on alone.
+    public struct StagedKey: Codable, Sendable, Equatable {
+        public var id: String
+        public var rev: Int
+        public var key: String
+        public var tomb: Bool
+        public init(id: String, rev: Int, key: String, tomb: Bool) { self.id = id; self.rev = rev; self.key = key; self.tomb = tomb }
+    }
+
+    /// The journal in `record` if it is one and is signed by the admin key in force at its `from` in `chain`. A revoked device
+    /// keeps the admin key of the epoch it was cut off in, so it can sign journals for old epochs: callers compare `from`/`to`
+    /// with the verified head, and the chunks must verify under the head's own last key.
+    public static func verifiedJournal(_ record: LaneRecord?, chain: [AKLink]) -> StageJournal? {
+        guard let record, record.kind == .stage, record.id == stageID, let j = decode(StageJournal.self, record.blob),
+              j.to == j.from + 1, record.epoch == j.from, j.chunks >= 0,
+              let key = key(at: j.from, in: chain), adminSignatureValid(record, key: key) else { return nil }
+        return j
+    }
+
     static let encoder: JSONEncoder = { let e = JSONEncoder(); e.outputFormatting = [.sortedKeys]; return e }()
     public static func encode<T: Encodable>(_ value: T) throws -> Data { try encoder.encode(value) }
     public static func decode<T: Decodable>(_ type: T.Type, _ blob: Data) -> T? { try? JSONDecoder().decode(type, from: blob) }
@@ -152,6 +264,15 @@ public struct LaneWitness: Codable, Sendable, Equatable {
 
     /// A position that only grows: the log length plus every writer's counter.
     public var position: Int { logN + counters.values.reduce(0, +) }
+}
+
+/// An enrollment request this device saw on the lane, and when (its own clock: the request's `createdAt` is the requester's
+/// word and could be anything). Kept by `LaneEngine.pull` until the device joins, the lane drops the request, or newer ones
+/// push it out.
+public struct ReceivedEnrollment: Codable, Sendable, Equatable {
+    public var request: ControlRecords.EnrollRequest
+    public var receivedAt: Int
+    public init(request: ControlRecords.EnrollRequest, receivedAt: Int) { self.request = request; self.receivedAt = receivedAt }
 }
 
 /// A control record kept aside until it can be verified.

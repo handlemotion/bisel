@@ -29,6 +29,11 @@ public struct SyncReport: Sendable, Equatable {
     public var repaired = 0
     /// Things the lane did that are not legitimate updates (hard deletes, a position that went backwards).
     public var incidents: [LaneIncident] = []
+    /// Item records this device re-wrapped for a rotation another device committed but did not finish folding (`RecordBox.finishRotation`).
+    public var folded = 0
+    /// A rotation is committed on this lane but some of its records still carry the old key, and this device could not finish it
+    /// (locked, or its key not yet confirmed). Those items read again once any unlocked device syncs.
+    public var rotationPending = false
     /// What the freshness witness (docs/SYNC-LANES.md §8) says about the lane. `.forked` is an alarm; `.laneBehind` resolves
     /// itself once a device that holds the newer state syncs.
     public var freshness: FreshnessState = .unavailable
@@ -67,6 +72,7 @@ public struct LaneEngine: Sendable {
     public func run(pushing: Bool = true, audit: Bool = false) async throws -> SyncReport {
         var report = SyncReport()
         _ = try store.laneState(laneKey)   // adopts what the box synced before lanes existed, before anything is acknowledged
+        try await checkIdentity()
         let epoch = try store.identity()?.epoch ?? 1
         var staleEpoch = false
         if pushing { try await push(&report, epoch: epoch, staleEpoch: &staleEpoch) }
@@ -91,6 +97,21 @@ public struct LaneEngine: Sendable {
         }
         report.freshness = await witness(epoch: epoch, writing: pushing && !report.rotationAdopted)
         return report
+    }
+
+    /// Who owns the storage is pinned the first time this device syncs through it (or when a box is put on it afresh). Storage
+    /// that now belongs to someone else (another iCloud account signed in on this Mac) is never written to or read into the
+    /// replica: the person decides (`Vault.enableLane` on the new account, or detach). An account that is signed out or
+    /// restricted throws `LaneError.accountUnavailable` from the lane itself; nothing is lost, edits stay pending.
+    private func checkIdentity() async throws {
+        let current = try await lane.identity().rawValue
+        var state = try store.laneState(laneKey)
+        guard let pinned = state.identity else {
+            state.identity = current
+            try store.setLaneState(laneKey, state)
+            return
+        }
+        if pinned != current { throw LaneError.accountChanged }
     }
 
     /// Another device rotated VK: take this device's new envelope. If edits sealed under the old key are still
@@ -136,6 +157,12 @@ public struct LaneEngine: Sendable {
                        let tag = current.tag, expect != .tag(tag) {
                         outcome = try await lane.write([LaneWrite(record: laneRecord(rec, epoch: epoch), expect: .tag(tag))])[0]
                     }
+                    // The lane does not hold the record at all (storage put back from a replica, or never given it): a lane that
+                    // takes any revision gets the edit as it is, instead of a re-sealed copy at revision 1 that every device
+                    // holding the newer revision would ignore.
+                    if case .conflict(nil) = outcome, rec.baseRev > 0, lane.capabilities.repairs {
+                        outcome = try await lane.write([LaneWrite(record: laneRecord(rec, epoch: epoch), expect: .absent)])[0]
+                    }
                 } catch SyncError.server(_, let code) where reserved && code == "admin_signature_required" {
                     skipped.insert(rec.id)
                     continue
@@ -166,6 +193,9 @@ public struct LaneEngine: Sendable {
                     return
                 case .rejected(.tooLarge):
                     throw SyncError.tooLarge
+                case .rejected(.rotationInProgress):
+                    // Another device is staging a key rotation: the edit waits for its commit (or its time-out), still pending.
+                    skipped.insert(rec.id)
                 case .rejected(let why):
                     throw SyncError.server(status: 409, code: "\(why)")
                 }
@@ -293,6 +323,7 @@ public struct LaneEngine: Sendable {
                                                                      reason: $0.reason.rawValue, blob: $0.record.blob) })
             // Records the lane says it deleted for good are never honoured: forget that it holds them, and they go back up.
             try store.forgetAcks(laneKey, ids: changes.removed.filter { $0.kind == .item || $0.kind == .tombstone || $0.kind == .manifest }.map(\.id))
+            try noteEnrollments(changes, members: known.members)
             let localEpoch = try store.identity()?.epoch ?? 1
             let meta = verdict.meta ?? changes.meta ?? LaneMeta(epoch: localEpoch, headSeq: state.knownHead)
             for rec in changes.upserts {
@@ -328,6 +359,30 @@ public struct LaneEngine: Sendable {
             }
         }
     }
+
+    /// Requests to join that are newest on this device: the approver lists them (`Vault.pendingEnrollments`) and the person
+    /// approves one with the pairing secret. Only requests signed by the key they carry are kept, stamped with this device's
+    /// clock when first seen (a rewrite of the same request keeps that time, so nobody can keep one fresh), and dropped once the
+    /// lane deletes them or the device is a member. Anyone with the storage account can write requests: the newest few only.
+    private func noteEnrollments(_ changes: LaneChanges, members: [DeviceInfo]) throws {
+        let requests = changes.upserts.filter { $0.kind == .enroll }.compactMap(ControlRecords.verifiedEnrollRequest)
+        let gone = Set(changes.removed.filter { $0.kind == .enroll }.compactMap { ControlRecords.deviceOfEnrollRequest($0.id) })
+        guard !requests.isEmpty || !gone.isEmpty else { return }
+        var list = try store.receivedEnrollmentsJSON().flatMap { try? JSONDecoder().decode([ReceivedEnrollment].self, from: $0) } ?? []
+        let identity = try store.identity()
+        let joined = Set(members.map(\.id) + (identity?.roster.map(\.deviceID) ?? []) + (identity.map { [$0.deviceID] } ?? []))
+        let now = Int(Date().timeIntervalSince1970)
+        for request in requests {
+            let first = list.first { $0.request.deviceID == request.deviceID }?.receivedAt ?? now
+            list.removeAll { $0.request.deviceID == request.deviceID }
+            list.append(ReceivedEnrollment(request: request, receivedAt: first))
+        }
+        list.removeAll { gone.contains($0.request.deviceID) || joined.contains($0.request.deviceID) }
+        list = Array(list.sorted { $0.receivedAt < $1.receivedAt }.suffix(Self.keptEnrollments))
+        try store.setReceivedEnrollmentsJSON(try JSONEncoder().encode(list))
+    }
+
+    static let keptEnrollments = 8
 
     /// A complete reading of the lane against what this device knows: control records it has seen must still be there, and so
     /// must every record it was told the lane holds (the missing ones go back up).
