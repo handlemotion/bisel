@@ -3,6 +3,7 @@ import Foundation
 import Testing
 import BiselCore
 import BiselTestSupport
+import BiselLaneContract
 
 // The panel's add / edit / delete / undo / generate operations, against the real store, real crypto and the local server.
 @Suite("Item actions for the command panel", .serialized)

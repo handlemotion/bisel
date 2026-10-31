@@ -162,6 +162,13 @@ public struct LaneEraseToken: Sendable {
 
 public enum LaneError: Error, Sendable, Equatable {
     case unsupported
+    /// The storage's account cannot be used right now (CloudKit: signed out, restricted, not determined). Nothing is lost;
+    /// the lane pauses and edits stay pending.
+    case accountUnavailable(String)
+    /// The storage now belongs to a different account than the one pinned when the lane was enabled. Never upload to it.
+    case accountChanged
+    /// The storage the lane names is gone (CloudKit: the zone was deleted). The replica can re-seed it.
+    case storeMissing
 }
 
 public protocol SyncLane: Sendable {

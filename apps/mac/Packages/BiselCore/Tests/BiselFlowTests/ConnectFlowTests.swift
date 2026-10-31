@@ -3,6 +3,7 @@ import Foundation
 import Testing
 import BiselCore
 import BiselTestSupport
+import BiselLaneContract
 
 // Accounts and device-code connect against the real local server. The dashboard (a browser with a passkey) is played by
 // `TestServer.approveConnect`, which makes the same database updates the dashboard's approve route does.

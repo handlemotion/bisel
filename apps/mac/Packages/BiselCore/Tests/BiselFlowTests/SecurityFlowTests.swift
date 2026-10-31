@@ -4,6 +4,7 @@ import Testing
 import CryptoKit
 import BiselCore
 import BiselTestSupport
+import BiselLaneContract
 
 // Flows for SECURITY-REVIEW.md: real server (wrangler dev, local D1), real crypto, software key store. A "hostile" party
 // is played by raw SyncClient calls (what a stolen device-signing key can do) and by SQL against the server's database

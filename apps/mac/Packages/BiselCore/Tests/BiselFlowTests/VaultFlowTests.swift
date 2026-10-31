@@ -3,6 +3,7 @@ import Foundation
 import Testing
 import BiselCore
 import BiselTestSupport
+import BiselLaneContract
 import CryptoKit
 
 // Flow tests: real server (wrangler dev, local D1), real crypto, software key store.

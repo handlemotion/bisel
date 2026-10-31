@@ -100,6 +100,11 @@ swift build -c release                  # no traits: the software key store is n
 
 `BiselTestSupport` needs `server/node_modules` (`pnpm install` there). Set `BISEL_SERVER_DIR` if the server is elsewhere.
 
+The lane contract flows live in `BiselLaneContract` (dev/test only) so the signed app can run the same ones against CloudKit.
+`BiselCloudKit` (`CloudKitLane`) compiles everywhere but only works in a signed app with the iCloud entitlement; nothing the flow
+tests or BiselDev link uses it. The CloudKit run is opt-in and manual: `apps/mac/Tools/run-cloudkit-contract.sh`
+(docs/SYNC-LANES.md §15).
+
 ## Signed runs (what only a signed app can exercise)
 
 `SecureEnclaveDeviceKeyStore` needs a signed build with a `keychain-access-groups` entitlement and, for the App Group store, the

@@ -3,6 +3,7 @@ import Foundation
 import Testing
 import BiselCore
 import BiselTestSupport
+import BiselLaneContract
 
 // The browser sign-in flow (`AccountLinker`) against the real local server. The dashboard is played by
 // `TestServer.approveConnect` / `denyConnect` / `expireConnect`, which make the same database updates the dashboard's routes do.
