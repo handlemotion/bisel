@@ -711,7 +711,7 @@ public enum LaneContract {
             let fake = try c.require(rig.fake)
             let a = try rig.device("a"), b = try rig.device("b")
             let phrase = try await rig.bootstrap(a)
-            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
             try await a.vault.sync()
             try await rig.enroll(b, through: a)
             _ = try await b.vault.save(login("From b", password: "b-pw"))   // b writes, so the box has seen a counter of b's
@@ -740,10 +740,12 @@ public enum LaneContract {
             let envelopeBefore = try await a.vault.identity()?.recoveryEnvelope
             c.expect(try await a.vault.sync().quarantined == 2, "the old-epoch recovery record and the revoked device's counter are quarantined")
             c.expect(try await a.vault.identity()?.recoveryEnvelope == envelopeBefore, "the device keeps the recovery envelope it had")
+            // The device that refused it put the real one back: a fresh device recovers into the box's key, not the one b holds.
             let fresh = try rig.device("fresh")
-            await c.expectThrows("a fresh device does not recover into the key the revoked device holds") {
-                try await rig.recover(fresh, phrase: phrase)
-            }
+            try await rig.recover(fresh, phrase: phrase)
+            try await fresh.vault.sync()
+            c.expect(try await fresh.vault.identity()?.epoch == 2, "the fresh device is at the box's epoch")
+            c.expect(try await fresh.vault.revealPassword(id: bank.id) == "bank-pw", "and opens the box with its key")
         },
         ContractFlow(name: "someone who can write to the storage but never held the key cannot build a box the 24 words recover into") { rig, c in
             let fake = try c.require(rig.fake)
@@ -791,11 +793,11 @@ public enum LaneContract {
 
         // The freshness witness (docs/SYNC-LANES.md §8): a revoked Mac on the same Apple ID keeps the admin key of the epoch it was
         // cut off in. Against a device recovering fresh, which has seen nothing newer, only a second store can tell its work apart.
-        ContractFlow(name: "a revoked device that forks the chain with the old admin key cannot make a fresh device recover into its key, and its forked witness is put right") { rig, c in
+        ContractFlow(name: "a revoked device that forks the chain with the old admin key cannot make a fresh device recover into its key, and its forked witness and head are put right") { rig, c in
             let fake = try c.require(rig.fake), witness = try c.require(rig.fakeWitness)
             let a = try rig.device("a"), b = try rig.device("b")
             let phrase = try await rig.bootstrap(a)
-            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
             try await a.vault.sync()
             try await rig.enroll(b, through: a)
             let bIdentity = try c.require(try await b.vault.identity())
@@ -837,9 +839,12 @@ public enum LaneContract {
             let report = try await a.vault.sync()
             c.expect(report.freshness == .forked, "the device of the box raises the fork (\(report.freshness))")
             c.expect(witness.all[key]?.statement != blob, "the forked statement is replaced")
+            // It also put the real head and recovery record back: the next fresh device recovers into the box's own key.
             let second = try rig.device("second")
-            do { try await rig.recover(second, phrase: phrase); c.fail("a fresh device must not recover into the forked chain") }
-            catch FreshnessError.forked {}
+            try await rig.recover(second, phrase: phrase)
+            try await second.vault.sync()
+            c.expect(try await second.vault.identity()?.epoch == 2, "the second fresh device is at the box's epoch")
+            c.expect(try await second.vault.revealPassword(id: bank.id) == "bank-pw", "and opens the box with its key, not b's")
         },
         ContractFlow(name: "a genuine snapshot from before a revoke, restored to the storage, is refused by a device recovering fresh") { rig, c in
             let fake = try c.require(rig.fake)
@@ -923,6 +928,38 @@ public enum LaneContract {
             }
             try await a.vault.sync()
             c.expect(try await a.vault.revealPassword(id: note.id) == "late-pw", "the late device's edit reaches the box")
+        },
+        ContractFlow(name: "a revoked device cannot stop the next revoke: its forked head and recovery record are put back, and a record no key opens is left behind") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a"), b = try rig.device("b"), d = try rig.device("d")
+            let phrase = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            try await rig.enroll(d, through: a)
+            let bIdentity = try c.require(try await b.vault.identity())
+            let oldVK = try await b.keyStore.openEnvelope(try c.require(bIdentity.envelope), reason: "test")
+            try await a.vault.revoke(deviceID: bIdentity.deviceID)
+            let realHead = try c.require(fake.record(ControlRecords.headID)), realRecovery = try c.require(fake.record(ControlRecords.recoveryID))
+
+            // One write each, with the key b kept or none at all: a forked head, a recovery record of the fork, a record nothing opens.
+            let evil = BiselRandom.bytes(32)
+            let (forkAdmin, _, forkHead) = try fork(realHead, oldVK: oldVK, evil: evil, writer: bIdentity.deviceID, c)
+            var forged = try c.require(ControlRecords.decode(ControlRecords.Recovery.self, realRecovery.blob))
+            forged.seq += 1
+            fake.inject(forkHead)
+            fake.inject(try adminSigned(LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: 2, blob: try ControlRecords.encode(forged),
+                                                   writer: bIdentity.deviceID), by: forkAdmin))
+            fake.inject(LaneRecord(kind: .item, id: BiselRandom.identifier(), rev: 1, epoch: 2, blob: Data(repeating: 3, count: 600)))
+
+            _ = try await a.vault.sync()
+            c.expect(fake.record(ControlRecords.headID)?.blob == realHead.blob, "the real head is put back")
+            c.expect(fake.record(ControlRecords.recoveryID)?.blob == realRecovery.blob, "the real recovery record is put back")
+            try await a.vault.revoke(deviceID: try c.require(try await d.vault.identity()?.deviceID))
+            let fresh = try rig.device("fresh")
+            try await rig.recover(fresh, phrase: phrase)
+            try await fresh.vault.sync()
+            c.expect(try await fresh.vault.revealPassword(id: bank.id) == "bank-pw", "the phrase still recovers the box after both")
         },
     ]
 

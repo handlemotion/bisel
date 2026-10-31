@@ -137,6 +137,7 @@ public struct LaneVerifier: Sendable {
             }
             w.aks = head.aks
             w.epoch = head.epoch
+            w.headRecord = HeldRecord(r)
         }
 
         let rest = records.filter { !($0.kind == .head && $0.id == ControlRecords.headID) }
@@ -159,6 +160,7 @@ public struct LaneVerifier: Sendable {
             if n > w.logN + 1 { hold(r); continue }
             guard e.prev == w.logHash, e.epoch >= w.logEpoch else { quarantine(r, .chainBroken); continue }
             apply(e, blob: r.blob, to: &w)
+            w.logRecord = HeldRecord(r)
         }
         // Entries that were waiting for their predecessors may fit now.
         while let next = w.held["log/\(ControlRecords.logID(w.logN + 1))"]?.record,
@@ -166,6 +168,7 @@ public struct LaneVerifier: Sendable {
               let key = ControlRecords.key(at: e.epoch, in: w.aks), ControlRecords.adminSignatureValid(next, key: key) {
             w.held["log/\(next.id)"] = nil
             apply(e, blob: next.blob, to: &w)
+            w.logRecord = HeldRecord(next)
         }
 
         // 3. Envelopes, the recovery record and the writers' heads.
@@ -188,6 +191,7 @@ public struct LaneVerifier: Sendable {
                 guard rec.seq >= w.recoverySeq else { quarantine(r, .rolledBackRecord); continue }
                 w.recoverySeq = rec.seq
                 w.recovery = RecoveryMaterial(pubkey: rec.pubkey, encPubkey: rec.encPubkey, envelope: rec.envelope)
+                w.recoveryRecord = HeldRecord(r)
             case .head:
                 guard let device = ControlRecords.deviceOfHead(r.id), let head = ControlRecords.decode(ControlRecords.DeviceHead.self, r.blob),
                       head.device == device, (0...Self.maxCounter).contains(head.counter) else { quarantine(r, .malformed); continue }

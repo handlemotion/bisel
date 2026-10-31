@@ -78,8 +78,9 @@ public struct LaneEngine: Sendable {
         if pushing { try await push(&report, epoch: epoch, staleEpoch: &staleEpoch) }
         var serverRevs: [String: Int] = [:]
         let reseeding = try store.reseedPending()
+        var damage = ControlDamage()
         let serverEpoch = try await pull(&report, serverRevs: &serverRevs, fromStart: reseeding || audit, auditing: audit,
-                                         witnessed: await witnessedChain())
+                                         witnessed: await witnessedChain(), damage: &damage)
         // On a lane that is only storage, a rotation is adopted only once the verifier pinned its head: a write refused as stale
         // says only that the lane shows a newer head, and the head the lane shows may be one the verifier held back (a fork the
         // freshness witness contradicts) or quarantined (a rollback).
@@ -98,6 +99,7 @@ public struct LaneEngine: Sendable {
                 try await push(&report, epoch: epoch, staleEpoch: &again)   // push the restored items right away
             }
             try await repair(&report, epoch: epoch)
+            if damage.any || audit { try await restoreControl(&report, epoch: epoch, envelopes: damage.envelopes, vk) }
             try await attest(report, epoch: epoch)
         }
         report.freshness = await witness(epoch: epoch, writing: pushing && !report.rotationAdopted)
@@ -314,7 +316,7 @@ public struct LaneEngine: Sendable {
 
     /// Returns the lane's epoch as of the last page.
     private func pull(_ report: inout SyncReport, serverRevs: inout [String: Int], fromStart: Bool, auditing: Bool,
-                      witnessed: [ControlRecords.AKLink]?) async throws -> Int {
+                      witnessed: [ControlRecords.AKLink]?, damage: inout ControlDamage) async throws -> Int {
         var state = try store.laneState(laneKey)
         var known = witness(state)
         var cursor = fromStart ? nil : state.cursor.map(LaneCursor.init)
@@ -328,6 +330,7 @@ public struct LaneEngine: Sendable {
                                               witnessed: witnessed)
             report.quarantined += verdict.quarantined.count
             report.incidents += verdict.incidents
+            damage.note(verdict.quarantined.map { LaneRecordRef(kind: $0.record.kind, id: $0.record.id) } + changes.removed)
             try store.quarantine(laneKey, verdict.quarantined.map { (kind: $0.record.kind.rawValue, id: $0.record.id, rev: $0.record.rev,
                                                                      reason: $0.reason.rawValue, blob: $0.record.blob) })
             // Records the lane says it deleted for good are never honoured: forget that it holds them, and they go back up.
@@ -452,6 +455,78 @@ public struct LaneEngine: Sendable {
         guard let blob = try? ControlRecords.encode(statement), let sig = try? admin.sign(FreshnessStatement.message(blob)),
               (try? await freshness.write(SignedFreshness(statement: blob, sig: sig), key: key)) != nil else { return verdict.state }
         return verdict.state == .unwitnessed ? .current : verdict.state
+    }
+
+    /// Control records a pull refused or the lane reported deleted: what `restoreControl` looks at.
+    struct ControlDamage {
+        var any = false
+        /// Envelope ids, `<epoch>.<device>`.
+        var envelopes: Set<String> = []
+        mutating func note(_ refs: [LaneRecordRef]) {
+            for ref in refs where ref.kind == .head || ref.kind == .recovery || ref.kind == .log || ref.kind == .envelope {
+                any = true
+                if ref.kind == .envelope { envelopes.insert(ref.id) }
+            }
+        }
+    }
+
+    /// Puts back the box's head, recovery record and last log entry when what the lane holds in their place is not genuine (a
+    /// removed device's fork, an older snapshot, junk) or is gone: the copies this device verified, byte for byte, so their
+    /// signatures still hold, compare-and-set on whatever sits there. Without it one write by a removed Mac on the Apple ID would
+    /// block every later rotation, admit and phrase change for the box's devices, and every recovery. A copy that verifies is
+    /// left alone, newer or not: this never undoes another device's rotation or recovery change.
+    ///
+    /// An envelope of the current epoch overwritten for a device the owner approved, and that was not revoked, is sealed again to
+    /// that device's key from the roster: without it a device that slept through a rotation could never take the new key.
+    private func restoreControl(_ report: inout SyncReport, epoch: Int, envelopes: Set<String>, _ vk: LockedKey) async throws {
+        guard !lane.capabilities.headIsCursor, let state = try? store.laneState(laneKey) else { return }
+        let known = witness(state)
+        guard known.epoch == epoch else { return }
+        let kept = [known.headRecord, known.recoveryRecord, known.logRecord].compactMap { $0 }
+        if !kept.isEmpty {
+            let now = try await lane.read(kept.map { LaneRecordRef(kind: $0.kind, id: $0.id) })
+            for (genuine, current) in zip(kept, now) where !stillGenuine(current, for: genuine, known) {
+                // Nothing there (or a record of another kind under its name, which a read does not return): written over as it is.
+                let expect: LaneExpect = current?.tag.map { .tag($0) } ?? .any
+                if case .accepted = try await lane.write([LaneWrite(record: genuine.record, expect: expect)])[0] { report.repaired += 1 }
+            }
+        }
+
+        let roster = try store.identity()?.roster ?? []
+        let admin = try vk.withKey { AdminSigner(key: try VaultAdmin.signingKey(vaultKey: $0)) }
+        guard let key = known.aks.last?.ak, admin.publicKey == key else { return }
+        for id in envelopes.sorted() {
+            guard let parts = ControlRecords.envelopeParts(id), parts.epoch == epoch, let entry = roster.first(where: { $0.deviceID == parts.device }),
+                  known.members.contains(where: { $0.id == parts.device && !$0.isRevoked }) else { continue }
+            let current = try await lane.read([LaneRecordRef(kind: .envelope, id: id)]).first ?? nil
+            if let current, ControlRecords.adminSignatureValid(current, key: key) { continue }
+            var raw = try vk.rawBytes()
+            defer { raw.zeroize() }
+            var record = LaneRecord(kind: .envelope, id: id, rev: 0, epoch: epoch,
+                                    blob: try DeviceEnvelope.seal(vaultKey: raw, toEncryptionKey: entry.encPubkey), writer: try store.identity()?.deviceID)
+            record.sig = try admin.sign(record.canonical)
+            let expect: LaneExpect = current?.tag.map { .tag($0) } ?? .any
+            if case .accepted = try await lane.write([LaneWrite(record: record, expect: expect)])[0] { report.repaired += 1 }
+        }
+    }
+
+    /// Whether `current` is a record of the box that stands on its own: the head still holding the pinned chain, a recovery
+    /// record of the head's epoch signed by its key and not older, a log entry signed by the key of its epoch.
+    private func stillGenuine(_ current: LaneRecord?, for kept: HeldRecord, _ known: LaneWitness) -> Bool {
+        guard let current else { return false }
+        if current.blob == kept.blob, current.sig == kept.sig { return true }
+        switch kept.kind {
+        case .head:
+            return ControlRecords.verifiedHead(current, pinned: known.aks) != nil
+        case .recovery:
+            guard let rec = ControlRecords.decode(ControlRecords.Recovery.self, current.blob), rec.epoch == known.epoch, rec.seq >= known.recoverySeq,
+                  let key = ControlRecords.key(at: rec.epoch, in: known.aks) else { return false }
+            return ControlRecords.adminSignatureValid(current, key: key)
+        default:
+            guard let e = ControlRecords.decode(ControlRecords.LogEntry.self, current.blob), ControlRecords.logID(e.n) == current.id,
+                  e.epoch >= known.logEpoch, let key = ControlRecords.key(at: e.epoch, in: known.aks) else { return false }
+            return ControlRecords.adminSignatureValid(current, key: key)
+        }
     }
 
     /// Bumps this device's freshness counter after it wrote, on lanes that do not number their own history.
