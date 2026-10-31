@@ -24,7 +24,7 @@ pnpm install
 cd apps/mac && xcodegen generate --spec project.dev.yml && open BiselDev.xcodeproj
 ```
 
-`project.dev.yml` builds an unsigned Debug app with software keys, so it runs without an Apple developer account. Never ship from it. The real app comes from `project.yml` (Secure Enclave, iCloud), which needs your own signing team, bundle id and iCloud container in place of mine.
+`project.dev.yml` builds an unsigned Debug app with software keys, so it runs without an Apple developer account. Never ship from it. The real app comes from `project.yml` (Secure Enclave, iCloud), which needs your own signing team, bundle id and iCloud container in place of mine. How the signed, notarized build is made and released, with the CloudKit schema, is in [apps/mac/RELEASE.md](apps/mac/RELEASE.md).
 
 Checks:
 

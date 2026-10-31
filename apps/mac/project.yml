@@ -126,10 +126,24 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon   # Resources/AppIcon.icon (Icon Composer), rendered by the system
       configs:
         # BISEL_CLOUDKIT: new boxes are created in iCloud and `cloudkit://` boxes sync through CloudKitLane. Signed builds only.
+        # BISEL_ICLOUD_ENVIRONMENT fills com.apple.developer.icloud-container-environment in Bisel.entitlements: Xcode-run builds
+        # talk to the Development CloudKit environment, the Developer ID build to Production (RELEASE.md).
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG BISEL_DEV_FIXTURE BISEL_CLOUDKIT"
+          BISEL_ICLOUD_ENVIRONMENT: Development
         Release:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "BISEL_CLOUDKIT"
+          BISEL_ICLOUD_ENVIRONMENT: Production
+          # Developer ID, outside the Mac App Store (RELEASE.md). Manual signing so an archive needs no Xcode account session and
+          # fails up front when the certificate or the profile is missing. The profile is a Developer ID profile for
+          # app.bisel.mac with iCloud (CloudKit + key-value storage, container iCloud.app.bisel); a Developer ID app with a
+          # restricted entitlement and no embedded profile is killed at launch. Hardened runtime comes from the base settings
+          # and needs no exceptions (no JIT, no unsigned memory, no library validation opt-out, no Apple Events sent).
+          # --timestamp: notarization rejects a signature without a secure timestamp.
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Developer ID Application"
+          PROVISIONING_PROFILE_SPECIFIER: "Bisel Developer ID"
+          OTHER_CODE_SIGN_FLAGS: "--options=runtime --timestamp"
 
   # Tiny native SwiftUI app with username / password / code fields: the "native SwiftUI app"
   # row of the fill matrix and the target for the XCUITest flow. Never shipped.

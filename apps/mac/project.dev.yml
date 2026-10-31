@@ -22,3 +22,7 @@ targets:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG BISEL_DEV_FIXTURE BISEL_SOFTWARE_KEYS"
         Release:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
+          # Undo project.yml's Developer ID signing: a software-key build must never carry the shipping identity.
+          CODE_SIGN_STYLE: Automatic
+          CODE_SIGN_IDENTITY: "-"
+          PROVISIONING_PROFILE_SPECIFIER: ""
