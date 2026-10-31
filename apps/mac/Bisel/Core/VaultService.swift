@@ -35,6 +35,14 @@ struct SecurityAlert: Identifiable, Equatable {
     let date: Date
 }
 
+extension UserDefaults {
+    /// A number setting, only within `range`: anything else (missing, out of range, not a number) is `default`.
+    func setting(_ key: String, in range: ClosedRange<Int>, default fallback: Int) -> Int {
+        guard let value = object(forKey: key) as? Int, range.contains(value) else { return fallback }
+        return value
+    }
+}
+
 enum SyncState: Equatable {
     case idle
     case syncing
@@ -108,8 +116,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     private static let panelSyncMinInterval: TimeInterval = 10
     static let fillWindowKey = "security.fillWindowMinutes"
     static let idleLockKey = "security.idleLockMinutes"
-    static var fillWindowMinutes: Int { UserDefaults.standard.object(forKey: fillWindowKey) as? Int ?? 5 }
-    static var idleLockMinutes: Int { UserDefaults.standard.object(forKey: idleLockKey) as? Int ?? 5 }
+    /// Any process of this user can write these defaults, so a value outside the range the settings offer reads as the default.
+    static var fillWindowMinutes: Int { UserDefaults.standard.setting(fillWindowKey, in: 1...30, default: 5) }
+    static var idleLockMinutes: Int { UserDefaults.standard.setting(idleLockKey, in: 1...30, default: 5) }
 
     init() {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
