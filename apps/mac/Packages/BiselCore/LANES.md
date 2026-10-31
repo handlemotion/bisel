@@ -74,7 +74,20 @@ the genuine one in the list (the new device then has to start over).
 
 ## Rotation incomplete
 
-_Filled in at integration (rotation branch)._
+On iCloud, revoking a device is the key rotation itself (`revoke(deviceID:)` / `rotateVaultKey`), and it is staged (SYNC-LANES §5):
+the new wrapped keys are written next to the items, read back, then one small atomic commit switches the key, then the items are
+folded. A crash or a dropped connection at any point leaves a box every device can read.
+
+- `RotationReport.incomplete == true`: the switch happened but some items still carry the old wrap on the lane. **Show** "Revocation
+  finishing…": any unlocked device finishes it on its next sync. Revocation is effective (the revoked device cannot open the new
+  key); the lane is just not tidy yet.
+- `SyncReport.rotationPending == true` (this device is locked and saw an unfinished rotation): show the same, and ask to unlock so it
+  can finish. `SyncReport.folded` counts what this device finished.
+- `RotationError.inProgress`: another device is rotating right now (its journal is younger than 15 min). "Another device is changing
+  the box key; try again in a moment." Edits made meanwhile stay pending (they go up after the switch).
+- `RotationError.laneDroppedWrites`: iCloud did not keep what was written (read-back failed); nothing switched. Retry later.
+- On iCloud, also tell the person to remove the revoked device from their Apple Account: it keeps its iCloud session and can still
+  delete or spam records (availability, never confidentiality; SYNC-LANES §5, §7).
 
 ## Push
 
