@@ -326,13 +326,16 @@ public enum LaneContract {
             }
             c.expect(try await a.vault.identity()?.epoch == me.epoch, "the unsigned head announced no rotation")
         },
-        ContractFlow(name: "a revoked device that kept the old admin key cannot replace the recovery material, here or for a device recovering") { rig, c in
+        ContractFlow(name: "a revoked device that kept the old admin key cannot replace the recovery material, here or for a device recovering, nor wedge sync with its counter") { rig, c in
             let fake = try c.require(rig.fake)
             let a = try rig.device("a"), b = try rig.device("b")
             let phrase = try await rig.bootstrap(a)
             _ = try await a.vault.save(login("Bank", password: "bank-pw"))
             try await a.vault.sync()
             try await rig.enroll(b, through: a)
+            _ = try await b.vault.save(login("From b", password: "b-pw"))   // b writes, so the box has seen a counter of b's
+            try await b.vault.sync()
+            try await a.vault.sync()
             let bIdentity = try c.require(try await b.vault.identity())
             let oldVK = try await b.keyStore.openEnvelope(try c.require(bIdentity.envelope), reason: "test")
             try await a.vault.revoke(deviceID: bIdentity.deviceID)
@@ -346,9 +349,15 @@ public enum LaneContract {
                                     writer: bIdentity.deviceID)
             record.sig = try AdminSigner(vaultKey: oldVK).sign(record.canonical)
             fake.inject(record)
+            // And its own counter, lower than the one the box saw: on every device that reads as the lane rolling back.
+            var counter = LaneRecord(kind: .head, id: ControlRecords.deviceHeadID(bIdentity.deviceID), rev: 0, epoch: 1,
+                                     blob: try ControlRecords.encode(ControlRecords.DeviceHead(device: bIdentity.deviceID, counter: 0, epoch: 1)),
+                                     writer: bIdentity.deviceID)
+            counter.sig = try b.keyStore.sign(counter.canonical)
+            fake.inject(counter)
 
             let envelopeBefore = try await a.vault.identity()?.recoveryEnvelope
-            c.expect(try await a.vault.sync().quarantined == 1, "the old-epoch recovery record is quarantined")
+            c.expect(try await a.vault.sync().quarantined == 2, "the old-epoch recovery record and the revoked device's counter are quarantined")
             c.expect(try await a.vault.identity()?.recoveryEnvelope == envelopeBefore, "the device keeps the recovery envelope it had")
             let fresh = try rig.device("fresh")
             await c.expectThrows("a fresh device does not recover into the key the revoked device holds") {

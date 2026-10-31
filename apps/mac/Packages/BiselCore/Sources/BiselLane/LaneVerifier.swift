@@ -11,6 +11,7 @@ public enum LaneQuarantineReason: String, Sendable, Codable {
     case unpinnedSigner     // signed by a key outside the chain this device pinned
     case staleEpoch         // written for a vault-key epoch older than the box's current one
     case chainBroken        // a log entry that does not extend the chain this device has seen
+    case revokedWriter      // signed by a device the log revoked
 }
 
 public struct LaneQuarantined: Sendable, Equatable {
@@ -39,6 +40,11 @@ public struct LaneVerdict: Sendable {
 public struct LaneVerifier: Sendable {
     /// Largest item blob: 256 KiB of payload plus the wrapped key, nonce and tag (`ItemSealer`).
     static let maxBlob = 256 * 1024 + 256
+    /// A writer's counter goes up by one per sync that wrote; anything near this is not a counter (and the sum of them, the
+    /// lane's position, must not overflow).
+    static let maxCounter = 1 << 40
+    /// Records kept waiting for what verifies them. Anyone who can write to the storage can make more: beyond this they are refused.
+    static let maxHeld = 1024
 
     public init() {}
 
@@ -96,7 +102,9 @@ public struct LaneVerifier: Sendable {
 
     private func verifyControl(_ records: [LaneRecord], witness w: inout LaneWitness, adminKey: Data?, into verdict: inout LaneVerdict) throws {
         func quarantine(_ r: LaneRecord, _ why: LaneQuarantineReason) { verdict.quarantined.append(.init(record: r, reason: why)) }
-        func hold(_ r: LaneRecord) { w.held[heldKey(r)] = HeldRecord(r) }
+        func hold(_ r: LaneRecord) {
+            if w.held.count >= Self.maxHeld, w.held[heldKey(r)] == nil { quarantine(r, .malformed) } else { w.held[heldKey(r)] = HeldRecord(r) }
+        }
 
         // 1. The head pins the chain of admin keys.
         for r in records where r.kind == .head && r.id == ControlRecords.headID {
@@ -167,11 +175,14 @@ public struct LaneVerifier: Sendable {
                 w.recovery = RecoveryMaterial(pubkey: rec.pubkey, encPubkey: rec.encPubkey, envelope: rec.envelope)
             case .head:
                 guard let device = ControlRecords.deviceOfHead(r.id), let head = ControlRecords.decode(ControlRecords.DeviceHead.self, r.blob),
-                      head.device == device else { quarantine(r, .malformed); continue }
+                      head.device == device, (0...Self.maxCounter).contains(head.counter) else { quarantine(r, .malformed); continue }
                 guard let member = w.members.first(where: { $0.id == device }) else { hold(r); continue }
                 guard let pub = Data(base64URLEncoded: member.sigPubkey), ControlRecords.deviceSignatureValid(r, sigPubkey: pub) else {
                     quarantine(r, .badSignature); continue
                 }
+                // A revoked device keeps its signing key, and a counter lower than the one it showed before would read as the lane
+                // rolling back, on every device, for good. What it writes after the revoke is not the box's freshness.
+                if member.isRevoked { quarantine(r, .revokedWriter); continue }
                 if let known = w.counters[device], head.counter < known {
                     throw IntegrityError.serverRolledBack(known: known, reported: head.counter)
                 }
