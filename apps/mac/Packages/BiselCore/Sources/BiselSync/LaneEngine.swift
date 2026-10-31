@@ -62,6 +62,7 @@ public struct LaneEngine: Sendable {
     public func run(pushing: Bool = true, audit: Bool = false) async throws -> SyncReport {
         var report = SyncReport()
         _ = try store.laneState(laneKey)   // adopts what the box synced before lanes existed, before anything is acknowledged
+        try await checkIdentity()
         let epoch = try store.identity()?.epoch ?? 1
         var staleEpoch = false
         if pushing { try await push(&report, epoch: epoch, staleEpoch: &staleEpoch) }
@@ -85,6 +86,21 @@ public struct LaneEngine: Sendable {
             try await attest(report, epoch: epoch)
         }
         return report
+    }
+
+    /// Who owns the storage is pinned the first time this device syncs through it (or when a box is put on it afresh). Storage
+    /// that now belongs to someone else (another iCloud account signed in on this Mac) is never written to or read into the
+    /// replica: the person decides (`Vault.enableLane` on the new account, or detach). An account that is signed out or
+    /// restricted throws `LaneError.accountUnavailable` from the lane itself; nothing is lost, edits stay pending.
+    private func checkIdentity() async throws {
+        let current = try await lane.identity().rawValue
+        var state = try store.laneState(laneKey)
+        guard let pinned = state.identity else {
+            state.identity = current
+            try store.setLaneState(laneKey, state)
+            return
+        }
+        if pinned != current { throw LaneError.accountChanged }
     }
 
     /// Another device rotated VK: take this device's new envelope. If edits sealed under the old key are still
@@ -129,6 +145,12 @@ public struct LaneEngine: Sendable {
                     if case .conflict(let current?) = outcome, rec.baseRev > 0, current.rev == rec.baseRev,
                        let tag = current.tag, expect != .tag(tag) {
                         outcome = try await lane.write([LaneWrite(record: laneRecord(rec, epoch: epoch), expect: .tag(tag))])[0]
+                    }
+                    // The lane does not hold the record at all (storage put back from a replica, or never given it): a lane that
+                    // takes any revision gets the edit as it is, instead of a re-sealed copy at revision 1 that every device
+                    // holding the newer revision would ignore.
+                    if case .conflict(nil) = outcome, rec.baseRev > 0, lane.capabilities.repairs {
+                        outcome = try await lane.write([LaneWrite(record: laneRecord(rec, epoch: epoch), expect: .absent)])[0]
                     }
                 } catch SyncError.server(_, let code) where reserved && code == "admin_signature_required" {
                     skipped.insert(rec.id)

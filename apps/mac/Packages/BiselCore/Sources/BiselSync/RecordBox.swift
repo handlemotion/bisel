@@ -4,6 +4,20 @@ import BiselCrypto
 import BiselLane
 import BiselVault
 
+/// A box that exists already, for `RecordBox.adopt`: the epoch it is at, the admin-key chain to carry (its first key is what the
+/// recovery anchor signs; it ends at `admin`), and every device that keeps the box, this device first, each with the vault key
+/// sealed to it in `envelope`.
+public struct ExistingBox: Sendable {
+    public var epoch: Int
+    public var chain: [ControlRecords.AKLink]
+    public var admin: AdminSigner
+    public var devices: [WireDevice]
+    public var recovery: ControlRecords.Recovery
+    public init(epoch: Int, chain: [ControlRecords.AKLink], admin: AdminSigner, devices: [WireDevice], recovery: ControlRecords.Recovery) {
+        self.epoch = epoch; self.chain = chain; self.admin = admin; self.devices = devices; self.recovery = recovery
+    }
+}
+
 /// A box on a lane that is only storage: the control operations of `BoxLane` as signed records (docs/SYNC-LANES.md §2, §4, §5).
 ///
 /// Nothing here trusts the storage. What it writes is signed by the vault-admin key (derived from the vault key, so only a
@@ -195,21 +209,58 @@ public struct RecordBox: BoxLane {
     }
 
     public func create(_ box: NewBox) async throws -> SyncClient.BootstrapResult {
-        guard let envelope = box.device.envelope.flatMap({ Data(base64URLEncoded: $0) }) else { throw SyncError.malformedResponse }
-        let admin = box.admin
+        guard box.device.envelope != nil else { throw SyncError.malformedResponse }
         let recovery = ControlRecords.Recovery(seq: 1, epoch: 1, pubkey: box.recoveryPublicKey.base64URLEncoded(),
                                                encPubkey: box.recoveryEncryptionPublicKey.base64URLEncoded(), envelope: box.recoveryEnvelope.base64URLEncoded(),
                                                anchor: box.recoveryAnchor?.base64URLEncoded())
-        try await put(try signed(LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: 1,
-                                            blob: try ControlRecords.encode(recovery), writer: box.device.id), by: admin))
-        try await put(try envelopeRecord(device: box.device.id, epoch: 1, envelope: envelope, admin: admin))
-        try await appendLog(type: "bootstrap", subject: box.device.id, member: Self.member(box.device), epoch: 1, admin: admin, by: box.device.id,
-                            keys: [.init(epoch: 1, ak: admin.publicKey, sig: nil)])
-        let head = ControlRecords.Head(epoch: 1, aks: [.init(epoch: 1, ak: admin.publicKey, sig: nil)])
-        let record = try signed(LaneRecord(kind: .head, id: ControlRecords.headID, rev: 0, epoch: 1, blob: try ControlRecords.encode(head), writer: box.device.id), by: admin)
+        let existing = ExistingBox(epoch: 1, chain: [.init(epoch: 1, ak: box.admin.publicKey, sig: nil)], admin: box.admin,
+                                   devices: [box.device], recovery: recovery)
+        guard try await adopt(existing) else { throw SyncError.conflict(current: nil) }
+        return SyncClient.BootstrapResult(deviceID: box.device.id, boxID: nil, headSeq: 0, epoch: 1)
+    }
+
+    /// Puts a box that already exists (on another lane, on this Mac only, on storage that was deleted or belongs to another
+    /// account) on this storage at its current epoch: the recovery record, an envelope for every device that keeps the box, a
+    /// fresh membership log, and the head last. Items are not written here; the engine uploads them from the replica.
+    ///
+    /// Returns false when the storage already holds this box (its head verifies against `box.chain` and ends in `box.admin`):
+    /// an earlier attempt got through, or another device put it there first. Storage that holds a different box is refused
+    /// (`LaneError.occupied`), never written over.
+    public func adopt(_ box: ExistingBox) async throws -> Bool {
+        guard let me = box.devices.first, ControlRecords.chainValid(box.chain, epoch: box.epoch),
+              box.chain.last?.ak == box.admin.publicKey else { throw SyncError.malformedResponse }
+        try await storage.prepare()
+        if let record = try await readOne(.head, ControlRecords.headID) {
+            guard let head = ControlRecords.verifiedHead(record, pinned: box.chain), head.aks.last?.ak == box.admin.publicKey else { throw LaneError.occupied }
+            return false
+        }
+        var recovery = box.recovery
+        recovery.epoch = box.epoch
+        try await put(try signed(LaneRecord(kind: .recovery, id: ControlRecords.recoveryID, rev: 0, epoch: box.epoch,
+                                            blob: try ControlRecords.encode(recovery), writer: me.id), by: box.admin))
+        for device in box.devices {
+            guard let envelope = device.envelope.flatMap({ Data(base64URLEncoded: $0) }) else { throw SyncError.malformedResponse }
+            try await put(try envelopeRecord(device: device.id, epoch: box.epoch, envelope: envelope, admin: box.admin))
+        }
+        try await appendLog(type: "bootstrap", subject: me.id, member: Self.member(me), epoch: box.epoch, admin: box.admin, by: me.id, keys: box.chain)
+        for device in box.devices.dropFirst() {
+            try await appendLog(type: "approve", subject: device.id, member: Self.member(device), epoch: box.epoch, admin: box.admin, by: me.id, keys: box.chain)
+        }
+        let head = ControlRecords.Head(epoch: box.epoch, aks: box.chain)
+        let record = try signed(LaneRecord(kind: .head, id: ControlRecords.headID, rev: 0, epoch: box.epoch, blob: try ControlRecords.encode(head), writer: me.id), by: box.admin)
         // The head goes last and only once: its existence is what makes this lane a box.
         guard case .accepted = try await storage.write([LaneWrite(record: record, expect: .absent)])[0] else { throw SyncError.conflict(current: nil) }
-        return SyncClient.BootstrapResult(deviceID: box.device.id, boxID: nil, headSeq: 0, epoch: 1)
+        return true
+    }
+
+    /// The admin key the box's genuine head ends in, nil when the storage holds no head (or a forged one).
+    public func headAdminKey() async throws -> Data? { try await currentHead()?.head.aks.last?.ak }
+
+    /// The recovery anchor of the record signed in the head's epoch, nil if there is none.
+    public func recoveryAnchor() async throws -> (anchor: Data, root: Data)? {
+        guard let (head, _) = try await currentHead(), let root = head.aks.first?.ak,
+              let (rec, _) = try await recovery(under: head), let anchor = rec.anchor.flatMap({ Data(base64URLEncoded: $0) }) else { return nil }
+        return (anchor, root)
     }
 
     public func attest(counter: Int, epoch: Int) async throws {

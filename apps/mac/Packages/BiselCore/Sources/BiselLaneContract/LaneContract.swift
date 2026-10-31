@@ -17,9 +17,10 @@ public struct ContractFlow: Sendable {
 
 public enum LaneContract {
     /// Runs one flow on a fresh box and returns what it found wrong (empty: it passed).
-    public static func run(_ flow: ContractFlow, on lane: ContractLane) async -> [Checks.Failure] {
+    /// `serverForMoves`: a flow that moves a box onto the storage may start the real server as where it comes from.
+    public static func run(_ flow: ContractFlow, on lane: ContractLane, serverForMoves: Bool = false) async -> [Checks.Failure] {
         let c = Checks()
-        do { try await Rig.with(lane) { try await flow.body($0, c) } }
+        do { try await Rig.with(lane, serverForMoves: serverForMoves) { try await flow.body($0, c) } }
         catch is Checks.Stop {}
         catch { c.fail("unexpected error: \(String(reflecting: error))") }
         return c.failures
@@ -203,6 +204,127 @@ public enum LaneContract {
     /// a deleted store, moving a box onto it. The server keeps these on its side, so they run on `FakeLane` in the flow tests
     /// and on CloudKit in the signed contract run, never against the server.
     public static let storageOnly: [ContractFlow] = [
+        ContractFlow(name: "signing out pauses the lane with edits kept, another account is never uploaded to, and moving the box to it loses nothing") { rig, c in
+            let account = try c.require(rig.account)
+            let a = try rig.device("a"), b = try rig.device("b")
+            let phrase = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+
+            // Signed out: nothing syncs, nothing is lost, and it resumes by itself.
+            account.signIn(.signedOut("no iCloud account"))
+            var edit = try await a.vault.item(id: bank.id); edit.password = "while-signed-out"
+            _ = try await a.vault.save(edit)
+            await c.expectThrows("a signed-out account cannot sync") { try await a.vault.sync() }
+            let paused = try await a.vault.laneStatus()
+            c.expect(paused == .accountUnavailable("no iCloud account"), "the lane reads as paused (\(paused))")
+            c.expect(try await a.vault.pendingChanges() == 1, "the edit stays pending")
+            account.signIn(.first)
+            try await a.vault.sync()
+            c.expect(try await a.vault.laneStatus() == .active, "the lane resumes once the account is back")
+            try await b.vault.sync()
+            c.expect(try await b.vault.revealPassword(id: bank.id) == "while-signed-out", "the edit made while signed out arrives")
+
+            // Another account: never uploaded to, until the person moves the box there.
+            account.signIn(.second)
+            let offline = try await a.vault.save(login("Made on the new account", password: "new-acct"))
+            do { try await a.vault.sync(); c.fail("a sync must not run against another account") } catch LaneError.accountChanged {}
+            c.expect(try await a.vault.laneStatus() == .accountChanged, "the lane reads as on another account")
+            c.expect(try await rig.records(as: a, c).isEmpty, "nothing reached the other account's storage")
+            let moved = try await a.vault.enableLane(rig.address)
+            c.expect(moved.created, "the box is put on the new account's storage")
+            c.expect(try await a.vault.laneStatus() == .active, "the lane is active on the new account")
+            c.expect(try await a.vault.pendingChanges() == 0, "nothing left pending after the move")
+            c.expect(try await rig.records(as: a, c).count >= 3, "the new storage holds the items and the manifest")
+            // The other device signed in to the same new account joins the box already there.
+            do { try await b.vault.sync(); c.fail("b must not sync against another account either") } catch LaneError.accountChanged {}
+            let joined = try await b.vault.enableLane(rig.address)
+            c.expect(!joined.created, "b finds the box a put there and joins it")
+            c.expect(try await b.vault.revealPassword(id: offline.id) == "new-acct", "b reads what a made")
+            let fresh = try rig.device("fresh")
+            try await rig.recover(fresh, phrase: phrase)
+            try await fresh.vault.sync()
+            c.expect(try await fresh.vault.revealPassword(id: bank.id) == "while-signed-out", "the 24 words recover the box on the new account")
+        },
+
+        ContractFlow(name: "storage deleted by the person is noticed, never recreated behind their back, and put back from the replica without losing an edit") { rig, c in
+            let lane = try c.require(rig.account)
+            let a = try rig.device("a"), b = try rig.device("b")
+            let phrase = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            try await rig.enroll(b, through: a)
+            _ = try await a.vault.save(login("Mail", password: "mail-pw"))
+            try await a.vault.sync()
+            try await b.vault.sync()
+
+            try await lane.erase(confirmed: LaneEraseToken())   // "Delete Bisel data" in iCloud settings
+            var edit = try await b.vault.item(id: bank.id); edit.password = "after-the-delete"
+            _ = try await b.vault.save(edit)
+            do { try await b.vault.sync(); c.fail("a deleted store must be reported") } catch LaneError.storeMissing {}
+            let missing = try await b.vault.laneStatus()
+            c.expect(missing == .storeMissing, "the lane reads as deleted (\(missing))")
+            do { _ = try await lane.fetch(since: nil, limit: 1); c.fail("the failed sync must not have recreated the store") } catch LaneError.storeMissing {}
+            c.expect(try await b.vault.pendingChanges() == 1, "the edit stays pending")
+
+            // The person uploads a's copy again; b carries on, after accepting the reset if it noticed one.
+            let put = try await a.vault.enableLane(rig.address)
+            c.expect(put.created && put.uploaded >= 3, "the replica goes back up (\(put.uploaded) records)")
+            do { try await b.vault.sync(audit: true) } catch is IntegrityError {
+                try await b.vault.acknowledgeServerReset()
+                try await b.vault.sync()
+            }
+            c.expect(try await b.vault.pendingChanges() == 0, "b's edit made during the outage is uploaded")
+            try await a.vault.sync()
+            c.expect(try await a.vault.revealPassword(id: bank.id) == "after-the-delete", "and reaches a")
+            let fresh = try rig.device("fresh")
+            try await rig.recover(fresh, phrase: phrase)
+            try await fresh.vault.sync()
+            c.expect(try await fresh.vault.items().items.map(\.title).sorted() == ["Bank", "Mail"], "the 24 words recover the box put back")
+        },
+
+        ContractFlow(name: "a box moves onto the storage lane with nothing lost, its old lane left alone, and the other device follows by itself") { rig, c in
+            try await rig.withMoveSource { source in
+                let a = try rig.device("a"), b = try rig.device("b")
+                let phrase = try await source.bootstrap(a)
+                let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+                let gone = try await a.vault.save(login("Deleted", password: "gone"))
+                try await a.vault.sync()
+                try await source.enroll(b, through: a)
+                try await a.vault.delete(id: gone.id)
+                try await a.vault.sync()
+                var edit = try await b.vault.item(id: bank.id); edit.password = "b-before-the-move"
+                _ = try await b.vault.save(edit)
+                try await b.vault.sync()
+                try await a.vault.sync()
+
+                // Moving needs the 24 words when the box never lived on storage that keeps its own control records.
+                if source.server != nil {
+                    await c.expectThrows("a box from the server is not moved without the phrase") { try await a.vault.enableLane(rig.address) }
+                }
+                try await a.vault.enableLane(rig.address, phrase: phrase)
+                c.expect(try await a.vault.identity()?.serverURL == rig.address, "a now syncs through the storage lane")
+                c.expect(try await a.vault.pendingChanges() == 0, "nothing left pending on a")
+                let held = try await rig.records(as: a, c)
+                c.expect(held.contains { $0.id == bank.id } && held.contains { $0.id == gone.id && $0.deleted }, "items and tombstones are on the lane")
+
+                // b is still on the old lane; an edit made there before it notices still arrives.
+                let late = try await b.vault.save(login("Made on the old lane", password: "late"))
+                try await b.vault.sync()   // pushes to the old lane, sees the move in the sealed manifest
+                try await b.vault.sync()   // follows
+                c.expect(try await b.vault.identity()?.serverURL == rig.address, "b followed the move")
+                try await a.vault.sync()
+                c.expect(try await a.vault.revealPassword(id: late.id) == "late", "b's late edit reaches a on the new lane")
+                c.expect(try await a.vault.revealPassword(id: bank.id) == "b-before-the-move", "b's earlier edit came along")
+                c.expect(try await b.vault.pendingChanges() == 0, "nothing left pending on b")
+
+                let fresh = try rig.device("fresh")
+                try await rig.recover(fresh, phrase: phrase)
+                try await fresh.vault.sync()
+                c.expect(try await fresh.vault.items().items.map(\.title).sorted() == ["Bank", "Made on the old lane"], "the 24 words recover the moved box")
+            }
+        },
     ]
 
     /// A lane that is only storage and misbehaves (nothing the server lane can be made to do). They drive `FakeLane` directly.

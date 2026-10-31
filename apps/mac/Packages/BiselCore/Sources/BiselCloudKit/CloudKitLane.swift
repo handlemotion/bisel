@@ -118,6 +118,8 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
     }
 
     public func changes() -> AsyncStream<LaneSignal> { CloudKitSignals.shared.stream() }
+    /// The same signals without a lane at hand: every push of the subscription and every iCloud account change.
+    public static func signals() -> AsyncStream<LaneSignal> { CloudKitSignals.shared.stream() }
 
     /// Hard-deletes `enroll.*` / `stage*` records once they served (the verifier does not count those as incidents).
     public func remove(_ refs: [LaneRecordRef]) async throws {
@@ -198,13 +200,22 @@ public final class CloudKitLane: SyncLane, @unchecked Sendable {
         var out: [String: CKRecord] = [:]
         for chunk in Array(Set(names)).chunked(200) where !chunk.isEmpty {
             let ids = chunk.map { CKRecord.ID(recordName: $0, zoneID: zoneID) }
-            let results = try await retrying { try await self.database.records(for: ids, desiredKeys: nil) }
+            let results: [CKRecord.ID: Result<CKRecord, any Error>]
+            do { results = try await retrying { try await self.database.records(for: ids, desiredKeys: nil) } }
+            catch let error as CKError where error.code == .zoneNotFound || error.code == .userDeletedZone {
+                lock.withLock { zoneReady = false }
+                throw LaneError.storeMissing
+            }
             for (id, result) in results {
                 switch result {
                 case .success(let record):
                     remember(record)
                     out[id.recordName] = record
-                case .failure(let error as CKError) where error.code == .unknownItem || error.code == .zoneNotFound:
+                case .failure(let error as CKError) where error.code == .zoneNotFound || error.code == .userDeletedZone:
+                    // The whole zone is gone, not this record: say so instead of reading it as an empty box.
+                    lock.withLock { zoneReady = false }
+                    throw LaneError.storeMissing
+                case .failure(let error as CKError) where error.code == .unknownItem:
                     lock.withLock { known[id.recordName] = nil }
                 case .failure(let error):
                     throw error

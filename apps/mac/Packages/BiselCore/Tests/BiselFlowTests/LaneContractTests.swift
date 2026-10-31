@@ -21,7 +21,7 @@ struct LaneContractTests {
 
     @Test("a lane that is only storage", arguments: LaneContract.storageOnly.map(\.name))
     func storageOnly(_ flow: String) async throws {
-        report(await LaneContract.run(try #require(LaneContract.flow(named: flow)), on: .fake))
+        report(await LaneContract.run(try #require(LaneContract.flow(named: flow)), on: .fake, serverForMoves: true))
     }
 
     @Test("a lane that is only storage and misbehaves", arguments: LaneContract.hostile.map(\.name))

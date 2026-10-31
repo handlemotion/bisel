@@ -45,30 +45,82 @@ public final class Rig: @unchecked Sendable {
     public let server: TestServer?
     public let storage: StorageUnderTest?
     public var fake: FakeLane? { storage?.fake }
-    public var address: URL { server?.url ?? URL(string: "lane://\(storage?.name ?? "box")")! }
+    public var address: URL { server?.url ?? Self.address(of: storage?.name ?? "box") }
+    /// The storage as the devices reach it: behind the account a Mac is signed in to (`AccountLane`), so a flow can sign out or
+    /// switch accounts on any storage.
+    public let account: AccountLane?
+    /// Whether a flow that moves a box may start the real server as where the box comes from (the flow tests can, the signed
+    /// CloudKit run cannot: there the box comes from another store instead).
+    let serverForMoves: Bool
 
-    init(server: TestServer?, storage: StorageUnderTest?) { self.server = server; self.storage = storage }
+    private let lock = NSLock()
+    /// Storage the devices can reach, by the host of its `lane://` address.
+    private var lanes: [String: any SyncLane] = [:]
+    /// Further stores made during the flow, closed with it.
+    private let extra = Stores()
 
-    static func with<T>(_ lane: ContractLane, _ body: (Rig) async throws -> T) async throws -> T {
+    init(server: TestServer?, storage: StorageUnderTest?, serverForMoves: Bool = false) {
+        self.server = server; self.storage = storage; self.serverForMoves = serverForMoves
+        guard let storage else { account = nil; return }
+        let extra = extra
+        let account = AccountLane(storage.lane, second: {
+            let other = try await storage.sibling("acct2")
+            extra.keep(other)
+            return other.lane
+        })
+        self.account = account
+        lanes[Self.host(storage.name)] = account
+    }
+
+    static func address(of name: String) -> URL { URL(string: "lane://\(host(name))")! }
+    static func host(_ name: String) -> String { name.lowercased().replacingOccurrences(of: "_", with: "-") }
+
+    /// Another store the devices can reach at the returned address (the source or target of a move).
+    public func addStorage(_ suffix: String) async throws -> URL {
+        guard let storage else { throw TestServer.Failure.didNotStart("this rig has no storage") }
+        let made = try await storage.sibling(suffix)
+        extra.keep(made)
+        lock.withLock { lanes[Self.host(made.name)] = made.lane }
+        return Self.address(of: made.name)
+    }
+
+    static func with<T>(_ lane: ContractLane, serverForMoves: Bool = false, _ body: (Rig) async throws -> T) async throws -> T {
         switch lane {
         case .server: return try await TestServer.with { try await body(Rig(server: $0, storage: nil)) }
         case .storage(let make):
             let storage = try await make()
-            do {
-                let out = try await body(Rig(server: nil, storage: storage))
+            let rig = Rig(server: nil, storage: storage, serverForMoves: serverForMoves)
+            func closeAll() async throws {
+                for s in rig.extra.all { try? await s.close() }
                 try await storage.close()
+            }
+            do {
+                let out = try await body(rig)
+                try await closeAll()
                 return out
             } catch {
-                try? await storage.close()
+                try? await closeAll()
                 throw error
             }
         }
     }
 
-    /// A device that syncs through this rig's storage when its address is the rig's (`lane://`), and with the server otherwise.
     public func device(_ name: String) throws -> Device {
-        guard let lane = storage?.lane else { return try Device(name) }
-        return try Device(name, laneProvider: { id, _ in id.serverURL?.scheme == "lane" ? lane : nil })
+        guard storage != nil else { return try Device(name) }
+        // A device syncs through whichever of the rig's stores its address names, and with the server otherwise.
+        return try Device(name, laneProvider: { [self] id, _ in
+            guard let url = id.serverURL, url.scheme == "lane", let host = url.host else { return nil }
+            return lock.withLock { lanes[host] }
+        })
+    }
+
+    /// Where a box comes from in a move: the real server when this run can start one, another store otherwise.
+    public func withMoveSource(_ body: (MoveSource) async throws -> Void) async throws {
+        if serverForMoves {
+            try await TestServer.with { server in try await body(MoveSource(address: server.url, server: server)) }
+        } else {
+            try await body(MoveSource(address: try await addStorage("source"), server: nil))
+        }
     }
 
     public func bootstrap(_ d: Device) async throws -> RecoveryPhrase {
@@ -80,7 +132,7 @@ public final class Rig: @unchecked Sendable {
 
     public func recover(_ d: Device, phrase: RecoveryPhrase) async throws {
         if let server { try await d.vault.recover(server: server.url, phrase: phrase, deviceName: d.name, boxID: try server.onlyBoxID()) }
-        else if let storage { try await d.vault.recover(lane: RecordBox(storage: storage.lane, deviceID: nil), address: address, phrase: phrase, deviceName: d.name) }
+        else if let account { try await d.vault.recover(lane: RecordBox(storage: account, deviceID: nil), address: address, phrase: phrase, deviceName: d.name) }
     }
 
     /// Everything the lane holds, as `d` sees it.
@@ -89,7 +141,7 @@ public final class Rig: @unchecked Sendable {
             var out: [LaneRecord] = []
             var cursor: LaneCursor?
             while true {
-                let page = try await storage.lane.fetch(since: cursor, limit: 200)
+                let page = try await (account ?? storage.lane).fetch(since: cursor, limit: 200)
                 out += page.upserts
                 cursor = page.cursor
                 if !page.hasMore { break }
@@ -174,6 +226,26 @@ public final class Rig: @unchecked Sendable {
             throw TestServer.Failure.didNotStart("downgrade failed: \(message.map { String(cString: $0) } ?? "?")")
         }
     }
+}
+
+/// The lane a box starts on before a flow moves it.
+public struct MoveSource: Sendable {
+    public let address: URL
+    public let server: TestServer?
+
+    public func bootstrap(_ d: Device) async throws -> RecoveryPhrase {
+        if let server { return try await d.bootstrap(server) }
+        return try await d.vault.bootstrap(lane: address, deviceName: d.name)
+    }
+
+    public func enroll(_ d: Device, through approver: Device) async throws { try await d.enroll(through: approver, address: address) }
+}
+
+final class Stores: @unchecked Sendable {
+    private let lock = NSLock()
+    private var list: [StorageUnderTest] = []
+    func keep(_ s: StorageUnderTest) { lock.withLock { list.append(s) } }
+    var all: [StorageUnderTest] { lock.withLock { list } }
 }
 
 /// What a flow found wrong. `expect` records and carries on, `require` records and stops the flow.

@@ -165,8 +165,10 @@ public actor Vault {
     }
 
     /// The lane this device syncs through, built for the vault key held right now (nil while locked).
-    private func lane() throws -> any BoxLane {
-        let id = try requireIdentity()
+    private func lane() throws -> any BoxLane { try lane(for: try requireIdentity()) }
+
+    /// The lane at `id.serverURL`: a storage lane the provider knows (wrapped in a `RecordBox`), else the Bisel server.
+    private func lane(for id: LocalIdentity) throws -> any BoxLane {
         guard let server = id.serverURL else { throw VaultError.noServer }
         let held = liveKey()
         if let provider = config.laneProvider, let made = try provider(id, { held }) {
@@ -267,7 +269,13 @@ public actor Vault {
 
     /// A box without a server has no server-side history: every version an edit or delete replaces goes to the local trash
     /// (30 days), so an overwritten password can still be taken back.
-    func keepsLocalHistory() -> Bool { ((try? store.identity()) ?? nil)?.serverURL == nil }
+    func keepsLocalHistory() -> Bool {
+        guard let url = ((try? store.identity()) ?? nil)?.serverURL else { return true }
+        return !Self.isServerAddress(url)   // storage lanes (iCloud) keep no history either
+    }
+
+    /// The Bisel server speaks http(s); every other address names a storage lane (`cloudkit://…`).
+    static func isServerAddress(_ url: URL) -> Bool { url.scheme == "https" || url.scheme == "http" }
 
     /// Zeroes VK. Call on sleep, screen lock, idle timeout.
     public func lock() {
@@ -320,6 +328,9 @@ public actor Vault {
             _ = try await lane().create(NewBox(device: device, recoveryPublicKey: bundle.publicKey,
                                                recoveryEncryptionPublicKey: bundle.encryptionPublicKey, recoveryEnvelope: bundle.envelope,
                                                admin: admin, recoveryAnchor: anchor))
+            identity.recoveryAnchor = anchor
+            identity.recoveryAnchorGeneration = identity.recoveryGeneration
+            try store.setIdentity(identity)
         } catch {
             lock()
             try? store.removeAll()
@@ -625,8 +636,13 @@ public actor Vault {
     // MARK: manifest, roster, confirmation
 
     private func manifestFromIdentity(_ id: LocalIdentity) -> VaultManifest {
-        VaultManifest(roster: id.roster, recoveryPublicKey: id.recoveryPublicKey,
-                      recoveryEncryptionPublicKey: id.recoveryEncryptionPublicKey, recoveryGeneration: id.recoveryGeneration)
+        var m = VaultManifest(roster: id.roster, recoveryPublicKey: id.recoveryPublicKey,
+                              recoveryEncryptionPublicKey: id.recoveryEncryptionPublicKey, recoveryGeneration: id.recoveryGeneration)
+        if id.laneGeneration > 0, let url = id.laneAddress {
+            m.lane = url.absoluteString
+            m.laneGeneration = id.laneGeneration
+        }
+        return m
     }
 
     /// Seals this device's view of the manifest (roster + recovery pins) as the reserved record; `sync()` pushes it.
@@ -668,6 +684,12 @@ public actor Vault {
             id.recoveryPublicKey = manifest.recoveryPublicKey
             id.recoveryEncryptionPublicKey = manifest.recoveryEncryptionPublicKey
             id.recoveryPinned = true
+            changed = true
+        }
+        // Another device moved the box: remember where to, `sync` follows when this device can reach that lane.
+        if let generation = manifest.laneGeneration, generation > id.laneGeneration, let to = manifest.lane.flatMap(URL.init(string:)) {
+            id.laneGeneration = generation
+            id.laneAddress = to
             changed = true
         }
         if changed { try store.setIdentity(id) }
@@ -867,8 +889,34 @@ public actor Vault {
 
     /// `audit: true` reads the whole lane and checks it against what this device knows (a rolled-back snapshot, records the
     /// lane silently lost); slower, so do it now and then (a day) rather than on every sync.
+    ///
+    /// A storage lane that cannot be used right now throws `LaneError.accountUnavailable` (signed out of iCloud: edits stay
+    /// pending), `.accountChanged` (another account: nothing is uploaded) or `.storeMissing` (the box's data there was
+    /// deleted); `laneStatus()` keeps saying so until a sync gets through. When another device moved the box to a lane this
+    /// device can reach, the sync follows it there.
     @discardableResult
     public func sync(audit: Bool = false) async throws -> SyncReport {
+        guard let address = try store.identity()?.serverURL else { return SyncReport() }
+        let key = (try? lane())?.id.rawValue
+        var report: SyncReport
+        do {
+            report = try await syncOnce(audit: audit)
+        } catch let error as LaneError {
+            if let key { try? setLaneCondition(key, LaneCondition(error)) }
+            throw error
+        }
+        if let key { try? setLaneCondition(key, .active) }
+        if let box = try? lane() as? RecordBox { await refreshRecoveryAnchor(box) }
+        if let id = try store.identity(), let to = id.laneAddress, to != address, liveKey() != nil, (try? lane(for: id.at(to))) as? RecordBox != nil {
+            let followed = try await followLaneMove(to: to)
+            report.pulled += followed.pulled
+            report.pushed += followed.pushed
+            report.repaired += followed.repaired
+        }
+        return report
+    }
+
+    private func syncOnce(audit: Bool) async throws -> SyncReport {
         guard !rotationInProgress else { throw RotationError.inProgress }
         if let at = try store.identity()?.activatesAt, Date(timeIntervalSince1970: TimeInterval(at)) > Date() {
             throw IntegrityError.pendingActivation(until: Date(timeIntervalSince1970: TimeInterval(at)))
@@ -1080,6 +1128,181 @@ public actor Vault {
         setKey(newRaw)
         return RotationReport(epoch: epoch, revokedDeviceID: revokeID, revokedDeviceName: exposure.name,
                               revokedDeviceLastSeen: exposure.lastSeen, exposed: exposure.items)
+    }
+
+    // MARK: lanes: state, moving a box, detaching
+
+    /// Where this box syncs and whether that works right now. Read it after a failed sync and at launch; the app shows:
+    /// `.accountUnavailable` "iCloud is signed out (edits stay on this Mac)", `.accountChanged` "another Apple Account is signed
+    /// in: move the box to it or stop syncing", `.storeMissing` "the box's iCloud data was deleted: upload this Mac's copy",
+    /// `.moved` "the box moved to a lane this Mac cannot reach". See BiselCore/LANES.md.
+    public func laneStatus() throws -> LaneStatus {
+        guard let id = try store.identity(), let address = id.serverURL else { return .thisDeviceOnly }
+        if let to = id.laneAddress, to != address, (try? lane(for: id.at(to))) as? RecordBox == nil { return .moved(to: to) }
+        guard let key = (try? lane())?.id.rawValue else { return .active }
+        switch LaneCondition(rawValue: try store.laneState(key).state) {
+        case .accountUnavailable(let reason): return .accountUnavailable(reason)
+        case .accountChanged: return .accountChanged
+        case .storeMissing: return .storeMissing
+        case .active: return .active
+        }
+    }
+
+    private func setLaneCondition(_ key: String, _ condition: LaneCondition) throws {
+        var state = try store.laneState(key)
+        guard state.state != condition.rawValue else { return }
+        state.state = condition.rawValue
+        try store.setLaneState(key, state)
+    }
+
+    /// Puts this box on the storage lane at `address` and makes it the lane this device syncs through, without losing anything:
+    /// - **Move** (the box is on the server, or on this Mac only): the current lane is synced first, the box is created on the
+    ///   new storage at its current epoch with an envelope for every device that keeps it (no re-enrollment), every record is
+    ///   uploaded and read back, and only then does this device switch. The old lane's data is left alone (detached, not
+    ///   erased). The sealed manifest tells the other devices, which follow on their next unlocked sync.
+    /// - **Same address** after `.accountChanged` (the box goes to the account signed in now) or `.storeMissing` (the deleted
+    ///   iCloud data is put back): the replica is uploaded again. Other devices see the lane reset (`acknowledgeServerReset`).
+    ///
+    /// The box's chain of admin keys has to be vouched for by the recovery key. A device that verified that before (a box that
+    /// lived on a storage lane) does not need the phrase; a box coming from the server or this Mac only does
+    /// (`MigrationError.phraseRequired`). Throws `.pendingChanges` if the old lane could not take this device's edits first, and
+    /// `.incomplete` (nothing switched) if the new lane does not hold every record afterwards.
+    @discardableResult
+    public func enableLane(_ address: URL, phrase: RecoveryPhrase? = nil) async throws -> LaneMove {
+        guard !rotationInProgress else { throw RotationError.inProgress }
+        let k = try requireKey()
+        var id = try requireIdentity()
+        guard id.envelope != nil, !id.keyUnconfirmed, let recoveryPub = id.recoveryPublicKey,
+              let recoveryEncPub = id.recoveryEncryptionPublicKey, !recoveryEncPub.isEmpty else { throw VaultError.notConfigured }
+        let previous = id.serverURL
+        let moving = previous != address
+        // 1. The lane the box is on now takes this device's edits first (a lane that is gone or on another account cannot).
+        if moving, previous != nil {
+            _ = try await sync()
+            let pending = try store.pendingCount()
+            guard pending == 0 else { throw MigrationError.pendingChanges(pending) }
+            id = try requireIdentity()
+        }
+        guard let target = try lane(for: id.at(address)) as? RecordBox else { throw LaneError.unsupported }
+        let key = target.id.rawValue
+        let admin = try adminSigner(k)
+
+        // 2. The admin-key chain to carry over, and the recovery anchor over its first key.
+        let carried = previous.flatMap { try? lane(for: id.at($0)) }.map { witnessOf($0.id.rawValue) } ?? nil
+        let (chain, anchor) = try anchoredChain(admin: admin, carried: carried?.aks ?? [], identity: id, phrase: phrase)
+
+        // 3. Who keeps the box: the approved devices the lane did not revoke, this device first.
+        let revoked = Set((carried?.members ?? []).filter(\.isRevoked).map(\.id))
+            .union(((try? await (lane(for: id)).members()) ?? []).filter(\.isRevoked).map(\.id))
+        let keeping = id.roster.filter { !revoked.contains($0.deviceID) }
+        guard let me = keeping.first(where: { $0.deviceID == id.deviceID }) else { throw SyncError.notAuthorized }
+        var raw = try k.rawBytes()
+        defer { raw.zeroize() }
+        var devices: [WireDevice] = []
+        for entry in [me] + keeping.filter({ $0.deviceID != id.deviceID }) {
+            devices.append(WireDevice(id: entry.deviceID, name: entry.name, kind: entry.kind, sigPubkey: entry.sigPubkey, encPubkey: entry.encPubkey,
+                                      envelope: try DeviceEnvelope.seal(vaultKey: raw, toEncryptionKey: entry.encPubkey)))
+        }
+        let recoveryEnvelope = try RecoveryKeys.seal(vaultKey: raw, toEncryptionKey: recoveryEncPub, signingKey: recoveryPub, epoch: id.epoch)
+        let recovery = ControlRecords.Recovery(seq: 1, epoch: id.epoch, pubkey: recoveryPub.base64URLEncoded(), encPubkey: recoveryEncPub.base64URLEncoded(),
+                                               envelope: recoveryEnvelope.base64URLEncoded(), anchor: anchor.base64URLEncoded())
+
+        // 4. Put the box on the storage, then meet it as new storage pinned to the account it belongs to. (In that order: storage
+        // that refuses the box, holding another one, must not cost this device what it knew about its lane.)
+        let owner = try await target.identity().rawValue
+        let created = try await target.adopt(ExistingBox(epoch: id.epoch, chain: chain, admin: admin, devices: devices, recovery: recovery))
+        try store.forgetLane(key)
+        var state = LaneState()
+        state.identity = owner
+        try store.setLaneState(key, state)
+
+        // 5. Upload the replica and read the lane back in full: every record this device holds must be there.
+        let engine = LaneEngine(store: store, lane: target, vaultKey: { k })
+        let first = try await engine.run()
+        let check = try await engine.run(audit: true)
+        let missing = try store.recordsBehind(key).count + store.pendingCount()
+        guard missing == 0 else { throw MigrationError.incomplete(missing: missing) }
+
+        // 6. Tell the other devices through the sealed manifest, on the lane they still read, then switch. If the old lane does
+        // not take it, nothing is switched; the next sync finishes the move (the box agreed on the new lane already).
+        id = try requireIdentity()
+        id.recoveryAnchor = anchor
+        id.recoveryAnchorGeneration = id.recoveryGeneration
+        if moving {
+            id.laneAddress = address
+            id.laneGeneration += 1
+        }
+        try store.setIdentity(id)
+        if moving {
+            try writeManifest()
+            if previous != nil { _ = try await syncOnce(audit: false) }
+        }
+        id = try requireIdentity()
+        id.serverURL = address
+        try store.setIdentity(id)
+        if moving { _ = try await syncOnce(audit: false) }
+        return LaneMove(created: created, uploaded: first.pushed + first.repaired + check.repaired)
+    }
+
+    /// Stops syncing: the box stays on this Mac and becomes "this device only"; nothing is deleted on the lane. `enableLane`
+    /// (or `connectServer`) puts it on a lane again.
+    public func detachLane() throws {
+        var id = try requireIdentity()
+        id.serverURL = nil
+        id.laneAddress = nil
+        try store.setIdentity(id)
+    }
+
+    /// Follows a move another device made: the box must already be on the new lane under the vault key this device holds, with
+    /// an envelope for it (the mover wrote one for every approved device). Edits this device made on the old lane in the
+    /// meantime go up with the replica (higher revisions win; a different payload at the same revision lands in the trash).
+    private func followLaneMove(to address: URL) async throws -> SyncReport {
+        let k = try requireKey()
+        let id = try requireIdentity()
+        guard let target = try lane(for: id.at(address)) as? RecordBox else { throw LaneError.unsupported }
+        let mine = try k.withKey { try VaultAdmin.signingKey(vaultKey: $0).publicKey.rawRepresentation }
+        guard try await target.headAdminKey() == mine else { throw MigrationError.notInvited }
+        try store.forgetLane(target.id.rawValue)
+        let report = try await LaneEngine(store: store, lane: target, vaultKey: { k }).run()
+        var updated = try requireIdentity()
+        updated.serverURL = address
+        try store.setIdentity(updated)
+        if let held = liveKey() { try ingestManifest(held, lane: target.id.rawValue) }
+        return report
+    }
+
+    /// The chain to put on new storage and RK-sig's anchor over its first key. A chain this device verified on a storage lane,
+    /// with an anchor it verified for the current recovery generation, carries over as it is. Otherwise the 24 words sign a
+    /// chain that starts at the current admin key.
+    private func anchoredChain(admin: AdminSigner, carried: [ControlRecords.AKLink], identity id: LocalIdentity,
+                               phrase: RecoveryPhrase?) throws -> (chain: [ControlRecords.AKLink], anchor: Data) {
+        let continues = carried.last?.ak == admin.publicKey && ControlRecords.chainValid(carried, epoch: id.epoch)
+        if continues, let root = carried.first?.ak, let anchor = id.recoveryAnchor, id.recoveryAnchorGeneration == id.recoveryGeneration,
+           let pub = id.recoveryPublicKey.flatMap({ try? Curve25519.Signing.PublicKey(rawRepresentation: $0) }),
+           pub.isValidSignature(anchor, for: ControlRecords.anchorMessage(root: root)) {
+            return (carried, anchor)
+        }
+        guard let phrase else { throw MigrationError.phraseRequired }
+        let keys = try RecoveryKeys(phrase: phrase)
+        guard keys.publicKey == id.recoveryPublicKey else { throw MigrationError.wrongPhrase }
+        let chain = continues ? carried : [ControlRecords.AKLink(epoch: id.epoch, ak: admin.publicKey, sig: nil)]
+        return (chain, try keys.signingKey.signature(for: ControlRecords.anchorMessage(root: chain[0].ak)))
+    }
+
+    /// Keeps the recovery anchor of a storage lane box, verified against the pinned recovery key, so the box can be put on storage
+    /// again without the phrase. One read, only when the anchor is missing or the recovery phrase changed since.
+    private func refreshRecoveryAnchor(_ box: RecordBox) async {
+        guard var id = try? store.identity(), id.recoveryAnchor == nil || id.recoveryAnchorGeneration != id.recoveryGeneration,
+              let pub = id.recoveryPublicKey.flatMap({ try? Curve25519.Signing.PublicKey(rawRepresentation: $0) }),
+              let found = try? await box.recoveryAnchor(), witnessOf(box.id.rawValue)?.aks.first?.ak == found.root,
+              pub.isValidSignature(found.anchor, for: ControlRecords.anchorMessage(root: found.root)) else { return }
+        id.recoveryAnchor = found.anchor
+        id.recoveryAnchorGeneration = id.recoveryGeneration
+        try? store.setIdentity(id)
+    }
+
+    private func witnessOf(_ key: String) -> LaneWitness? {
+        ((try? store.laneState(key))?.witness).flatMap { try? JSONDecoder().decode(LaneWitness.self, from: $0) }
     }
 
     // MARK: trash, history, events, device state
@@ -1294,4 +1517,89 @@ public actor Vault {
         }
         return skipped
     }
+}
+
+// MARK: - lane state, moves
+
+/// Where a box syncs and whether that works right now (`Vault.laneStatus()`).
+public enum LaneStatus: Sendable, Equatable {
+    /// No lane: the box lives on this Mac only.
+    case thisDeviceOnly
+    case active
+    /// The storage's account cannot be used (iCloud signed out or restricted). Nothing is lost; edits stay pending and the next
+    /// sync resumes on its own once the account is back.
+    case accountUnavailable(String)
+    /// Another account is signed in than the one the box was put on. Nothing is uploaded to it. The person chooses:
+    /// `enableLane` (the same address) moves the box to the account signed in now, `detachLane` keeps it on this Mac only.
+    case accountChanged
+    /// The box's data on the storage is gone (deleted in iCloud settings). `enableLane` (the same address) uploads this Mac's copy.
+    case storeMissing
+    /// Another device moved the box to a lane this device cannot reach (it has no iCloud, or another account).
+    case moved(to: URL)
+}
+
+/// What `Vault.enableLane` did.
+public struct LaneMove: Sendable, Equatable {
+    /// False when the storage already held this box (another device, or an earlier attempt, put it there).
+    public var created: Bool
+    /// Records uploaded from this device's replica.
+    public var uploaded: Int
+}
+
+public enum MigrationError: Error, Sendable, Equatable, LocalizedError {
+    /// The box has never been on a storage lane (or its recovery phrase changed since): the 24 words have to vouch for it.
+    case phraseRequired
+    /// The words are not this box's recovery phrase.
+    case wrongPhrase
+    /// The lane the box is on now did not take these edits, so moving would leave them behind. Sync, then try again.
+    case pendingChanges(Int)
+    /// After uploading, the new lane still lacks records this device holds. Nothing was switched.
+    case incomplete(missing: Int)
+    /// The lane the box was moved to holds no envelope for this device under the key it holds.
+    case notInvited
+
+    public var errorDescription: String? {
+        switch self {
+        case .phraseRequired: return "Enter your 24-word recovery phrase to move the box."
+        case .wrongPhrase: return "Those words are not this box's recovery phrase."
+        case .pendingChanges(let n): return "\(n) change(s) could not be synced yet. Sync, then move the box again."
+        case .incomplete(let n): return "\(n) record(s) did not reach the new place. Nothing was switched; try again."
+        case .notInvited: return "The box moved, but not with this device. Add this device again from one that has the box."
+        }
+    }
+}
+
+/// `lane_state.state` of a lane: what its last sync ran into.
+enum LaneCondition: Equatable {
+    case active, accountUnavailable(String), accountChanged, storeMissing
+
+    init(_ error: LaneError) {
+        switch error {
+        case .accountUnavailable(let reason): self = .accountUnavailable(reason)
+        case .accountChanged: self = .accountChanged
+        case .storeMissing: self = .storeMissing
+        default: self = .active
+        }
+    }
+
+    init(rawValue: String) {
+        if rawValue == "account-changed" { self = .accountChanged }
+        else if rawValue == "store-missing" { self = .storeMissing }
+        else if rawValue.hasPrefix("account-unavailable:") { self = .accountUnavailable(String(rawValue.dropFirst("account-unavailable:".count))) }
+        else { self = .active }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .active: return "active"
+        case .accountUnavailable(let reason): return "account-unavailable:\(reason)"
+        case .accountChanged: return "account-changed"
+        case .storeMissing: return "store-missing"
+        }
+    }
+}
+
+private extension LocalIdentity {
+    /// The same identity syncing through `address`.
+    func at(_ address: URL) -> LocalIdentity { var copy = self; copy.serverURL = address; return copy }
 }

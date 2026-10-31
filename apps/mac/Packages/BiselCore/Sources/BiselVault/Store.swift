@@ -90,6 +90,15 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
     /// The box on the server this device belongs to (`/v1/bootstrap` returns it). nil for identities from before accounts
     /// existed: the server resolves a recovery request without a box to its pre-accounts box.
     public var boxID: String?
+    /// RK-sig's signature over the first admin key of the box's chain on a storage lane (`ControlRecords.Recovery.anchor`), as
+    /// last verified against the pinned recovery key, and the recovery generation it was verified for. With it the box can be
+    /// put on storage again (a deleted iCloud zone, another account) without asking for the 24 words.
+    public var recoveryAnchor: Data?
+    public var recoveryAnchorGeneration: Int = 0
+    /// The lane the box's devices agreed to sync through once it was moved (the sealed manifest carries it), and the generation
+    /// of that move (each move bumps it). A `laneAddress` other than `serverURL` is a move this device has not followed yet.
+    public var laneAddress: URL?
+    public var laneGeneration: Int = 0
 
     public init(deviceID: String, deviceName: String, serverURL: URL?, keyStore: String, envelope: Data? = nil,
                 recoveryPublicKey: Data? = nil, recoveryEnvelope: Data? = nil,
@@ -123,6 +132,10 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
         keyUnconfirmed = try c.decodeIfPresent(Bool.self, forKey: .keyUnconfirmed) ?? false
         activatesAt = try c.decodeIfPresent(Int.self, forKey: .activatesAt)
         boxID = try c.decodeIfPresent(String.self, forKey: .boxID)
+        recoveryAnchor = try c.decodeIfPresent(Data.self, forKey: .recoveryAnchor)
+        recoveryAnchorGeneration = try c.decodeIfPresent(Int.self, forKey: .recoveryAnchorGeneration) ?? 0
+        laneGeneration = try c.decodeIfPresent(Int.self, forKey: .laneGeneration) ?? 0
+        laneAddress = try c.decodeIfPresent(URL.self, forKey: .laneAddress)
     }
 }
 
@@ -319,6 +332,15 @@ public final class LocalStore: Sendable {
         var state = try laneState(lane)
         state.cursor = nil; state.knownHead = 0; state.eventCursor = 0; state.witness = keepingWitness
         try setLaneState(lane, state)
+    }
+
+    /// Forgets everything about `lane` (position, pinned identity, witness, acknowledgements): the next sync meets it as new
+    /// storage. Used when a box is put on a lane afresh (moved there, re-seeded, another account).
+    public func forgetLane(_ lane: String) throws {
+        try pool.write { db in
+            try db.execute(sql: "DELETE FROM lane_state WHERE lane = ?", arguments: [lane])
+            try db.execute(sql: "DELETE FROM lane_ack WHERE lane = ?", arguments: [lane])
+        }
     }
 
     /// Forgets that the lane holds these records (it lost them): they count as missing there and are uploaded again.

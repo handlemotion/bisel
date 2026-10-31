@@ -172,6 +172,8 @@ public enum LaneError: Error, Sendable, Equatable {
     case accountChanged
     /// The storage the lane names is gone (CloudKit: the zone was deleted). The replica can re-seed it.
     case storeMissing
+    /// The storage already holds a different box: nothing is written over it.
+    case occupied
 }
 
 public protocol SyncLane: Sendable {
@@ -204,4 +206,16 @@ public extension SyncLane {
     func erase(confirmed: LaneEraseToken) async throws { throw LaneError.unsupported }
     func prepare() async throws {}
     func remove(_ refs: [LaneRecordRef]) async throws { throw LaneError.unsupported }
+}
+
+extension LaneError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .unsupported: return "This place to sync cannot do that."
+        case .accountUnavailable(let reason): return "iCloud is not available (\(reason)). Your box keeps working on this Mac; changes sync when iCloud is back."
+        case .accountChanged: return "A different Apple Account is signed in to iCloud. Nothing was uploaded to it."
+        case .storeMissing: return "Your box's data in iCloud was deleted. This Mac still has its copy."
+        case .occupied: return "That iCloud storage already holds a different box."
+        }
+    }
 }

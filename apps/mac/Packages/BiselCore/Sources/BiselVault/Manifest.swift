@@ -40,6 +40,11 @@ public struct VaultManifest: Codable, Sendable, Equatable {
     public var recoveryEncryptionPublicKey: Data?
     /// Bumped by every new recovery phrase; the highest generation wins.
     public var recoveryGeneration = 1
+    /// Where the box syncs (a storage lane's address) once a device moved it there, and the generation of that move; the
+    /// highest generation wins. Devices still on the old lane follow (`Vault.sync`). nil: never moved. Optional, so manifests
+    /// sealed by builds that predate it still decode (a manifest that does not decode reads as the wrong key).
+    public var lane: String?
+    public var laneGeneration: Int?
 
     public init(roster: [RosterEntry] = [], recoveryPublicKey: Data? = nil, recoveryEncryptionPublicKey: Data? = nil, recoveryGeneration: Int = 1) {
         self.roster = roster; self.recoveryPublicKey = recoveryPublicKey
@@ -54,6 +59,10 @@ public struct VaultManifest: Codable, Sendable, Equatable {
             out.recoveryGeneration = other.recoveryGeneration
             out.recoveryPublicKey = other.recoveryPublicKey
             out.recoveryEncryptionPublicKey = other.recoveryEncryptionPublicKey
+        }
+        if (other.laneGeneration ?? 0) > (out.laneGeneration ?? 0) {
+            out.laneGeneration = other.laneGeneration
+            out.lane = other.lane
         }
         return out
     }
