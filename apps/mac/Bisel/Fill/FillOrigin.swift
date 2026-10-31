@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import BiselCore
 
 /// Does the page the cursor is in belong to the login being typed? Without this check, choosing "Bank" while a phishing page is
@@ -10,6 +10,18 @@ enum FillOrigin {
         "com.microsoft.edgemac", "com.brave.Browser", "company.thebrowser.Browser", "com.vivaldi.Vivaldi", "com.operasoftware.Opera",
         "org.mozilla.firefox", "app.zen-browser.zen", "com.kagi.kagimacOS",
     ]
+
+    /// Every app that can open an https link: a browser missing from the list above (a beta channel, a new one) still counts.
+    private nonisolated static let httpsHandlers: Set<String> = {
+        guard let probe = URL(string: "https://example.com") else { return [] }
+        return Set(NSWorkspace.shared.urlsForApplications(toOpen: probe).compactMap { Bundle(url: $0)?.bundleIdentifier })
+    }()
+
+    /// A browser refuses a fill when its page address can't be read; a native app has none to read.
+    nonisolated static func isBrowser(_ bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return browserBundleIDs.contains(bundleID) || httpsHandlers.contains(bundleID)
+    }
 
     nonisolated static func normalized(_ host: String) -> String { SiteMatch.normalized(host) }
 
