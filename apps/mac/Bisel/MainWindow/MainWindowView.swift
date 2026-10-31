@@ -21,7 +21,7 @@ struct MainWindowView: View {
                 ContentUnavailableView("Bisel can't start", systemImage: "exclamationmark.triangle", description: Text(e))
             } else if usesFixture {
                 fixtureNotice
-            } else if service.phase == .needsSetup {
+            } else if inSetup {
                 SetupView(service: service).transition(Self.swap)
             } else if let phrase = service.pendingPhrase {
                 PhraseGateView(service: service, phrase: phrase) { showImport = true; service.confirmPhraseStored() }
@@ -67,8 +67,7 @@ struct MainWindowView: View {
     /// fixture notices use the normal window.
     private var cardSize: NSSize? {
         guard service.startupError == nil, !usesFixture else { return nil }
-        if service.pendingPhrase != nil { return OnboardingLayout.island }
-        if showImport { return OnboardingLayout.island }
+        if service.pendingPhrase != nil || showImport || inSetup { return OnboardingLayout.island }
         switch service.phase {
         case .needsSetup: return OnboardingLayout.island
         case .locked: return OnboardingLayout.island
@@ -105,6 +104,16 @@ struct MainWindowView: View {
         }
     }
 
+    /// First run, and a pairing until the codes are compared: the box key arrives (and the vault counts as set up) before
+    /// the person has checked the other device's code, so that step must not give way to the settings.
+    private var inSetup: Bool {
+        if service.phase == .needsSetup { return true }
+        switch service.setupState {
+        case .pairing, .compareCode, .working(.finishingPairing): return true
+        default: return false
+        }
+    }
+
     /// The unlocked box: the settings card.
     private var isSettings: Bool { cardSize == SettingsLayout.window }
 
@@ -114,7 +123,7 @@ struct MainWindowView: View {
     /// Which screen is up; changing it fades the old one out.
     private var screenKey: String {
         if service.startupError != nil { return "error" }
-        if service.phase == .needsSetup { return "setup" }
+        if inSetup { return "setup" }
         if service.pendingPhrase != nil { return "phrase" }
         if showImport { return "import" }
         return service.phase == .locked ? "locked" : "unlocked"

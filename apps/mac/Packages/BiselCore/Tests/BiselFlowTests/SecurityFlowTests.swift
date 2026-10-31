@@ -470,6 +470,36 @@ struct SecurityFlowTests {
         #expect(!fits("1.1", "192.168.1.1"))
     }
 
+    // MARK: Local surface audit (2026-10-31), names on screen
+
+    @Test("a title with a right-to-left override never reaches the display string intact, and the stored item keeps every character")
+    func hiddenDirectionCharactersNeverReachTheScreen() async throws {
+        let hidden: Set<Unicode.Scalar> = ["\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}", "\u{2066}", "\u{2067}",
+                                           "\u{2068}", "\u{2069}", "\u{200E}", "\u{200F}", "\u{061C}", "\u{FEFF}", "\u{0007}"]
+        // "Bank Login" followed by RLO + "moc.live": on screen that reads "…evil.com", one site wearing another's name.
+        let title = "Bank Login \u{202E}moc.live"
+        let username = "\u{2067}admin\u{2069}@\u{200F}bank.com\u{0007}"
+        let otpauth = "otpauth://totp/%E2%80%AEknab%3Ame?secret=JBSWY3DPEHPK3PXP&issuer=%E2%81%A7Bank%E2%81%A9"
+
+        let a = try Device("names")
+        _ = try await a.vault.bootstrapLocal(deviceName: "names")
+        let saved = try await a.vault.save(Item(title: title, urls: ["https://bank.com"], username: username, password: "p"))
+        let relaunched = try a.relaunched()
+        try await relaunched.unlock()
+        let stored = try #require(try await relaunched.items().items.first { $0.id == saved.id })
+        #expect(stored.title == title && stored.username == username, "display cleaning never changes what is stored")
+
+        let parsed = try TOTPSetup.parse(otpauth)
+        let shown = [stored.title, stored.username ?? "", parsed.issuer ?? "", parsed.account ?? ""].map(DisplayText.clean)
+        for text in shown {
+            #expect(!text.unicodeScalars.contains { hidden.contains($0) || $0.properties.generalCategory == .format }, "\(text.debugDescription)")
+        }
+        #expect(shown[0] == "Bank Login moc.live", "the letters stay, in their stored order")
+        #expect(shown[1] == "admin@bank.com")
+        #expect(shown[2] == "Bank" && shown[3] == "me")
+        #expect(DisplayText.clean("👨‍👩‍👧 Family") == "👨‍👩‍👧 Family", "the zero-width joiner of an emoji sequence is not a direction control")
+    }
+
     // MARK: helpers
 
     private func fingerprintBits(_ fingerprint: String) -> Int { fingerprint.filter { $0 != "-" }.count * 4 }

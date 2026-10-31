@@ -48,20 +48,27 @@ behind (in iCloud either). The 24 words in `.showPhrase` are the only secret a s
    | `.temporarilyUnavailable` | account being set up, Apple's service busy | try again in a moment |
    | `.notInThisBuild` | BiselDev: no iCloud at all | nothing: the box is made on this Mac only, as BiselDev always did |
 
-2. iCloud already holds a box for this Apple Account: `SetupError.iCloudHasBox(addresses)`, nothing made. Offer **add this Mac**
-   (pairing) or **restore with the 24 words**. Only if the person explicitly wants a separate second box: `createAnyway`
-   (`VaultService.createBoxAnyway`).
+2. iCloud already holds a box for this Apple Account: `SetupError.iCloudHasBox(addresses)`, nothing made. Offer only **add this
+   Mac** (pairing, section 2) and **restore with the 24 words** (section 3). One box per Apple Account (v1 decision,
+   2026-10-31): the UI never offers a second one. `BoxSetup.createAnyway` stays in the core for tests and debug only; the app
+   has no path to it.
 3. Otherwise the box is made in iCloud → `.showPhrase`. **Continue** → `phraseStored()` → `.done` with the D4 reminder due.
    **Back** → `discardNewBox()`: the box is erased on this Mac *and* in iCloud, so the next Create is not mistaken for a second box.
 
-"Keep it on this Mac only" (iCloud unavailable, or the person does not want iCloud): `createOnThisMacOnly(deviceName:)`
-(`VaultService.createBoxOnThisMacOnly`). Never chosen for the person. `putInICloud(words:)` moves it there later.
+**Keep it on this Mac only** (v1 decision, 2026-10-31): iCloud stays the default, and this is the person's explicit
+alternative when Create fails with a reason they can't fix right now: `.restricted`, `.notSignedIn`, `.turnedOffForApp` or
+`.notInThisBuild` (`.offline`, `.quotaFull` and `.temporarilyUnavailable` only say "try again"). The welcome screen keeps the
+reason on the error line, adds a secondary **Keep it on this Mac only** button next to Create, and shows one warning line before
+it is pressed: this Mac will hold the only copy, export a backup, the box can move to iCloud later. The button calls
+`createOnThisMacOnly(deviceName:)` (`VaultService.createBoxOnThisMacOnly`). Never chosen for the person.
+`putInICloud(words:)` moves it there later.
 
 ## 2. Add this Mac to the box in iCloud (D6, same Apple Account only, D2)
 
 1. `startPairing(deviceName:)` (`VaultService.startICloudEnrollment`) → `.pairing(offer)`. Errors: `.noBoxInICloud` (this Apple
    Account holds none: another Apple Account's boxes are never visible), `.chooseBox(addresses)` (several: pass `box:`),
-   `.iCloud(reason)`.
+   `.iCloud(reason)`. With one box per Apple Account there is no chooser: on `.chooseBox` (an account that still holds several)
+   the app joins the first.
 2. On the other device: the request appears in `pendingEnrollments()`; the person types the 8 words or scans the QR, compares the
    fingerprint and approves (LANES.md, "Enrollment over iCloud").
 3. Here: `checkPairing()` (`finishICloudEnrollment`) every few seconds: `false` = still waiting; `true` = approved, unlocked
@@ -88,7 +95,7 @@ The file is checked against the words first (BACKUP.md errors, as `SetupError.ba
 | holds the box (the words open it) | the iCloud copy is restored, as the live one, and the file merged into it: nothing overwritten, conflicts become "… (conflict)" items. `done.restoredItems` = what the file added. No second box |
 | holds a box the words do not open | `SetupError.iCloudHasOtherBox`, nothing written |
 | holds no box | the file is restored and the box put in iCloud. If iCloud refuses that last step (full, offline), the box stays restored on this Mac: `done.place == .thisMacOnly`, `done.iCloudProblem` says why, `putInICloud(words:)` later |
-| unavailable | `SetupError.iCloud(reason)`, nothing written. `restoreOnThisMacOnly` is the person's explicit alternative. BiselDev restores on this Mac |
+| unavailable | `SetupError.iCloud(reason)`, nothing written. `restoreOnThisMacOnly` is the person's explicit alternative, offered like "Keep it on this Mac only" (same reasons, same warning line) once the backup screen exists. BiselDev restores on this Mac |
 
 ## 4. iCloud account changes (a box on this Mac)
 
@@ -108,18 +115,21 @@ The file is checked against the words first (BACKUP.md errors, as `SetupError.ba
 
 ## Screens to design (`// UI:` notes in the code)
 
-Wired in the core and in `VaultService`, with no screen yet:
+Wired in the core and in `VaultService`; where each screen stands:
 
-1. **"A box already exists in iCloud"** (`SetupView.create`): when `welcome.iCloudHasBox` or Create throws `.iCloudHasBox`.
-   Choices: add this Mac (pairing), restore with the 24 words, or, deliberately, a separate new box (`createAnyway`). Until it
-   exists, the error line shows the message and "I already have one" leads to the 24 words.
-2. **Pairing** (`SetupView`, at "I already have one"): the 8 words, the QR code and the fingerprint while `.pairing`; the code
-   comparison in `.compareCode`; the `approvalUnproven` alarm; "choose a box" for `.chooseBox`.
+1. **"A box already exists in iCloud"** (`SetupView.create`): built for Create throwing `.iCloudHasBox`: the message, then only
+   **Add this Mac** and **Restore with the 24 words**. Still open: leading with these on the welcome screen itself when
+   `welcome.iCloudHasBox` is already known.
+2. **Pairing** (`SetupView`, the `.pair` step, from "Add this Mac"): a first cut from the onboarding components: the 8 words and
+   the fingerprint while `.pairing` (polled every 3 s), "Unlock with Touch ID" after a cancelled Touch ID, this Mac's code and a
+   field for the other device's in `.compareCode`, and `approvalUnproven` / `pairingExpired` / `codeMismatch` end it with their
+   message. Still to design: the QR code, and the approving device's side (`pendingEnrollments`, `approve`), which has no screen
+   yet. No "choose a box": see section 2.
 3. **Restore a `.bisel-backup` file** (`SetupView`, at "I already have one"): a file picker for the backup next to the 24 words.
    ("Upload file" today reads the saved *phrase* text file, not a backup.)
-4. **iCloud unavailable** (`SetupView.create`): today only the error line says why. A "keep it on this Mac only" choice
-   (`createBoxOnThisMacOnly`, `restoreOnThisMacOnly`) needs a control. The welcome screen can also show `welcome.iCloud` before
-   the person presses Create.
+4. **iCloud unavailable** (`SetupView.create`): built for Create (section 1, "Keep it on this Mac only"). Restore's
+   `restoreOnThisMacOnly` waits for the backup screen (3). The welcome screen could also show `welcome.iCloud` before the person
+   presses Create.
 5. **Account changes** (`.attention`): the screens of section 4; these belong with the lane states of LANES.md and Settings.
 
 ## Open questions
@@ -127,6 +137,6 @@ Wired in the core and in `VaultService`, with no screen yet:
 - How macOS reports "iCloud off for Bisel only" has to be checked on a signed build: `ICloudHome` reads it as `.turnedOffForApp`
   from `CKError.missingEntitlement` / `.badContainer` / `.permissionFailure` on the request that follows a signed-in status, and
   as `.notSignedIn` when CloudKit reports no account (or `.notAuthenticated`).
-- `createAnyway` allows a second box in one Apple Account. Should it exist at all, and how should pairing choose between two
-  boxes (`.chooseBox`)?
-- iCloud unavailable at first run: is "keep it on this Mac only" offered, or is iCloud required? The core supports both.
+
+Decided (2026-10-31): one box per Apple Account, so the UI never offers `createAnyway` and pairing never asks which box; iCloud
+unavailable at first run offers "keep it on this Mac only" for the reasons above, iCloud stays the default.
