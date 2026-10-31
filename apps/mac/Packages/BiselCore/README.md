@@ -68,7 +68,8 @@ keep their signatures; this is what is new or behaves differently.
 - **Behaviour changes in the facade**
   - `revoke(deviceID:)` now **rotates the vault key** atomically with the revocation (SPEC §4). It needs an unlocked vault
     (it unlocks first, one Touch ID) plus the usual fresh biometric check, and may throw `RotationError`
-    (`pendingChanges`, `undecryptableItems`, `cannotRevokeThisDevice`, `recoveryNeedsUpgrade`, `tooManyConflicts`).
+    (`pendingChanges`, `undecryptableItems` (server lane only: a storage lane leaves out records no key opens), `cannotRevokeThisDevice`,
+    `recoveryNeedsUpgrade`, `tooManyConflicts`).
   - `sync()` can now **lock the vault**: when another device rotated the key, the report has `rotationAdopted == true`,
     `isUnlocked` becomes false, and the next `unlock()` brings up the new key. Show "unlock to continue" instead of an error.
   - `unlock()` opens up to two envelopes under one prompt (only after a rotation while local edits were pending).

@@ -1227,7 +1227,7 @@ public actor Vault {
         var newRaw = BiselRandom.bytes(32)
         defer { newRaw.zeroize() }
         let newKey = SymmetricKey(data: newRaw)
-        let live = try store.liveRecords()
+        var live = try store.liveRecords()
         var wrapped: [Data] = []
         var undecryptable: [String] = []
         for rec in live {
@@ -1237,6 +1237,9 @@ public actor Vault {
                 })
             } catch { undecryptable.append(rec.id) }
         }
+        // On a lane that is only storage anyone with the account can write a record no key of the box opens, and refusing would let
+        // one such record stop every revoke. Rotating loses nothing of it: it stays at the old key, as unreadable as it was.
+        if !box.capabilities.headIsCursor { live.removeAll { undecryptable.contains($0.id) }; undecryptable = [] }
         guard undecryptable.isEmpty else { throw RotationError.undecryptableItems(undecryptable) }
 
         var envelopes: [(id: String, envelope: Data)] = []
