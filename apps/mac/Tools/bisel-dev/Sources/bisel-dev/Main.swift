@@ -343,9 +343,10 @@ struct Backup: AsyncParsableCommand {
     struct Export: AsyncParsableCommand {
         @OptionGroup var global: Global
         @Argument var file: String
+        @Option(help: "The 24 words, needed once for a box made before backups v3; '-' reads stdin.") var phrase: String?
         func run() async throws {
-            try await global.vault().exportBackup(to: URL(fileURLWithPath: file))
-            say("backup written to \(file)")
+            let report = try await global.vault().exportBackup(to: URL(fileURLWithPath: file), phrase: phrase.map { try parsePhrase(secretArgument($0, env: "BISEL_PHRASE", flag: "phrase")) })
+            say("backup written to \(file): \(report.items) item(s), \(report.historyVersions) past version(s), \(report.header.fileSize) bytes")
         }
     }
     struct Import: AsyncParsableCommand {
@@ -368,8 +369,18 @@ struct Backup: AsyncParsableCommand {
         @Argument var file: String
         @Option(help: "The 24 words; '-' reads stdin; default $BISEL_PHRASE.") var phrase: String?
         func run() async throws {
-            let backup = try BackupFile.decode(Data(contentsOf: URL(fileURLWithPath: file)))
-            let (vkData, _) = try backup.vaultKey(phrase: parsePhrase(secretArgument(phrase, env: "BISEL_PHRASE", flag: "phrase")))
+            let data = try Data(contentsOf: URL(fileURLWithPath: file))
+            let words = try parsePhrase(secretArgument(phrase, env: "BISEL_PHRASE", flag: "phrase"))
+            if data.starts(with: Data("BISELBAK".utf8)) {
+                let header = try BackupArchive.inspect(data)
+                let contents = try BackupArchive.open(data, phrase: words)
+                say("format \(header.version), box \(header.boxID), written \(header.createdAt), \(header.fileSize) bytes")
+                for e in contents.items { say("\(e.id)  rev \(e.rev)  \((try? ItemCodec.decode(e.payload, id: e.id).title) ?? "(unreadable payload)")") }
+                say("\(contents.history.count) past version(s)")
+                return
+            }
+            let backup = try BackupFile.decode(data)
+            let (vkData, _) = try backup.vaultKey(phrase: words)
             let vk = SymmetricKey(data: vkData)
             for r in backup.records where !r.deleted {
                 let item = try ItemCodec.decode(ItemSealer.open(blob: r.blob, id: r.id, rev: r.rev, vaultKey: vk), id: r.id)

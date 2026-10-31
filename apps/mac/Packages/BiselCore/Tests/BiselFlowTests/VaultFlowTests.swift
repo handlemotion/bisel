@@ -215,35 +215,73 @@ struct VaultFlowTests {
         }
     }
 
-    @Test("a local-only vault exports a full backup and restores from it offline, as after the device key was lost")
-    func localOnlyBackupAndOfflineRestore() async throws {
+    @Test("a box exported to a .bisel-backup comes back whole on a fresh install from the file and the 24 words alone, and merging a later backup into it loses nothing")
+    func backupRestoresWholeBoxAndMergesWithoutLoss() async throws {
         try await TestServer.with { server in
             let a = try Device("a")
             let phrase = try await a.vault.bootstrapLocal(deviceName: "a")
-            let kept = try await a.vault.save(Item(title: "Never pushed", username: "me", password: "p-kept"))
-            let gone = try await a.vault.save(Item(title: "Deleted", username: "me", password: "p-gone"))
+            #expect(try await a.vault.backupStatus().reminder == .noBackupYet, "a box on one Mac only must be backed up")
+            var kept = try await a.vault.save(Item(title: "Bank", urls: ["https://bank.example"], username: "me", password: "p-1",
+                                                   totp: TOTPParameters(secret: "JBSWY3DPEHPK3PXP"), notes: "pin 0000",
+                                                   fields: [CustomField(label: "Answer", value: "blue", secret: true)], tags: ["money"]))
+            kept.password = "p-2"
+            kept = try await a.vault.save(kept)                      // p-1 goes to the box's history
+            let note = try await a.vault.save(Item(type: .note, title: "Wifi", notes: "hunter2"))
+            let gone = try await a.vault.save(login("Deleted", password: "p-gone"))
             try await a.vault.delete(id: gone.id)
-            let backup = FileManager.default.temporaryDirectory.appendingPathComponent("local-\(UUID().uuidString).bisel-backup")
-            defer { try? FileManager.default.removeItem(at: backup) }
-            try await a.vault.exportBackup(to: backup)
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("box-\(UUID().uuidString).bisel-backup")
+            defer { try? FileManager.default.removeItem(at: file) }
+            let report = try await a.vault.exportBackup(to: file)
+            #expect(report.items == 2 && report.historyVersions >= 2)
+            #expect(try Vault.inspectBackup(at: file) == report.header)
+            let bytes = try Data(contentsOf: file)
+            for secret in ["p-2", "p-1", "hunter2", "Bank", "JBSWY3DPEHPK3PXP"] {
+                #expect(bytes.range(of: Data(secret.utf8)) == nil, "no plaintext on disk: \(secret)")
+            }
+            // The reminder state survives a relaunch and counts what changed since.
+            #expect(try await a.relaunched().backupStatus().reminder == .none)
 
-            // The Mac's fingerprint set changed: a fresh store, no server anywhere.
+            // Every device and the Apple ID are gone: a fresh install, the file, the 24 words.
             let b = try Device("b")
-            await #expect(throws: VaultError.self) { try await b.vault.importBackupLocal(from: backup, phrase: try RecoveryPhrase.generate(), deviceName: "b") }
-            let skipped = try await b.vault.importBackupLocal(from: backup, phrase: phrase, deviceName: "b")
-            #expect(skipped == 0)
-            #expect(try await b.vault.identity()?.serverURL == nil)
-            let listing = try await b.vault.items()
-            #expect(listing.items.map(\.id) == [kept.id], "the unsynced item survives, the deleted one stays deleted")
-            #expect(try await b.vault.revealPassword(id: kept.id) == "p-kept")
+            let restored = try await b.vault.restoreBackup(from: file, phrase: phrase, deviceName: "b")
+            #expect(restored.added == 2)
+            #expect(try await b.vault.items().items.sorted { $0.id < $1.id } == a.vault.items().items.sorted { $0.id < $1.id },
+                    "every item, every field, same ids and dates")
+            #expect(try await b.vault.trash().map { [$0.itemID, $0.item.password ?? ""] }.sorted { $0.joined() < $1.joined() }
+                    == a.vault.trash().map { [$0.itemID, $0.item.password ?? ""] }.sorted { $0.joined() < $1.joined() }, "history too")
+            #expect(try await b.vault.verificationCode() == a.vault.verificationCode(), "the same box key")
+            let aID = try await a.vault.identity()?.deviceID
+            #expect(try await b.vault.roster().contains { $0.deviceID == aID }, "the same roster")
+            try await b.vault.confirmRecovery(phrase: phrase)
+            #expect(try await b.vault.backupStatus().reminder == .none)
 
-            // And the restored vault can still be connected to a server and recovered with the same phrase.
+            // Both sides move on: A edits the bank login and adds an item, B edits it too and deletes the note.
+            kept.password = "p-a"
+            _ = try await a.vault.save(kept)
+            let added = try await a.vault.save(login("New on A", password: "p-new"))
+            #expect(try await a.vault.backupStatus().changesSinceBackup == 2)
+            try await a.vault.exportBackup(to: file)
+            var onB = try await b.vault.item(id: kept.id)
+            onB.password = "p-b"
+            _ = try await b.vault.save(onB)
+            try await b.vault.delete(id: note.id)
+
+            let merged = try await b.vault.mergeBackup(from: file, phrase: phrase)
+            #expect(merged.added == 1 && merged.keptDeleted == [note.id] && merged.conflicts.map(\.itemID) == [kept.id])
+            #expect(try await b.vault.revealPassword(id: kept.id) == "p-b", "the box keeps its own edit")
+            let copy = try await b.vault.item(id: try #require(merged.conflicts.first).copyID)
+            #expect(copy.title == "Bank (conflict)" && copy.password == "p-a", "the backup's edit lives on in the copy")
+            #expect(try await b.vault.revealPassword(id: added.id) == "p-new")
+            let again = try await b.vault.mergeBackup(from: file, phrase: phrase)
+            #expect(again.added == 0 && again.conflicts.isEmpty, "merging the same file twice changes nothing")
+
+            // The restored box is a full box: a server can be connected and the same phrase recovers it there.
             try await b.vault.connectServer(server.url, bootstrapToken: TestServer.bootstrapToken)
             try await b.vault.sync()
             let c = try Device("c")
             try await c.vault.recover(server: server.url, phrase: phrase, deviceName: "c", boxID: try server.onlyBoxID())
             try await c.vault.sync()
-            #expect(try await c.vault.revealPassword(id: kept.id) == "p-kept")
+            #expect(try await c.vault.revealPassword(id: kept.id) == "p-b")
         }
     }
 
@@ -480,49 +518,44 @@ struct VaultFlowTests {
         }
     }
 
-    @Test("a damaged backup restores what opens and uploads it; one where nothing opens is refused before the server is touched")
-    func damagedBackup() async throws {
-        try await TestServer.with { server in
-            let a = try Device("a")
-            let phrase = try await a.bootstrap(server)
-            for n in 0..<3 { try await a.vault.save(login("Item \(n)", password: "pw-\(n)")) }
-            try await a.vault.sync()
-            let good = FileManager.default.temporaryDirectory.appendingPathComponent("good-\(UUID().uuidString).bisel-backup")
-            let some = FileManager.default.temporaryDirectory.appendingPathComponent("some-\(UUID().uuidString).bisel-backup")
-            let none = FileManager.default.temporaryDirectory.appendingPathComponent("none-\(UUID().uuidString).bisel-backup")
-            defer { for f in [good, some, none] { try? FileManager.default.removeItem(at: f) } }
-            try await a.vault.exportBackup(to: good)
+    @Test("a tampered, truncated, forged, newer or wrong-phrase backup is refused with its own error and nothing is written")
+    func badBackupsAreRefusedBeforeAnyWrite() async throws {
+        let a = try Device("a")
+        let phrase = try await a.vault.bootstrapLocal(deviceName: "a")
+        for n in 0..<3 { try await a.vault.save(login("Item \(n)", password: "pw-\(n)")) }
+        let good = FileManager.default.temporaryDirectory.appendingPathComponent("good-\(UUID().uuidString).bisel-backup")
+        let bad = FileManager.default.temporaryDirectory.appendingPathComponent("bad-\(UUID().uuidString).bisel-backup")
+        defer { for f in [good, bad] { try? FileManager.default.removeItem(at: f) } }
+        try await a.vault.exportBackup(to: good)
+        let bytes = try Data(contentsOf: good)
 
-            // Move ciphertext between ids: the AAD binds id and revision, so every moved blob fails authentication.
-            func damaged(swapping count: Int) throws -> Data {
-                var json = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: good)) as? [String: Any])
-                var items = try #require(json["items"] as? [[String: Any]])
-                let blobs = items.map { $0["blob"] }
-                let count = min(count, items.count)
-                for i in 0..<count { items[i]["blob"] = blobs[(i + 1) % count] }
-                json["items"] = items
-                return try JSONSerialization.data(withJSONObject: json)
-            }
-            try damaged(swapping: 2).write(to: some)
-            try damaged(swapping: .max).write(to: none)   // every record moved
-
-            try await TestServer.with { fresh in
-                let refused = try Device("refused")
-                await #expect(throws: VaultError.self) {
-                    try await refused.vault.importBackup(from: none, phrase: phrase, server: fresh.url, bootstrapToken: TestServer.bootstrapToken, deviceName: "refused")
-                }
-                #expect(try await refused.vault.identity() == nil, "nothing was bootstrapped or written")
-
-                // The same fresh server still accepts the partly damaged one, uploads what opened, and says what it skipped.
-                let partial = try Device("partial")
-                await #expect(throws: VaultError.self) {
-                    try await partial.vault.importBackup(from: some, phrase: phrase, server: fresh.url, bootstrapToken: TestServer.bootstrapToken, deviceName: "partial")
-                }
-                #expect(try await partial.vault.identity()?.serverURL == fresh.url)
-                #expect(try await partial.vault.pendingChanges() == 0, "what could be restored is already on the server")
-                #expect(try await partial.vault.items().items.count >= 1)
-            }
+        var flipped = bytes; flipped[bytes.count - 40] ^= 0x01
+        var newer = bytes; newer[9] = 4
+        // Someone who knows only the box's public recovery key seals their own box key and items to it.
+        let forged = try BackupArchive.seal(
+            BackupContents(boxID: try Vault.inspectBackup(at: good).boxID, createdAt: Int(Date().timeIntervalSince1970), epoch: 1,
+                           vaultKey: BiselRandom.bytes(32), manifest: VaultManifest(), items: [], history: []),
+            recoveryEncryptionPublicKey: try #require(try await a.vault.identity()?.recoveryEncryptionPublicKey), backupKey: BiselRandom.bytes(32))
+        let cases: [(Data, RecoveryPhrase, BackupError)] = [
+            (flipped, phrase, .tampered),
+            (bytes.prefix(bytes.count - 100), phrase, .truncated(expected: bytes.count, actual: bytes.count - 100)),
+            (newer, phrase, .newerVersion(4)),
+            (forged, phrase, .tampered),
+            (bytes, try RecoveryPhrase.generate(), .wrongPhrase),
+        ]
+        let other = try Device("other")
+        _ = try await other.vault.bootstrapLocal(deviceName: "other")
+        try await other.vault.save(login("Mine", password: "mine"))
+        for (data, words, expected) in cases {
+            try data.write(to: bad)
+            let fresh = try Device("fresh")
+            await #expect(throws: expected) { try await fresh.vault.restoreBackup(from: bad, phrase: words, deviceName: "fresh") }
+            #expect(try await fresh.vault.identity() == nil, "nothing written on a fresh install")
+            await #expect(throws: expected) { try await other.vault.mergeBackup(from: bad, phrase: words) }
+            #expect(try await other.vault.items().items.map(\.title) == ["Mine"], "nothing written into an existing box")
         }
+        try flipped.write(to: bad)
+        #expect(throws: BackupError.tampered, "refused before the phrase is even asked for") { try Vault.inspectBackup(at: bad) }
     }
 
     @Test("a box without a server keeps replaced and deleted versions in the local trash, and they can be restored")
@@ -606,7 +639,7 @@ struct VaultFlowTests {
         // The old server is gone. Restore onto a new one.
         try await TestServer.with { fresh in
             let wrong = try Device("wrong")
-            await #expect(throws: VaultError.self) {
+            await #expect(throws: BackupError.wrongPhrase) {
                 try await wrong.vault.importBackup(from: backup, phrase: try RecoveryPhrase.generate(), server: fresh.url,
                                                    bootstrapToken: TestServer.bootstrapToken, deviceName: "w")
             }
