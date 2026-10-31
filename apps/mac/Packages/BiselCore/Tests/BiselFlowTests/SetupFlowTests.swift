@@ -156,6 +156,14 @@ struct SetupFlowTests {
         guard case .iCloud = done.place else { Issue.record("restored onto the box in iCloud"); return }
         #expect(try await b.vault.revealPassword(id: bank.id) == "bank-pw")
         #expect(try await home.boxes().count == 1)
+
+        // D7 (c): on iCloud the words plus the Apple Account make a full member at once, with no hold-back. The other devices are
+        // told on their next sync, with the id of the device that recovered, so the alert can revoke exactly that one.
+        let recovered = try #require(try await b.vault.identity()?.deviceID)
+        let news = try await a.vault.sync()
+        let event = try #require(news.events.first { $0.type == "recovery" }, "a phrase recovery is announced to the other devices")
+        #expect(event.subjectId == recovered && event.deviceId == recovered)
+        #expect(try await a.vault.sync().events.isEmpty, "announced once, not on every sync")
     }
 
     @Test("a backup file goes back into iCloud when iCloud is empty, is merged into the live iCloud box instead of making a second one, and is never lost when iCloud refuses it")
