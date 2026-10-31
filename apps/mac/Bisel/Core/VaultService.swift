@@ -109,11 +109,16 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     @ObservationIgnored private var syncChain: Task<Void, Never>?
     @ObservationIgnored private var otpGatedAt: [String: ContinuousClock.Instant] = [:]
     @ObservationIgnored private var lockMonitor: LockMonitor?
+    /// C5 (SECURITY-REVIEW.md): the first sync after unlocking in this launch reads the whole lane (`sync(audit: true)`).
+    @ObservationIgnored private var auditedThisLaunch = false
     /// Called on lock/unlock so the panel can redraw.
     @ObservationIgnored var onLockStateChange: (() -> Void)?
 
     /// A panel open within this many seconds of the last finished sync does not sync again.
     private static let panelSyncMinInterval: TimeInterval = 10
+    /// When the last full read of the lane finished (seconds since 1970). See `auditDue`.
+    static let lastAuditKey = "sync.lastAuditAt"
+    static let auditInterval: TimeInterval = 24 * 60 * 60
     static let fillWindowKey = "security.fillWindowMinutes"
     static let idleLockKey = "security.idleLockMinutes"
     /// Any process of this user can write these defaults, so a value outside the range the settings offer reads as the default.
@@ -726,8 +731,13 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         syncing = true
         syncState = .syncing
         defer { syncing = false }
+        let audit = auditDue
         do {
-            let report = try await vault.sync()
+            let report = try await vault.sync(audit: audit)
+            if audit {
+                auditFinished()
+                Log.app.notice("sync audit: repaired=\(report.repaired) quarantined=\(report.quarantined) incidents=\(report.incidents.count)")
+            }
             pendingChanges = (try? await vault.pendingChanges()) ?? 0
             syncState = .synced(Date())
             if !report.conflicts.isEmpty { lastConflicts = report.conflicts.count }
@@ -753,7 +763,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             pendingChanges = (try? await vault.pendingChanges()) ?? pendingChanges
             switch e {
             case .network(let m): syncState = .offline(m)
-            default: syncState = .failed(describe(e))
+            default:
+                syncState = .failed(describe(e))
+                if audit { auditFinished() }
             }
             Log.app.notice("sync(\(reason)) failed: \(describe(e))")
         } catch let e as LaneError {
@@ -764,8 +776,25 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             Log.app.notice("sync(\(reason)) paused: \(describe(e))")
         } catch {
             syncState = .failed(describe(error))
+            if audit { auditFinished() }   // an integrity error from the full read: shown, and not re-read every minute
             Log.app.error("sync(\(reason)) failed: \(describe(error))")
         }
+    }
+
+    /// C5: iCloud can withhold or drop records, which only a full read of the lane notices (and re-uploads from this Mac). Once
+    /// after unlocking at each launch, then about once a day while unlocked (the 60 s poll checks). Offline or iCloud being
+    /// unavailable does not count as done. A last time in the future (the defaults are writable by this user) counts as due.
+    private var auditDue: Bool {
+        guard phase == .unlocked else { return false }
+        guard auditedThisLaunch else { return true }
+        let last = UserDefaults.standard.double(forKey: Self.lastAuditKey)
+        let since = Date().timeIntervalSince1970 - last
+        return since < 0 || since >= Self.auditInterval
+    }
+
+    private func auditFinished() {
+        auditedThisLaunch = true
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.lastAuditKey)
     }
 
     // MARK: VaultSearchSource / VaultSecretProvider (the command panel)
