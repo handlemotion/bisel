@@ -1,5 +1,6 @@
 import Foundation
 import BiselCrypto
+import BiselLane
 import BiselVault
 
 public enum SyncError: Error, Sendable, Equatable {
@@ -150,6 +151,9 @@ public struct SyncClient: Sendable {
         public let boxID: String?
         public let headSeq: Int
         public let epoch: Int
+        public init(deviceID: String, boxID: String?, headSeq: Int, epoch: Int) {
+            self.deviceID = deviceID; self.boxID = boxID; self.headSeq = headSeq; self.epoch = epoch
+        }
     }
 
     /// `POST /v1/bootstrap`. Unsigned: the credential is the authorization.

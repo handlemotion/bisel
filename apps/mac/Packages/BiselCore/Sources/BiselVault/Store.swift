@@ -126,6 +126,26 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
     }
 }
 
+/// What this device remembers about one lane: where its pull stopped, the highest position it ever reported, the identity of
+/// the storage it was enabled against.
+public struct LaneState: Sendable, Equatable {
+    /// Key of the state a box had before it had lanes.
+    public static let primary = "primary"
+    public var cursor: String?
+    public var knownHead = 0
+    public var eventCursor = 0
+    public var identity: String?
+    public var state = "active"
+    public init() {}
+}
+
+/// What a lane last held for a record: the revision and the lane's own concurrency tag.
+public struct LaneAck: Sendable, Equatable {
+    public var rev: Int
+    public var tag: String
+    public init(rev: Int, tag: String) { self.rev = rev; self.tag = tag }
+}
+
 /// SQLite (GRDB) store of ciphertext records and the sync cursor. Holds no key material.
 public final class LocalStore: Sendable {
     private let pool: DatabasePool
@@ -173,6 +193,41 @@ public final class LocalStore: Sendable {
             }
             try db.create(index: "trash_id", on: "trash", columns: ["id"])
         }
+        migrator.registerMigration("v3-lanes") { db in
+            // Per-lane sync position and per-lane acknowledgement (docs/SYNC-LANES.md §1). Everything a box synced before lanes
+            // existed belongs to its one remote, stored under `LaneState.primary` until the first lane that syncs adopts it.
+            try db.create(table: "lane_state") { t in
+                t.primaryKey("lane", .text)
+                t.column("cursor", .text)
+                t.column("known_head", .integer).notNull().defaults(to: 0)
+                t.column("event_cursor", .integer).notNull().defaults(to: 0)
+                t.column("identity", .text)
+                t.column("state", .text).notNull().defaults(to: "active")
+            }
+            try db.create(table: "lane_ack") { t in
+                t.column("lane", .text).notNull()
+                t.column("id", .text).notNull()
+                t.column("rev", .integer).notNull()
+                t.column("tag", .text).notNull()
+                t.primaryKey(["lane", "id"])
+            }
+            func meta(_ key: String) throws -> Int {
+                try Data.fetchOne(db, sql: "SELECT value FROM meta WHERE key = ?", arguments: [key])
+                    .flatMap { Int(String(decoding: $0, as: UTF8.self)) } ?? 0
+            }
+            let hasRemote = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM records") ?? 0 > 0 || meta("head_seq") > 0
+            if hasRemote {
+                try db.execute(sql: "INSERT INTO lane_state(lane, cursor, known_head, event_cursor) VALUES (?, ?, ?, ?)",
+                               arguments: [LaneState.primary, String(try meta("cursor")), try meta("head_seq"), try meta("event_cursor")])
+                // What the remote last confirmed: `base_rev` while an edit is pending, the record's own revision otherwise.
+                try db.execute(sql: """
+                    INSERT INTO lane_ack(lane, id, rev, tag)
+                    SELECT ?, id, CASE WHEN pending != 0 THEN base_rev ELSE rev END,
+                           (CASE WHEN pending != 0 THEN base_rev ELSE rev END) || '.' || seq
+                    FROM records WHERE (CASE WHEN pending != 0 THEN base_rev ELSE rev END) > 0
+                    """, arguments: [LaneState.primary])
+            }
+        }
         try migrator.migrate(pool)
     }
 
@@ -213,11 +268,49 @@ public final class LocalStore: Sendable {
         try setMeta("identity", try JSONEncoder().encode(stored))
     }
 
-    public func cursor() throws -> Int {
-        try getMeta("cursor").flatMap { Int(String(decoding: $0, as: UTF8.self)) } ?? 0
+    // MARK: lanes
+
+    /// State for `lane`. The first lane to ask when the box has none yet adopts what the box synced before lanes existed.
+    public func laneState(_ lane: String) throws -> LaneState {
+        try pool.write { db in
+            if try Row.fetchOne(db, sql: "SELECT 1 FROM lane_state WHERE lane = ?", arguments: [lane]) == nil,
+               try Row.fetchOne(db, sql: "SELECT 1 FROM lane_state WHERE lane = ?", arguments: [LaneState.primary]) != nil {
+                try db.execute(sql: "UPDATE lane_state SET lane = ? WHERE lane = ?", arguments: [lane, LaneState.primary])
+                try db.execute(sql: "UPDATE lane_ack SET lane = ? WHERE lane = ?", arguments: [lane, LaneState.primary])
+            }
+            guard let row = try Row.fetchOne(db, sql: "SELECT * FROM lane_state WHERE lane = ?", arguments: [lane]) else { return LaneState() }
+            var out = LaneState()
+            out.cursor = row["cursor"]; out.knownHead = row["known_head"]; out.eventCursor = row["event_cursor"]
+            out.identity = row["identity"]; out.state = row["state"]
+            return out
+        }
     }
 
-    public func setCursor(_ seq: Int) throws { try setMeta("cursor", Data(String(seq).utf8)) }
+    public func setLaneState(_ lane: String, _ state: LaneState) throws {
+        try pool.write { db in
+            try db.execute(sql: """
+                INSERT OR REPLACE INTO lane_state(lane, cursor, known_head, event_cursor, identity, state) VALUES (?, ?, ?, ?, ?, ?)
+                """, arguments: [lane, state.cursor, state.knownHead, state.eventCursor, state.identity, state.state])
+        }
+    }
+
+    /// Forgets where the pull stopped and the highest position seen, so the next pull starts again (a lane that was reset).
+    public func resetLanePosition(_ lane: String) throws {
+        var state = try laneState(lane)
+        state.cursor = nil; state.knownHead = 0; state.eventCursor = 0
+        try setLaneState(lane, state)
+    }
+
+    public func laneAck(_ lane: String, id: String) throws -> LaneAck? {
+        try pool.read { db in
+            try Row.fetchOne(db, sql: "SELECT rev, tag FROM lane_ack WHERE lane = ? AND id = ?", arguments: [lane, id]).map { LaneAck(rev: $0["rev"], tag: $0["tag"]) }
+        }
+    }
+
+    private func setAck(_ lane: String?, _ r: StoredRecord, tag: String?, _ db: Database) throws {
+        guard let lane, let tag else { return }
+        try db.execute(sql: "INSERT OR REPLACE INTO lane_ack(lane, id, rev, tag) VALUES (?, ?, ?, ?)", arguments: [lane, r.id, r.rev, tag])
+    }
 
     public func deviceListJSON() throws -> Data? { try getMeta("devices") }
     public func setDeviceListJSON(_ json: Data) throws { try setMeta("devices", json) }
@@ -273,9 +366,11 @@ public final class LocalStore: Sendable {
     }
 
     /// Conflict on the shared manifest: take the server's record and write the merged manifest on top of it, as one step.
-    public func resolveManifestConflict(current: StoredRecord, id: String, seal: (_ rev: Int) throws -> Data) throws {
+    public func resolveManifestConflict(current: StoredRecord, id: String, lane: String? = nil, tag: String? = nil,
+                                        seal: (_ rev: Int) throws -> Data) throws {
         try pool.write { db in
             try write(current, db)
+            try setAck(lane, current, tag: tag, db)
             _ = try commit(db, id: id, deleted: false, seal: seal)
         }
     }
@@ -293,11 +388,15 @@ public final class LocalStore: Sendable {
     /// Applies a record received from the server. Pending local edits are never overwritten
     /// (they are resolved at push time). Returns false when the record was stale or skipped.
     @discardableResult
-    public func applyRemote(_ r: StoredRecord) throws -> Bool {
+    public func applyRemote(_ r: StoredRecord, lane: String? = nil, tag: String? = nil) throws -> Bool {
         try pool.write { db in
             if let existing = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [r.id]).map(StoredRecord.init(row:)) {
+                // A pending edit keeps the lane's old tag, so its push still collides with what the lane now holds.
                 if existing.pending != .none { return false }
-                if existing.rev > r.rev || (existing.rev == r.rev && existing.seq >= r.seq) { return false }
+                if existing.rev > r.rev || (existing.rev == r.rev && existing.seq >= r.seq) {
+                    try setAck(lane, r, tag: tag, db)
+                    return false
+                }
                 // A new revision (or a delete) replaces content this device holds: keep the old ciphertext for 30 days.
                 // (Same revision, new seq = a key rotation re-wrapping the item: nothing to keep.)
                 if existing.rev != r.rev, !existing.deleted {
@@ -307,6 +406,7 @@ public final class LocalStore: Sendable {
             var incoming = r
             incoming.tombstone = r.deleted ? .unverified : .verified   // a delete is honoured only after its marker verified
             try write(incoming, db)
+            try setAck(lane, r, tag: tag, db)
             return true
         }
     }
@@ -356,8 +456,10 @@ public final class LocalStore: Sendable {
     /// Marks a pending record as accepted by the server, unless it changed again in the meantime.
     /// Returns false when it did change: the caller must then re-base the newer edit on `server`.
     @discardableResult
-    public func confirmPushed(pushed: StoredRecord, server: StoredRecord) throws -> Bool {
+    public func confirmPushed(pushed: StoredRecord, server: StoredRecord, lane: String? = nil, tag: String? = nil) throws -> Bool {
         try pool.write { db in
+            // The lane holds the pushed revision now, whether or not the record was edited again meanwhile.
+            try setAck(lane, server, tag: tag, db)
             guard let cur = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [pushed.id]).map(StoredRecord.init(row:)),
                   cur.pending != .none, cur.blob == pushed.blob, cur.rev == pushed.rev else { return false }
             try write(server, db)
@@ -367,10 +469,13 @@ public final class LocalStore: Sendable {
 
     /// Replaces local state with the server's current record (conflict resolution: remote wins).
     /// A delete taken over this way still has to pass the marker check like one received by a pull.
-    public func overwrite(with r: StoredRecord) throws {
+    public func overwrite(with r: StoredRecord, lane: String? = nil, tag: String? = nil) throws {
         var incoming = r
         incoming.tombstone = r.deleted ? .unverified : .verified
-        try pool.write { try write(incoming, $0) }
+        try pool.write { db in
+            try write(incoming, db)
+            try setAck(lane, r, tag: tag, db)
+        }
     }
 
     // MARK: trash, tombstone verification, integrity state
@@ -416,12 +521,6 @@ public final class LocalStore: Sendable {
         }
     }
 
-    /// Highest `head_seq` this device has ever seen from the server (rollback detection).
-    public func knownHeadSeq() throws -> Int { try getMeta("head_seq").flatMap { Int(String(decoding: $0, as: UTF8.self)) } ?? 0 }
-    public func setKnownHeadSeq(_ seq: Int) throws { try setMeta("head_seq", Data(String(seq).utf8)) }
-
-    public func eventCursor() throws -> Int { try getMeta("event_cursor").flatMap { Int(String(decoding: $0, as: UTF8.self)) } ?? 0 }
-    public func setEventCursor(_ id: Int) throws { try setMeta("event_cursor", Data(String(id).utf8)) }
     public func recentEventsJSON() throws -> Data? { try getMeta("events") }
     public func setRecentEventsJSON(_ json: Data) throws { try setMeta("events", json) }
 
@@ -471,14 +570,18 @@ public final class LocalStore: Sendable {
     /// Applies a rotation this device performed itself: new blobs and seqs for the rotated records, and the new cursor.
     /// `records` are snapshots from before the request: one that was edited (or replaced by a pull) while the request was in
     /// flight no longer matches its row and is left alone; the caller re-wraps pending edits afterwards.
-    public func applyRotation(_ records: [StoredRecord], cursor: Int) throws {
+    public func applyRotation(_ records: [StoredRecord], lane: String, cursor: String, headSeq: Int) throws {
         try pool.write { db in
             for r in records {
                 guard let cur = try Row.fetchOne(db, sql: "SELECT * FROM records WHERE id = ?", arguments: [r.id]).map(StoredRecord.init(row:)),
                       cur.rev == r.rev, cur.pending == .none else { continue }
                 try write(r, db)
+                try setAck(lane, r, tag: "\(r.rev).\(r.seq)", db)
             }
-            try db.execute(sql: "INSERT OR REPLACE INTO meta(key, value) VALUES ('cursor', ?)", arguments: [Data(String(cursor).utf8)])
+            try db.execute(sql: """
+                INSERT INTO lane_state(lane, cursor, known_head) VALUES (?, ?, ?)
+                ON CONFLICT(lane) DO UPDATE SET cursor = excluded.cursor, known_head = MAX(known_head, excluded.known_head)
+                """, arguments: [lane, cursor, headSeq])
         }
     }
 
@@ -487,6 +590,8 @@ public final class LocalStore: Sendable {
         try pool.write { db in
             try db.execute(sql: "DELETE FROM records")
             try db.execute(sql: "DELETE FROM trash")
+            try db.execute(sql: "DELETE FROM lane_state")
+            try db.execute(sql: "DELETE FROM lane_ack")
             try db.execute(sql: "DELETE FROM meta")
         }
     }

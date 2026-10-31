@@ -1,5 +1,6 @@
 import Foundation
 import BiselCrypto
+import BiselLane
 import BiselVault
 
 public struct SyncReport: Sendable, Equatable {
@@ -22,23 +23,41 @@ public struct SyncReport: Sendable, Equatable {
     /// Deletes that arrived from the server without a valid sealed marker (forged, or made by a key that is not this vault's).
     /// The item was restored from the local trash as a new revision.
     public var rejectedTombstones: [String] = []
+    /// Records the lane sent that the verifier refused to apply (malformed, mis-signed, replayed). They are kept aside, not applied.
+    public var quarantined = 0
+    /// Things the lane did that are not legitimate updates (hard deletes, a position that went backwards).
+    public var incidents: [LaneIncident] = []
     public init() {}
 }
 
-/// Pull/push engine (SPEC §6): push pending local edits, resolve 409s, then page through `/v1/sync`.
-public struct SyncEngine: Sendable {
+/// Pull/push engine over one lane (SPEC §6, docs/SYNC-LANES.md §1): push pending local edits, resolve conflicts, then
+/// page through the lane's changes, verifying every page before it reaches the local store.
+public struct LaneEngine: Sendable {
     let store: LocalStore
-    let client: SyncClient
+    let lane: any BoxLane
     /// Needed only to build "(conflict)" copies; nil while locked.
     let vaultKey: @Sendable () -> LockedKey?
+    let verifier = LaneVerifier()
 
-    public init(store: LocalStore, client: SyncClient, vaultKey: @escaping @Sendable () -> LockedKey?) {
-        self.store = store; self.client = client; self.vaultKey = vaultKey
+    public init(store: LocalStore, lane: any BoxLane, vaultKey: @escaping @Sendable () -> LockedKey?) {
+        self.store = store; self.lane = lane; self.vaultKey = vaultKey
+    }
+
+    private var laneKey: String { lane.id.rawValue }
+
+    private func stored(_ r: LaneRecord) -> StoredRecord {
+        StoredRecord(id: r.id, rev: r.rev, seq: r.order, deleted: r.kind == .tombstone, blob: r.blob, updatedAt: r.updatedAt)
+    }
+
+    private func laneRecord(_ r: StoredRecord, epoch: Int) -> LaneRecord {
+        let kind: LaneKind = r.deleted ? .tombstone : (r.id == ReservedRecord.manifestID ? .manifest : .item)
+        return LaneRecord(kind: kind, id: r.id, rev: r.rev, epoch: epoch, blob: r.blob, order: r.seq, updatedAt: r.updatedAt)
     }
 
     /// `pushing: false` only pulls: used while the vault key this device holds is not yet confirmed against the box.
     public func run(pushing: Bool = true) async throws -> SyncReport {
         var report = SyncReport()
+        _ = try store.laneState(laneKey)   // adopts what the box synced before lanes existed, before anything is acknowledged
         let epoch = try store.identity()?.epoch ?? 1
         var staleEpoch = false
         if pushing { try await push(&report, epoch: epoch, staleEpoch: &staleEpoch) }
@@ -65,7 +84,7 @@ public struct SyncEngine: Sendable {
     /// Another device rotated VK: take this device's new envelope. If edits sealed under the old key are still
     /// pending, remember the old envelope so the next unlock can re-wrap them.
     private func adoptRotation(_ report: inout SyncReport) async throws {
-        let (envelope, epoch) = try await client.envelope()
+        let (envelope, epoch) = try await lane.ownEnvelope()
         guard var identity = try store.identity() else { return }
         // The old key is needed at the next unlock for edits sealed under it and for the trash (versions this device kept).
         if identity.previousEnvelope == nil,
@@ -91,26 +110,22 @@ public struct SyncEngine: Sendable {
             for rec in pending {
                 // The manifest needs the vault-admin signature. Locked, or signing with a key the server has since rotated
                 // away, it stays pending: the next unlocked sync (after pulling the new envelope) pushes it.
-                var admin: AdminSigner?
-                if ReservedRecord.isReserved(rec.id) {
-                    guard let vk = vaultKey() else { skipped.insert(rec.id); continue }
-                    var raw = try vk.rawBytes()
-                    defer { raw.zeroize() }
-                    admin = try AdminSigner(vaultKey: raw)
-                }
-                let outcome: PutOutcome
+                let reserved = ReservedRecord.isReserved(rec.id)
+                if reserved, vaultKey() == nil { skipped.insert(rec.id); continue }
+                let expect: LaneExpect = rec.baseRev == 0 ? .absent
+                    : .tag(LaneTag(try store.laneAck(laneKey, id: rec.id)?.tag ?? "\(rec.baseRev).0"))
+                let outcome: LaneWriteResult
                 do {
-                    outcome = rec.pending == .delete
-                        ? try await client.delete(id: rec.id, baseRev: rec.baseRev, marker: rec.blob, epoch: epoch, admin: admin)
-                        : try await client.put(id: rec.id, baseRev: rec.baseRev, blob: rec.blob, epoch: epoch, admin: admin)
-                } catch SyncError.server(_, let code) where admin != nil && code == "admin_signature_required" {
+                    outcome = try await lane.write([LaneWrite(record: laneRecord(rec, epoch: epoch), expect: expect)])[0]
+                } catch SyncError.server(_, let code) where reserved && code == "admin_signature_required" {
                     skipped.insert(rec.id)
                     continue
                 }
                 switch outcome {
-                case .accepted(let server):
+                case .accepted(let accepted):
+                    let server = stored(accepted)
                     report.pushed += 1
-                    if !(try store.confirmPushed(pushed: rec, server: server)) {
+                    if !(try store.confirmPushed(pushed: rec, server: server, lane: laneKey, tag: accepted.tag?.rawValue)) {
                         // The item was edited again while this push was in flight: that newer edit continues from the
                         // revision the server just took, instead of colliding with this device's own earlier write.
                         if let vk = vaultKey() {
@@ -125,19 +140,24 @@ public struct SyncEngine: Sendable {
                     }
                 case .conflict(let current):
                     if !(try resolveConflict(local: rec, current: current, &report)) { skipped.insert(rec.id) }
-                case .staleEpoch:
+                case .rejected(.staleEpoch):
                     // The edit is sealed under a rotated-away key. Keep it pending; pull, adopt the new envelope,
                     // and let the next unlock re-wrap it.
                     staleEpoch = true
                     return
+                case .rejected(.tooLarge):
+                    throw SyncError.tooLarge
+                case .rejected(let why):
+                    throw SyncError.server(status: 409, code: "\(why)")
                 }
             }
         }
     }
 
     /// Remote wins; a conflicting local edit survives as a new item. Returns false if it had to be deferred.
-    private func resolveConflict(local: StoredRecord, current: StoredRecord?, _ report: inout SyncReport) throws -> Bool {
-        guard let current else {
+    private func resolveConflict(local: StoredRecord, current currentLane: LaneRecord?, _ report: inout SyncReport) throws -> Bool {
+        let tag = currentLane?.tag?.rawValue
+        guard let current = currentLane.map(stored) else {
             // Server has no such record (e.g. wiped): nothing to keep or merge with; upload it again as a new item.
             if local.pending == .delete { try store.forget(local.id); return true }
             guard let vk = vaultKey(), (try? rebase(local, onto: 0, vk)) == true else {
@@ -148,7 +168,7 @@ public struct SyncEngine: Sendable {
         }
         // The server already holds exactly what this device pushed (the answer was lost): the push counts as accepted.
         if current.rev == local.rev, current.blob == local.blob, current.deleted == (local.pending == .delete) {
-            try store.confirmPushed(pushed: local, server: current)
+            try store.confirmPushed(pushed: local, server: current, lane: laneKey, tag: tag)
             report.pushed += 1
             return true
         }
@@ -159,7 +179,7 @@ public struct SyncEngine: Sendable {
                 let theirs = try ManifestCodec.open(current, vaultKey: key)
                 return mine.merged(with: theirs)
             }
-            try store.resolveManifestConflict(current: current, id: local.id) { rev in try vk.withKey { try ManifestCodec.seal(merged, rev: rev, vaultKey: $0) } }
+            try store.resolveManifestConflict(current: current, id: local.id, lane: laneKey, tag: tag) { rev in try vk.withKey { try ManifestCodec.seal(merged, rev: rev, vaultKey: $0) } }
             return true
         }
         if local.pending == .put {
@@ -178,7 +198,7 @@ public struct SyncEngine: Sendable {
             report.conflicts.append(.init(itemID: local.id, copyID: copyID))
         }
         // A pending local delete against a changed remote simply loses: the remote version stays.
-        try store.overwrite(with: current)
+        try store.overwrite(with: current, lane: laneKey, tag: tag)
         return true
     }
 
@@ -227,43 +247,45 @@ public struct SyncEngine: Sendable {
         return restored
     }
 
-    /// Returns the server's epoch as of the last page.
+    /// Returns the lane's epoch as of the last page.
     private func pull(_ report: inout SyncReport, serverRevs: inout [String: Int], fromStart: Bool) async throws -> Int {
-        var since = fromStart ? 0 : try store.cursor()
-        let knownHead = try store.knownHeadSeq()
-        let eventCursor = try store.eventCursor()
+        var state = try store.laneState(laneKey)
+        var cursor = fromStart ? nil : state.cursor.map(LaneCursor.init)
+        let eventCursor = state.eventCursor
         var newEvents: [ServerEvent] = []
         while true {
-            let page = try await client.pull(since: since, eventsSince: eventCursor == 0 ? nil : eventCursor)
-            // A server that reports less than it already told us, or a cursor/records beyond its own head, is rolling us back or lying.
-            if page.headSeq < knownHead { throw IntegrityError.serverRolledBack(known: knownHead, reported: page.headSeq) }
-            if page.nextSince < since || page.nextSince > page.headSeq || (page.hasMore && page.nextSince == since)
-                || page.records.contains(where: { $0.seq <= since || $0.seq > page.headSeq }) {
-                throw IntegrityError.invalidCursor
-            }
-            for rec in page.records {
+            let changes = try await lane.fetch(since: cursor, limit: 200)
+            // A lane that reports less than it already told us is rolling us back or lying.
+            let verdict = try verifier.verify(changes, since: cursor, knownHead: state.knownHead)
+            report.quarantined += verdict.quarantined.count
+            report.incidents += verdict.incidents
+            let localEpoch = try store.identity()?.epoch ?? 1
+            let meta = changes.meta ?? LaneMeta(epoch: localEpoch, headSeq: state.knownHead)
+            for rec in verdict.accepted {
                 serverRevs[rec.id] = rec.rev
-                if try store.applyRemote(rec) { report.pulled += 1 }
+                if try store.applyRemote(stored(rec), lane: laneKey, tag: rec.tag?.rawValue) { report.pulled += 1 }
             }
-            since = page.nextSince
-            try store.setCursor(since)
-            try store.setKnownHeadSeq(page.headSeq)
-            report.headSeq = page.headSeq
-            if let devices = try? JSONEncoder().encode(page.devices) { try store.setDeviceListJSON(devices) }
-            newEvents = page.events
-            if !page.hasMore {
-                if let top = page.events.last?.id {
+            cursor = changes.cursor
+            state.cursor = changes.cursor.rawValue
+            state.knownHead = meta.headSeq
+            try store.setLaneState(laneKey, state)
+            report.headSeq = meta.headSeq
+            if let devices = try? JSONEncoder().encode(meta.members) { try store.setDeviceListJSON(devices) }
+            newEvents = meta.events
+            if !changes.hasMore {
+                if let top = meta.events.last?.id {
                     // The first sync of a device only learns the current position; nothing in it is news.
-                    if eventCursor != 0 { report.events = page.events.filter { $0.id > eventCursor } }
-                    try store.setEventCursor(top)
+                    if eventCursor != 0 { report.events = meta.events.filter { $0.id > eventCursor } }
+                    state.eventCursor = top
+                    try store.setLaneState(laneKey, state)
                 }
                 if let json = try? JSONEncoder().encode(newEvents) { try store.setRecentEventsJSON(json) }
                 // Recovery material is only recorded from a complete pull, so a backup never pairs a rotated
                 // recovery envelope with half-rotated items.
-                if let recovery = page.recovery {
+                if let recovery = meta.recovery {
                     try store.updateRecovery(pubkey: recovery.pubkey, encryptionPubkey: recovery.encPubkey, envelope: recovery.envelope)
                 }
-                return page.epoch
+                return meta.epoch
             }
         }
     }

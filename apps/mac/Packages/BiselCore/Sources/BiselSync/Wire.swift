@@ -1,5 +1,6 @@
 import Foundation
 import BiselCrypto
+import BiselLane
 import BiselVault
 
 /// Wire types for SPEC §6 / apps/server/README.md. Binary values travel as unpadded base64url strings.
@@ -21,36 +22,6 @@ public struct WireDevice: Codable, Sendable, Equatable {
     }
 }
 
-/// Device as listed by the server (no envelope).
-public struct DeviceInfo: Codable, Sendable, Equatable, Identifiable {
-    public var id: String
-    public var name: String
-    public var kind: String
-    public var sigPubkey: String
-    public var encPubkey: String
-    public var createdAt: Int
-    public var lastSeenAt: Int?
-    public var revokedAt: Int?
-    /// Set while a device registered through the recovery phrase is held back; it cannot sign requests before then.
-    public var activatesAt: Int?
-    public var isRevoked: Bool { revokedAt != nil }
-    public func isPending(at now: Date = Date()) -> Bool { (activatesAt ?? 0) > Int(now.timeIntervalSince1970) && !isRevoked }
-
-    // Names come from the server (and ultimately from other devices): strip control, bidi and separator characters.
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(String.self, forKey: .id)
-        name = Data.sanitizedName(try c.decode(String.self, forKey: .name))
-        kind = try c.decode(String.self, forKey: .kind)
-        sigPubkey = try c.decode(String.self, forKey: .sigPubkey)
-        encPubkey = try c.decode(String.self, forKey: .encPubkey)
-        createdAt = try c.decode(Int.self, forKey: .createdAt)
-        lastSeenAt = try c.decodeIfPresent(Int.self, forKey: .lastSeenAt)
-        revokedAt = try c.decodeIfPresent(Int.self, forKey: .revokedAt)
-        activatesAt = try c.decodeIfPresent(Int.self, forKey: .activatesAt)
-    }
-}
-
 struct WireItem: Codable, Sendable {
     var id: String
     var rev: Int
@@ -63,24 +34,6 @@ struct WireItem: Codable, Sendable {
         guard let blob = Data(base64URLEncoded: blob) else { return nil }
         return StoredRecord(id: id, rev: rev, seq: seq, deleted: deleted, blob: blob, updatedAt: updatedAt)
     }
-}
-
-public struct RecoveryMaterial: Codable, Sendable, Equatable {
-    public var alg: String
-    public var pubkey: String
-    /// X25519 key the recovery envelope is sealed to. Empty on servers that predate rotation.
-    public var encPubkey: String?
-    public var envelope: String
-}
-
-/// Something that happened to the vault on the server: `bootstrap`, `approve`, `revoke`, `rotate`, `recovery`, `recovery_rotate`.
-public struct ServerEvent: Codable, Sendable, Equatable, Identifiable {
-    public var id: Int
-    public var ts: Int
-    public var deviceId: String?
-    public var type: String
-    public var subjectId: String?
-    public var date: Date { Date(timeIntervalSince1970: TimeInterval(ts)) }
 }
 
 struct SyncPageWire: Codable, Sendable {

@@ -1,6 +1,7 @@
 @_exported import BiselCrypto
 @_exported import BiselKeyStore
 @_exported import BiselVault
+@_exported import BiselLane
 @_exported import BiselSync
 @_exported import BiselRecovery
 @_exported import BiselTOTP
@@ -83,11 +84,15 @@ public actor Vault {
         /// Where small secrets (the server's address) live instead of the plaintext database. With the Secure Enclave key
         /// store this defaults to the Keychain in the same access group.
         public var secrets: (any SecretStore)?
+        /// Builds the lane this device syncs through, from its identity and the vault key in memory. nil: the Bisel server at
+        /// `serverURL` (the only lane that ships today); flows inject their own.
+        public var laneProvider: (@Sendable (_ identity: LocalIdentity, _ vaultKey: @escaping @Sendable () -> LockedKey?) throws -> any BoxLane)?
 
         public init(location: StoreLocation, keyStore: any DeviceKeyStore, gate: any BiometricGate = LocalAuthenticationGate(),
-                    fillWindow: TimeInterval = 300, deviceKind: String = "mac", secrets: (any SecretStore)? = nil) {
+                    fillWindow: TimeInterval = 300, deviceKind: String = "mac", secrets: (any SecretStore)? = nil,
+                    laneProvider: (@Sendable (_ identity: LocalIdentity, _ vaultKey: @escaping @Sendable () -> LockedKey?) throws -> any BoxLane)? = nil) {
             self.location = location; self.keyStore = keyStore; self.gate = gate
-            self.fillWindow = fillWindow; self.deviceKind = deviceKind
+            self.fillWindow = fillWindow; self.deviceKind = deviceKind; self.laneProvider = laneProvider
             if let secrets { self.secrets = secrets }
             else if let se = keyStore as? SecureEnclaveDeviceKeyStore { self.secrets = KeychainSecretStore(accessGroup: se.accessGroup) }
             else { self.secrets = nil }
@@ -155,10 +160,26 @@ public actor Vault {
         return id
     }
 
-    private func client() throws -> SyncClient {
+    /// The lane this device syncs through, built for the vault key held right now (nil while locked).
+    private func lane() throws -> any BoxLane {
         let id = try requireIdentity()
         guard let server = id.serverURL else { throw VaultError.noServer }
-        return SyncClient(baseURL: server, signer: DeviceSigner(deviceID: id.deviceID, keyStore: config.keyStore))
+        let held = liveKey()
+        if let provider = config.laneProvider { return try provider(id, { held }) }
+        return ServerLane(client: SyncClient(baseURL: server, signer: DeviceSigner(deviceID: id.deviceID, keyStore: config.keyStore)),
+                          boxID: id.boxID, eventsSince: (try? store.laneState(laneKeyHint(id)).eventCursor).flatMap { $0 == 0 ? nil : $0 },
+                          vaultKey: { held })
+    }
+
+    /// The server speaks to the one box this identity names; its lane id is what the engine keys its state by.
+    private func laneKeyHint(_ id: LocalIdentity) -> String {
+        "server:\(id.serverURL?.host ?? "-"):\(id.boxID ?? "-")"
+    }
+
+    /// The signed HTTP client, for the things only the server does (account claim, history).
+    private func serverClient() throws -> SyncClient {
+        guard let server = try lane() as? ServerLane else { throw VaultError.noServer }
+        return server.client
     }
 
     /// The vault-admin signer for the unlocked vault (needs VK, so a stolen device-signing key cannot make it).
@@ -263,6 +284,33 @@ public actor Vault {
         var identity = try requireIdentity()
         identity.recoveryUnconfirmed = true
         try store.setIdentity(identity)
+        return bundle.phrase
+    }
+
+    /// First device of a box on a lane that creates boxes without a credential (the server lane needs one: see `bootstrap(server:)`).
+    /// `address` is what this device remembers as the place it syncs through. The returned phrase is the only copy.
+    public func bootstrap(lane address: URL, deviceName: String) async throws -> RecoveryPhrase {
+        guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
+        var vk = BiselRandom.bytes(32)
+        defer { vk.zeroize() }
+        let bundle = try RecoveryService.makeBundle(vaultKey: vk, epoch: 1)
+        try installLocalIdentity(vaultKey: vk, bundle: bundle, deviceName: deviceName, recoveryUnconfirmed: true)
+        var identity = try requireIdentity()
+        identity.serverURL = address
+        try store.setIdentity(identity)
+        guard let me = identity.roster.first, let envelope = identity.envelope else { throw VaultError.notConfigured }
+        do {
+            let device = WireDevice(id: identity.deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: me.sigPubkey,
+                                    encPubkey: me.encPubkey, envelope: envelope)
+            _ = try await lane().create(NewBox(device: device, recoveryPublicKey: bundle.publicKey,
+                                               recoveryEncryptionPublicKey: bundle.encryptionPublicKey, recoveryEnvelope: bundle.envelope,
+                                               adminPublicKey: try AdminSigner(vaultKey: vk).publicKey))
+        } catch {
+            lock()
+            try? store.removeAll()
+            try? config.keyStore.deleteKeys()
+            throw error
+        }
         return bundle.phrase
     }
 
@@ -374,9 +422,7 @@ public actor Vault {
         identity.recoveryEnvelope = recoveryEnv
         identity.previousEnvelope = nil
         try store.setIdentity(identity)
-        try store.setKnownHeadSeq(0)
-        try store.setCursor(0)
-        try store.setEventCursor(0)
+        try store.resetLanePosition(laneKeyHint(identity))
     }
 
     private func register(server: URL, credential: SyncClient.BootstrapCredential, deviceName: String, vaultKey vk: Data,
@@ -422,7 +468,7 @@ public actor Vault {
     public func claimBox() async throws -> SyncClient.ConnectCode {
         let key = try requireKey()
         try await config.gate.authenticate(reason: "Link this box to your account")
-        return try await client().boxClaim(admin: try adminSigner(key))
+        return try await serverClient().boxClaim(admin: try adminSigner(key))
     }
 
     /// Polls a claim started with `claimBox` against this vault's server. `.consumed` = linked; `.denied` = the account
@@ -458,9 +504,9 @@ public actor Vault {
         defer { raw.zeroize() }
         let envelope = try DeviceEnvelope.seal(vaultKey: raw, toEncryptionKey: request.encPubkey)
         do {
-            try await client().addDevice(WireDevice(id: request.deviceID, name: request.name, kind: request.kind,
-                                                    sigPubkey: request.sigPubkey, encPubkey: request.encPubkey, envelope: envelope,
-                                                    epoch: epoch), admin: try adminSigner(vk))
+            try await lane().admit(WireDevice(id: request.deviceID, name: request.name, kind: request.kind,
+                                              sigPubkey: request.sigPubkey, encPubkey: request.encPubkey, envelope: envelope,
+                                              epoch: epoch), admin: try adminSigner(vk))
         } catch RotationError.staleEpoch {
             // The vault key changed under us: adopt the new one (this locks the vault) and let the caller retry.
             _ = try? await sync()
@@ -481,7 +527,7 @@ public actor Vault {
     /// New device, step 3 (after approval): fetch own envelope. Then `unlock()` and `sync()` work.
     public func completeEnrollment() async throws {
         var id = try requireIdentity()
-        let (envelope, epoch) = try await client().envelope()
+        let (envelope, epoch) = try await lane().ownEnvelope()
         id.envelope = envelope
         id.epoch = epoch
         id.enrollmentUnconfirmed = true   // until the code shown by the approving device has been checked
@@ -493,15 +539,25 @@ public actor Vault {
     /// `boxID` names the box on a multi-tenant server (shown on the dashboard, returned by bootstrap, kept in `LocalIdentity.boxID`);
     /// nil asks for the server's pre-accounts box.
     public func recover(server: URL, phrase: RecoveryPhrase, deviceName: String, boxID: String? = nil) async throws {
+        let keys = try RecoveryKeys(phrase: phrase)
+        let recovering = ServerLane(client: SyncClient(baseURL: server, signer: RecoverySigner(keys: keys, boxID: boxID)), boxID: boxID)
+        try await recover(lane: recovering, address: server, phrase: phrase, deviceName: deviceName, boxID: boxID)
+    }
+
+    /// Same, over any lane. `lane` must be able to hand out the recovery envelope (the server lane needs to be built with the
+    /// recovery signer); `address` is what this device remembers as the place it syncs through.
+    public func recover(lane recovering: any BoxLane, address: URL, phrase: RecoveryPhrase, deviceName: String, boxID: String? = nil) async throws {
         guard try store.identity() == nil else { throw VaultError.alreadyConfigured }
-        var (vk, keys, epoch) = try await RecoveryService.fetchVaultKey(server: server, phrase: phrase, boxID: boxID)
+        let keys = try RecoveryKeys(phrase: phrase)
+        let (recoveryEnvelope, epoch) = try await recovering.recoveryEnvelope()
+        var vk = try keys.open(envelope: recoveryEnvelope, epoch: epoch)
         defer { vk.zeroize() }
         let pub = try config.keyStore.createKeys()
         let deviceID = BiselRandom.identifier()
         let envelope = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: pub.enc)
         let device = WireDevice(id: deviceID, name: deviceName, kind: config.deviceKind, sigPubkey: pub.sig, encPubkey: pub.enc, envelope: envelope)
-        let activatesAt = try await SyncClient(baseURL: server, signer: RecoverySigner(keys: keys, boxID: boxID)).recoveryRegister(device: device, epoch: epoch)
-        var identity = LocalIdentity(deviceID: deviceID, deviceName: deviceName, serverURL: server,
+        let activatesAt = try await recovering.recoveryRegister(device: device, epoch: epoch)
+        var identity = LocalIdentity(deviceID: deviceID, deviceName: deviceName, serverURL: address,
                                      keyStore: config.keyStore.implementation, envelope: envelope,
                                      recoveryPublicKey: keys.publicKey, recoveryEncryptionPublicKey: keys.encryptionPublicKey, epoch: epoch, boxID: boxID)
         // The phrase holder is the owner: this device is trusted, and the recovery keys are pinned from the phrase itself.
@@ -523,8 +579,8 @@ public actor Vault {
         var id = try requireIdentity()
         let bundle = try RecoveryService.makeBundle(vaultKey: raw, epoch: id.epoch)
         do {
-            try await client().rotateRecovery(publicKey: bundle.publicKey, encryptionPublicKey: bundle.encryptionPublicKey,
-                                              envelope: bundle.envelope, epoch: id.epoch, admin: try adminSigner(vk))
+            try await lane().rotateRecovery(publicKey: bundle.publicKey, encryptionPublicKey: bundle.encryptionPublicKey,
+                                            envelope: bundle.envelope, epoch: id.epoch, admin: try adminSigner(vk))
         } catch RotationError.staleEpoch {
             _ = try? await sync()
             throw RotationError.vaultKeyRotated
@@ -639,7 +695,7 @@ public actor Vault {
     public func trustDevice(id deviceID: String, fingerprint: String) async throws {
         _ = try requireKey()
         try await config.gate.authenticate(reason: "Trust a device")
-        guard let d = try await client().devices().first(where: { $0.id == deviceID && !$0.isRevoked }) else { throw RotationError.deviceNotFound(deviceID) }
+        guard let d = try await lane().members().first(where: { $0.id == deviceID && !$0.isRevoked }) else { throw RotationError.deviceNotFound(deviceID) }
         guard let sig = Data(base64URLEncoded: d.sigPubkey), let enc = Data(base64URLEncoded: d.encPubkey) else { throw SyncError.malformedResponse }
         let actual = DevicePublicKeys(sig: sig, enc: enc).fingerprint
         let typed = fingerprint.lowercased().filter { !$0.isWhitespace && $0 != "-" }
@@ -765,7 +821,7 @@ public actor Vault {
         }
         guard try store.identity()?.serverURL != nil else { return SyncReport() }   // local-only: nothing to sync with
         let held = liveKey()
-        let engine = SyncEngine(store: store, client: try client(), vaultKey: { held })
+        let engine = LaneEngine(store: store, lane: try lane(), vaultKey: { held })
         var report: SyncReport
         if try store.identity()?.keyUnconfirmed == true {
             // The key came from the server's relay (recovery phrase, or another device's rotation). A server that knows this
@@ -788,7 +844,7 @@ public actor Vault {
     }
 
     /// Fetches the device list from the server.
-    public func devices() async throws -> [DeviceInfo] { try await client().devices() }
+    public func devices() async throws -> [DeviceInfo] { try await lane().members() }
 
     /// Revokes a device **and rotates the vault key** in one atomic server transaction (see `rotateVaultKey`):
     /// the revoked device is cut off and everything it could still read from the server is re-keyed. Needs a fresh
@@ -803,7 +859,7 @@ public actor Vault {
     public func revokeWithoutRotation(deviceID: String) async throws {
         let vk = try requireKey()
         try await config.gate.authenticate(reason: "Revoke a device")
-        try await client().revokeDevice(id: deviceID, admin: try adminSigner(vk))
+        try await lane().revokeDevice(id: deviceID, admin: try adminSigner(vk))
     }
 
     // MARK: vault-key rotation
@@ -834,14 +890,15 @@ public actor Vault {
     /// One attempt. Returns nil when the server reported a change since the snapshot (the caller retries).
     private func rotateOnce(revoking deviceID: String?) async throws -> RotationReport? {
         let oldKey = try requireKey()
-        let client = try client()
+        let held = oldKey
+        let box = try lane()
 
         // 1. A current, fully pushed local view.
-        let report = try await SyncEngine(store: store, client: client, vaultKey: { oldKey }).run()
+        let report = try await LaneEngine(store: store, lane: box, vaultKey: { held }).run()
         if report.rotationAdopted { lock(); throw RotationError.vaultKeyRotated }
         let pending = try store.pendingRecords()
         guard pending.isEmpty else { throw RotationError.pendingChanges(pending.count) }
-        guard try store.cursor() == report.headSeq else { return nil }
+        guard try store.laneState(box.id.rawValue).cursor.flatMap(Int.init) == report.headSeq else { return nil }
         let identity = try requireIdentity()
         // The new vault key is also sealed to the recovery key. Keys that only the server reported (not yet pinned from the phrase
         // or the sealed manifest) could be the server's own: sync first, which pins them, or refuse.
@@ -851,7 +908,7 @@ public actor Vault {
         }
 
         // 2. Who stays.
-        let devices = try await client.devices()
+        let devices = try await box.members()
         let active = devices.filter { !$0.isRevoked }
         if let deviceID {
             guard deviceID != identity.deviceID else { throw RotationError.cannotRevokeThisDevice }
@@ -922,7 +979,7 @@ public actor Vault {
         }
 
         // 4. One atomic request.
-        let outcome = try await client.rotate(
+        let outcome = try await box.rotate(
             baseEpoch: identity.epoch, baseSeq: report.headSeq, revoke: revokeID, newAdminPublicKey: newAdmin.publicKey,
             items: zip(live, wrapped).map { (id: $0.id, rev: $0.rev, wrappedKey: $1) },
             tombstones: zip(tombstoneRecords, markers).map { (id: $0.id, rev: $0.rev, marker: $1) },
@@ -942,7 +999,7 @@ public actor Vault {
             r.seq = report.headSeq + live.count + 1 + index
             return r
         }
-        try store.applyRotation(rotated + retombed, cursor: headSeq)
+        try store.applyRotation(rotated + retombed, lane: box.id.rawValue, cursor: String(headSeq), headSeq: headSeq)
         oldKey.withKeyOrFalse { old in rewrapTrash(from: old, to: newKey); return true }
         for rec in try store.pendingRecords() where rec.pending == .delete {
             try store.replacePendingBlob(id: rec.id, expectedRev: rec.rev, with: try ItemSealer.sealTombstone(id: rec.id, rev: rec.rev, vaultKey: newKey))
@@ -979,7 +1036,7 @@ public actor Vault {
     /// from before a key rotation were sealed under the old key and are skipped.
     public func serverHistory(itemID: String? = nil) async throws -> [PastVersion] {
         let k = try requireKey()
-        let entries = try await client().history(itemID: itemID)
+        let entries = try await serverClient().history(itemID: itemID)
         return entries.compactMap { e in
             guard e.kind == .overwrite, !ReservedRecord.isReserved(e.itemID),
                   let item = try? decrypt(StoredRecord(id: e.itemID, rev: e.rev, seq: 0, deleted: false, blob: e.blob, updatedAt: 0), k) else { return nil }
@@ -1017,9 +1074,7 @@ public actor Vault {
     /// next unlocked `sync()`, so a restore of the server's database from an earlier point does not lose newer edits.
     public func acknowledgeServerReset() throws {
         try store.setReseedPending(true)
-        try store.setKnownHeadSeq(0)
-        try store.setCursor(0)
-        try store.setEventCursor(0)
+        if let lane = try? lane() { try store.resetLanePosition(lane.id.rawValue) }
     }
 
     /// When a device registered through the recovery phrase may start syncing (nil: now). `sync()` throws
