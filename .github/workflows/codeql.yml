@@ -37,12 +37,6 @@ jobs:
             runner: ubuntu-24.04
             build-mode: none
             timeout: 15
-          # The CodeQL tracer fails on the xcode-27 image ("Bad CPU type" spawning the manifest), so Swift is scanned with
-          # the macos-26 image's default Xcode, on which the core suite also builds.
-          - language: swift
-            runner: macos-26
-            build-mode: manual
-            timeout: 45
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,13 +49,40 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
+      - name: Analyze
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:${{ matrix.language }}
+
+  # Swift takes ~16 minutes, so it scans main after every merge and weekly instead of gating each PR.
+  # The CodeQL tracer fails on the xcode-27 image ("Bad CPU type" spawning the manifest), so Swift is scanned with
+  # the macos-26 image's default Xcode, on which the core suite also builds.
+  analyze-swift:
+    name: CodeQL (swift)
+    if: github.event_name != 'pull_request'
+    runs-on: macos-26
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: swift
+          build-mode: manual
+
       # BiselCore holds the crypto, key handling and sync code; the app target adds UI on top.
       - name: Build BiselCore
-        if: matrix.language == 'swift'
         working-directory: apps/mac/Packages/BiselCore
         run: swift build --traits SoftwareKeys --disable-sandbox
 
       - name: Analyze
         uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
-          category: /language:${{ matrix.language }}
+          category: /language:swift
