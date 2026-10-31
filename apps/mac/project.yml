@@ -92,11 +92,6 @@ targets:
               exit 1
             fi
           fi
-    entitlements:
-      path: Bisel/Bisel.entitlements
-      # Deliberately NO com.apple.security.app-sandbox: Accessibility fill needs an
-      # unsandboxed process (SPEC.md §8). Hardened runtime is on; no exceptions needed.
-      properties: {}
     info:
       path: Bisel/Info.plist
       properties:
@@ -116,6 +111,11 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: app.bisel.mac
         PRODUCT_NAME: Bisel
+        # Hand-kept plist, not generated from `entitlements:`, so project.dev.yml can swap it. Deliberately NO
+        # com.apple.security.app-sandbox: Accessibility fill needs an unsandboxed process (SPEC.md §8). Hardened runtime is on.
+        # It carries iCloud / CloudKit for the sync lane (docs/SYNC-LANES.md §3, D1): a restricted entitlement, so the signed
+        # build needs a provisioning profile with the container (Xcode creates it with -allowProvisioningUpdates).
+        CODE_SIGN_ENTITLEMENTS: Bisel/Bisel.entitlements
         GENERATE_INFOPLIST_FILE: NO
         COMBINE_HIDPI_IMAGES: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon   # Resources/AppIcon.icon (Icon Composer), rendered by the system

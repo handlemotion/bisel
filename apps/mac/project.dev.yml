@@ -12,7 +12,10 @@ packages:
     traits: [SoftwareKeys]
 targets:
   Bisel:
+    # No iCloud in the dev build: it runs unsigned / ad-hoc and the CloudKit entitlement needs a provisioning profile.
     settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Bisel/BiselDev.entitlements
       configs:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG BISEL_DEV_FIXTURE BISEL_SOFTWARE_KEYS"
