@@ -19,8 +19,8 @@
     "build": "node scripts/build-web.mjs"
   },
   "dependencies": {
-    "@better-auth/passkey": "1.6.23",
-    "better-auth": "1.6.23",
+    "@better-auth/passkey": "1.7.12",
+    "better-auth": "1.7.12",
     "hono": "4.13.14",
     "zod": "4.6.7"
   },

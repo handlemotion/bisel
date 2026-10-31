@@ -69,11 +69,15 @@ export function authOptions(env: Env): BetterAuthOptions {
           afterVerification: async ({ ctx, user }) => {
             // Adding a passkey to a signed-in account: the user exists, nothing to create.
             if (await ctx.context.internalAdapter.findUserById(user.id)) return;
-            const created = await ctx.context.internalAdapter.createUser({
-              name: user.name,
-              email: `${user.id}@accounts.bisel.invalid`,
-              emailVerified: false,
-            });
+            // better-auth 1.7 asks where a new user came from (the source feeds `user.validateUserInfo`, unused here).
+            const created = await ctx.context.internalAdapter.createUser(
+              {
+                name: user.name,
+                email: `${user.id}@accounts.bisel.invalid`,
+                emailVerified: false,
+              },
+              { method: "passkey" },
+            );
             const session = await ctx.context.internalAdapter.createSession(created.id);
             await setSessionCookie(ctx, { session, user: created });
             return { userId: created.id };
