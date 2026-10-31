@@ -32,7 +32,7 @@ Repo-wide rules only. App-level docs: `apps/server/README.md` and `DEPLOY.md` (t
 
 - `pnpm install`, then `pnpm check` (oxfmt + oxlint), `pnpm check-types`, `pnpm test`, `pnpm build`.
 - `pnpm test` runs the server vitest flows (its own `wrangler dev`, free port, local D1). Also `pnpm --filter bisel-server test:legacy` (migration test) and, opt-in, `pnpm --filter bisel-server test:browser` (the one Playwright passkey test).
-- `scripts/check-all.sh` runs everything including the Swift flow suite and the app build; `scripts/check-release-hooks.sh` fails if debug hooks leak into Release.
+- `pnpm ci:local` is CI on your Mac: `scripts/check-all.sh --server --core --app --release`, the same modes the CI jobs run. `scripts/check-all.sh` alone runs server, core and app; `scripts/check-release-hooks.sh` fails if debug hooks leak into Release.
 - Swift formatting is advisory for now: `xcrun swift-format lint --configuration apps/mac/.swift-format`.
 
 ## Working rules
@@ -40,6 +40,14 @@ Repo-wide rules only. App-level docs: `apps/server/README.md` and `DEPLOY.md` (t
 - The UI is Rodrigo's. Do not change SwiftUI views, layout, copy, colors or animation unless asked; logic and tests are fair game.
 - Use generators and CLIs to create things (`create-turbo`, `oxlint --init`, `xcodegen`, `pnpm add`), never hand-write boilerplate that a tool produces.
 - Never touch production (Cloudflare, Doppler, the prod D1) without an explicit ask each time, and never print secrets. `apps/server/DEPLOY.md` is the runbook.
-- No attribution lines in commits or PR descriptions. Small commits; rebase on `origin/main` before pushing; push to `main` when green.
+- No attribution lines in commits or PR descriptions.
 - Do new work in git worktrees. One build or test run at a time.
 - Vocabulary: "box" in anything the user reads; "vault" stays in code, the wire format and `docs/SPEC.md`.
+
+## Shipping
+
+- Never push to `main`. Work on a branch, small commits, rebase on `origin/main`, push the branch, open a PR (`gh pr create`).
+- Wait for every CI check on the PR to pass (`gh pr checks --watch`), then squash-merge (`gh pr merge --squash --delete-branch`). A red or pending check is never merged; fix it on the branch.
+- CI (`.github/workflows/ci.yml`) runs `scripts/check-all.sh` in four jobs: Server (`--server`), Core (`--core`), App (`--app`, unsigned BiselDev build), Release (`--release`); CodeQL scans actions, TypeScript and Swift. Run `pnpm ci:local` before pushing when a change touches more than one of them.
+- CI and `scripts/check-all.sh` change together: a new check goes into a check-all mode, and the job calls that mode.
+- Workflows: `permissions: contents: read` at the top and only what a job needs; third-party actions pinned to a full commit SHA with the version in a comment; `pull_request` and `push` to `main` only, never `pull_request_target`; no secrets. The repo is public, so fork PRs run this code.
