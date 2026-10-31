@@ -6,7 +6,7 @@
 #   scripts/check-all.sh --server        pnpm install, format + lint, typecheck, pnpm test, test:legacy
 #   scripts/check-all.sh --core          BiselCore Swift flow suite (swift test --traits SoftwareKeys)
 #   scripts/check-all.sh --app           xcodegen (project.dev.yml) + unsigned Debug build of the Mac app (software keys), + compile (never run) of the UI test sources
-#   scripts/check-all.sh --release       Release build + BISEL_DEV_ strings check (scripts/check-release-hooks.sh); slow, opt-in
+#   scripts/check-all.sh --release       Release build + BISEL_DEV_ strings check (scripts/check-release-hooks.sh), signing config lint; slow, opt-in
 #   scripts/check-all.sh -v              stream every step's output instead of showing the tail of a failed one
 #
 # Flags combine (--server --core). Needs only tracked files: apps/server/.dev.vars is created from the example when missing.
@@ -117,6 +117,10 @@ fi
 if (( RUN_RELEASE )); then
   echo "release"
   step "release: no BISEL_DEV_ hooks in the binary" "$ROOT/scripts/check-release-hooks.sh"
+  # Offline: the Developer ID plists parse, the release scripts parse, and the CloudKit schema (once exported) has R's fields and no index.
+  step "release: signing config + CloudKit schema" bash -c "cd '$ROOT/apps/mac' && plutil -lint Tools/ExportOptions.plist Bisel/Bisel.entitlements \
+    && bash -n Tools/release.sh && bash -n Tools/cloudkit-schema.sh \
+    && if [[ -f CloudKit/schema.ckdb ]]; then Tools/cloudkit-schema.sh lint; else echo 'no CloudKit/schema.ckdb yet (RELEASE.md, step 5)'; fi"
   echo
 fi
 
