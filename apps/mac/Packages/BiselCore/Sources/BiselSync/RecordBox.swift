@@ -16,11 +16,14 @@ public struct RecordBox: BoxLane {
     let memberList: @Sendable () -> [DeviceInfo]
     /// Where to start looking for the end of the log; any number at or below the real one works.
     let logHint: @Sendable () -> Int
+    /// The admin-key chain this device already verified (`LaneWitness.aks`). A head read from the lane counts only if it still holds it.
+    let pinned: @Sendable () -> [ControlRecords.AKLink]
 
     /// `deviceID` and `sign` are this device's identity and DK-sig (nil while recovering, before the device exists).
     public init(storage: any SyncLane, deviceID: String?, sign: (@Sendable (Data) throws -> Data)? = nil,
-                members: @escaping @Sendable () -> [DeviceInfo] = { [] }, logHint: @escaping @Sendable () -> Int = { 0 }) {
-        self.storage = storage; self.deviceID = deviceID; signDevice = sign; memberList = members; self.logHint = logHint
+                members: @escaping @Sendable () -> [DeviceInfo] = { [] }, logHint: @escaping @Sendable () -> Int = { 0 },
+                pinned: @escaping @Sendable () -> [ControlRecords.AKLink] = { [] }) {
+        self.storage = storage; self.deviceID = deviceID; signDevice = sign; memberList = members; self.logHint = logHint; self.pinned = pinned
     }
 
     public var id: LaneID { storage.id }
@@ -63,8 +66,11 @@ public struct RecordBox: BoxLane {
     }
 
     public func ownEnvelope() async throws -> (envelope: Data, epoch: Int) {
+        // Both records are checked here: an envelope holding a key someone picked, under a head announcing a rotation, is what an
+        // attacker with write access would plant, and whoever picked the key could also seal a manifest that "confirms" it.
         guard let deviceID, let (head, _) = try await currentHead(),
-              let record = try await readOne(.envelope, ControlRecords.envelopeID(epoch: head.epoch, device: deviceID)) else { throw SyncError.notFound }
+              let record = try await readOne(.envelope, ControlRecords.envelopeID(epoch: head.epoch, device: deviceID)),
+              let key = ControlRecords.key(at: head.epoch, in: head.aks), ControlRecords.adminSignatureValid(record, key: key) else { throw SyncError.notFound }
         return (record.blob, head.epoch)
     }
 
@@ -148,8 +154,11 @@ public struct RecordBox: BoxLane {
     }
 
     public func recoveryEnvelope() async throws -> (envelope: Data, epoch: Int) {
-        guard let record = try await readOne(.recovery, ControlRecords.recoveryID),
-              let rec = ControlRecords.decode(ControlRecords.Recovery.self, record.blob),
+        // Signed in the head's own epoch: an older recovery record still carries a signature by an older admin key, and a revoked
+        // device that kept that key could otherwise hand a fresh device the key it was cut off from.
+        guard let (head, _) = try await currentHead(), let record = try await readOne(.recovery, ControlRecords.recoveryID),
+              let rec = ControlRecords.decode(ControlRecords.Recovery.self, record.blob), rec.epoch == head.epoch,
+              let key = ControlRecords.key(at: rec.epoch, in: head.aks), ControlRecords.adminSignatureValid(record, key: key),
               let envelope = Data(base64URLEncoded: rec.envelope) else { throw SyncError.notAuthorized }
         return (envelope, rec.epoch)
     }
@@ -200,9 +209,10 @@ public struct RecordBox: BoxLane {
         try await storage.read([LaneRecordRef(kind: kind, id: id)]).first ?? nil
     }
 
-    /// The box's head, as the lane serves it (the verifier checks it on fetch; here it only says which epoch to write for).
+    /// The box's head as the lane serves it, if it is genuine (`ControlRecords.verifiedHead`). A forged one counts as no head.
     private func currentHead() async throws -> (head: ControlRecords.Head, record: LaneRecord)? {
-        guard let record = try await readOne(.head, ControlRecords.headID), let head = ControlRecords.decode(ControlRecords.Head.self, record.blob) else { return nil }
+        guard let record = try await readOne(.head, ControlRecords.headID),
+              let head = ControlRecords.verifiedHead(record, pinned: pinned()) else { return nil }
         return (head, record)
     }
 

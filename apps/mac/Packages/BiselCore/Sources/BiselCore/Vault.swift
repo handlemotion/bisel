@@ -174,7 +174,8 @@ public actor Vault {
                 ((try? store.laneState(key))?.witness).flatMap { try? JSONDecoder().decode(LaneWitness.self, from: $0) }
             }
             return RecordBox(storage: made, deviceID: id.deviceID, sign: { try keyStore.sign($0) },
-                             members: { witness()?.members ?? [] }, logHint: { witness()?.logN ?? 0 })
+                             members: { witness()?.members ?? [] }, logHint: { witness()?.logN ?? 0 },
+                             pinned: { witness()?.aks ?? [] })
         }
         return ServerLane(client: SyncClient(baseURL: server, signer: DeviceSigner(deviceID: id.deviceID, keyStore: config.keyStore)),
                           boxID: id.boxID, eventsSince: (try? store.laneState(laneKeyHint(id)).eventCursor).flatMap { $0 == 0 ? nil : $0 },
@@ -659,7 +660,23 @@ public actor Vault {
 
     /// The manifest the box's first device wrote is sealed under the real vault key: if it (or, for a box that never had one, an
     /// item the box already held) opens under the key this device received, the key is the box's.
-    private func confirmBoxKey(_ k: LockedKey) throws {
+    ///
+    /// On a lane that keeps the box's control records that proves nothing: whoever picked a key can seal a manifest under it and
+    /// write it there. The key is the box's there when its admin key is the last link of the admin-key chain this device verified
+    /// (a chain that grows only by signatures of the key before), at the epoch this device holds it for.
+    private func confirmBoxKey(_ k: LockedKey, lane: String) throws {
+        if let witness = (try store.laneState(lane).witness).flatMap({ try? JSONDecoder().decode(LaneWitness.self, from: $0) }),
+           let current = witness.aks.last {
+            let mine = try k.withKey { try VaultAdmin.signingKey(vaultKey: $0).publicKey.rawRepresentation }
+            guard current.ak == mine, witness.epoch == (try requireIdentity().epoch) else {
+                lock()
+                throw IntegrityError.keyConfirmationFailed
+            }
+            var id = try requireIdentity()
+            id.keyUnconfirmed = false
+            try store.setIdentity(id)
+            return
+        }
         var candidates: [StoredRecord] = []
         if let m = try store.record(ReservedRecord.manifestID), !m.deleted, m.pending == .none { candidates.append(m) }
         if candidates.isEmpty {
@@ -833,7 +850,8 @@ public actor Vault {
         }
         guard try store.identity()?.serverURL != nil else { return SyncReport() }   // local-only: nothing to sync with
         let held = liveKey()
-        let engine = LaneEngine(store: store, lane: try lane(), vaultKey: { held })
+        let box = try lane()
+        let engine = LaneEngine(store: store, lane: box, vaultKey: { held })
         var report: SyncReport
         if try store.identity()?.keyUnconfirmed == true {
             // The key came from the server's relay (recovery phrase, or another device's rotation). A server that knows this
@@ -842,7 +860,7 @@ public actor Vault {
             report = try await engine.run(pushing: false, audit: audit)
             if report.rotationAdopted { lock(); return report }   // another rotation arrived: the key in memory is already stale
             guard let held else { return report }   // locked: nothing can be checked, nothing is uploaded
-            try confirmBoxKey(held)
+            try confirmBoxKey(held, lane: box.id.rawValue)
             var next = try await engine.run(audit: audit)
             next.pulled += report.pulled
             next.events = report.events + next.events

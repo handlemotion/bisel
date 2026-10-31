@@ -109,6 +109,18 @@ public enum ControlRecords {
 
     /// The admin key in force at `epoch`: the last link at or before it.
     public static func key(at epoch: Int, in links: [AKLink]) -> Data? { links.last { $0.epoch <= epoch }?.ak }
+
+    /// The head in `record` if it holds together: a well-formed chain, the record signed by its last key, and (when this device
+    /// pinned a chain before) still containing the key it pinned. Anyone who can write to the storage can write a head, so a read
+    /// that decides anything (the epoch to write for, which envelope to take) goes through this.
+    public static func verifiedHead(_ record: LaneRecord, pinned: [AKLink]) -> Head? {
+        guard record.kind == .head, record.id == headID, let head = decode(Head.self, record.blob), chainValid(head.aks, epoch: head.epoch),
+              let last = head.aks.last, adminSignatureValid(record, key: last.ak) else { return nil }
+        if let pin = pinned.last {
+            guard head.epoch >= pin.epoch, head.aks.contains(where: { $0.epoch == pin.epoch && $0.ak == pin.ak }) else { return nil }
+        }
+        return head
+    }
 }
 
 /// Everything a device has verified about a lane's control records so far. Persisted per lane (`lane_state.witness`); what

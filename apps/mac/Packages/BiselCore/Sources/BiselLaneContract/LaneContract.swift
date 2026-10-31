@@ -292,6 +292,40 @@ public enum LaneContract {
             c.expect(try await a.vault.items().undecryptable.isEmpty, "nothing undecryptable is applied")
             c.expect(try await a.vault.items().items.map(\.title) == ["Bank"], "the box is unchanged")
         },
+        ContractFlow(name: "someone who can only write to the storage cannot make a device adopt a vault key of their choosing and upload under it") { rig, c in
+            let fake = try c.require(rig.fake)
+            let a = try rig.device("a")
+            _ = try await rig.bootstrap(a)
+            _ = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            let me = try c.require(try await a.vault.identity())
+            let enc = try c.require(me.roster.first?.encPubkey)
+
+            // A rotation announced by a head nobody with the admin key signed, an envelope to this device's public key holding a key
+            // the writer picked, and a manifest sealed under that key so it "confirms" it.
+            let evil = BiselRandom.bytes(32)
+            var head = try c.require(ControlRecords.decode(ControlRecords.Head.self, try c.require(fake.record(ControlRecords.headID)).blob))
+            head.epoch += 1
+            fake.inject(LaneRecord(kind: .head, id: ControlRecords.headID, rev: 0, epoch: head.epoch, blob: try ControlRecords.encode(head),
+                                   sig: Data(repeating: 7, count: 64)))
+            fake.inject(LaneRecord(kind: .envelope, id: ControlRecords.envelopeID(epoch: head.epoch, device: me.deviceID), rev: 0, epoch: head.epoch,
+                                   blob: try DeviceEnvelope.seal(vaultKey: evil, toEncryptionKey: enc)))
+            let rev = try c.require(fake.record(ReservedRecord.manifestID)).rev + 1
+            let planted = try ManifestCodec.seal(VaultManifest(), rev: rev, vaultKey: SymmetricKey(data: evil))
+            fake.inject(LaneRecord(kind: .manifest, id: ReservedRecord.manifestID, rev: rev, epoch: head.epoch, blob: planted))
+
+            _ = try await a.vault.save(login("New", password: "new-pw"))
+            _ = try? await a.vault.sync()
+            try await a.vault.unlock()
+            _ = try? await a.vault.sync()
+            _ = try? await a.vault.sync()
+
+            for r in fake.records() where r.isItemLike && r.kind != .tombstone && r.blob != planted {
+                c.expect((try? ItemSealer.open(blob: r.blob, id: r.id, rev: r.rev, vaultKey: SymmetricKey(data: evil))) == nil,
+                         "nothing this device uploads opens under the planted key (\(r.id))")
+            }
+            c.expect(try await a.vault.identity()?.epoch == me.epoch, "the unsigned head announced no rotation")
+        },
     ]
 }
 #endif
