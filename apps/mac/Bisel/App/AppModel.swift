@@ -125,7 +125,7 @@ final class AppModel {
                     if self.panelController.isVisible {
                         self.panelModel.flashCopied(kind, viaPill: viaPill)  // ✓ Copied on the row, then close if set
                     } else {
-                        Toast.shared.show("\(what) copied. Clears in 30 s")
+                        Toast.shared.show("\(what) copied. Clears in \(SecureClipboard.clearSeconds) s")
                     }
                 } catch {
                     self.panelModel.pillTriggered = false

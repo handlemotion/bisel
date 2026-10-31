@@ -6,7 +6,7 @@ import AppKit
 ///  - excluded from Universal Clipboard (Handoff to other Apple devices) with
 ///    `NSPasteboard.prepareForNewContents(with: .currentHostOnly)`  — the public AppKit option
 ///    `NSPasteboardContentsCurrentHostOnly` ("contents should not be available to other devices");
-///  - auto-cleared 30 s after the copy, only if `changeCount` is unchanged since our write.
+///  - auto-cleared `clearSeconds` (30 s by default) after the copy, only if `changeCount` is unchanged since our write.
 ///
 /// IMPORTANT ordering: `.currentHostOnly` is an option of `prepareForNewContents`, it persists only until the
 /// next `prepareForNewContents`/`clearContents`, so it must be the call that starts the write, and the
@@ -18,7 +18,11 @@ final class SecureClipboard {
 
     static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
     static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
-    static let autoClearInterval: Duration = .seconds(30)
+    /// "Clear clipboard after" setting, in seconds (default 30).
+    static let clearSecondsKey = "clipboard.clearSeconds"
+    static let clearSecondsChoices = [15, 30, 60, 90]
+    static var clearSeconds: Int { UserDefaults.standard.object(forKey: clearSecondsKey) as? Int ?? 30 }
+    static var autoClearInterval: Duration { .seconds(clearSeconds) }
 
     private var clearTask: Task<Void, Never>?
     private var ownedChangeCount: Int?

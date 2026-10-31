@@ -8,6 +8,7 @@ import BiselCore
 ///   phases: create (bootstrap → items → search → copy → lock/unlock → import → export)
 ///           recover (fresh store: recover from the phrase file → items present → devices → revoke the other device)
 ///           revoked (original store after being revoked: unlock → sync must be refused)
+///           settings (with BISEL_DATA_DIR: a throwaway box, the settings window open; `-settings.page sync` picks the page)
 @MainActor
 enum DebugFlow {
     private static var log = ""
@@ -17,6 +18,16 @@ enum DebugFlow {
         let env = ProcessInfo.processInfo.environment
         guard let phase = env["BISEL_DEV_FLOW"], let logPath = env["BISEL_DEV_FLOW_LOG"] else { return }
         Log.app.fault("BISEL_DEV_FLOW=\(phase, privacy: .public) active (debug build only)")
+        if phase == "settings" {   // a this-Mac-only box in the throwaway store, settings open, and the app stays up (screenshots)
+            Task {
+                let svc = AppModel.shared.service
+                await svc.start()
+                if svc.phase == .needsSetup { try? await svc.bootstrapLocal(deviceName: "Flow Mac") }
+                svc.confirmPhraseStored()
+                AppModel.shared.showMainWindow()
+            }
+            return
+        }
         Task {
             await AppModel.shared.service.start()
             switch phase {
