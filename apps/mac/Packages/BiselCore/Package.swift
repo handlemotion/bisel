@@ -49,7 +49,7 @@ let package = Package(
         .target(name: "BiselTestSupport", dependencies: ["BiselCrypto", "BiselVault", "BiselLane", "BiselSync"]),   // dev/test only
         // The CloudKit private-database lane (docs/SYNC-LANES.md §3). It compiles anywhere but only runs in a signed app with the
         // iCloud entitlement, so nothing the flow tests or BiselDev link depends on it.
-        .target(name: "BiselCloudKit", dependencies: ["BiselLane", "BiselVault"]),
+        .target(name: "BiselCloudKit", dependencies: ["BiselCrypto", "BiselLane", "BiselVault"]),
         // The lane contract flows, shared by the flow tests and the opt-in CloudKit run of the signed app (project.contract.yml).
         .target(name: "BiselLaneContract", dependencies: ["BiselCore", "BiselTestSupport"],   // dev/test only
                 swiftSettings: [.define("BISEL_SOFTWARE_KEYS", .when(traits: ["SoftwareKeys"]))]),

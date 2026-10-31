@@ -1,5 +1,8 @@
 # Linking this Mac to a bisel account (browser sign-in)
 
+Off the default path: first run puts the box in iCloud (`BoxSetup`, [SETUP.md](SETUP.md)) and never reaches the server. The
+server and this flow stay working and tested, for the opt-in server reached from Settings.
+
 `AccountLinker` (Sources/BiselCore/AccountLinker.swift) is the whole flow as one state machine. The UI owns no logic: it shows
 the current `state`, opens a URL, and calls `start`, `cancel`, `retry`, `reset`.
 

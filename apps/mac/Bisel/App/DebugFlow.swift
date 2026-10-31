@@ -22,7 +22,7 @@ enum DebugFlow {
             Task {
                 let svc = AppModel.shared.service
                 await svc.start()
-                if svc.phase == .needsSetup { try? await svc.bootstrapLocal(deviceName: "Flow Mac") }
+                if svc.phase == .needsSetup { try? await svc.createBoxOnThisMacOnly(deviceName: "Flow Mac") }
                 svc.confirmPhraseStored()
                 AppModel.shared.showMainWindow()
             }

@@ -11,10 +11,10 @@ This block is written and re-added by `turbo` before repository-scoped commands 
 
 # Bisel agent rules
 
-Bisel is a personal, self-hosted, zero-knowledge password manager. pnpm + Turborepo monorepo:
+Bisel is a personal, zero-knowledge password manager for the Mac. Boxes live in the person's iCloud (a CloudKit lane in the private database, `docs/SYNC-LANES.md`); first run never touches a server (`apps/mac/Packages/BiselCore/SETUP.md`). pnpm + Turborepo monorepo:
 
-- `apps/server`: Cloudflare Worker (Hono, D1, Better Auth passkeys) at `box.bisel.app`, with the dashboard in `apps/server/web` and its assets in `apps/server/public`.
 - `apps/mac`: the Swift Mac app (XcodeGen: `project.yml`, `project.dev.yml`), the core in `apps/mac/Packages/BiselCore`, tools in `apps/mac/Tools`.
+- `apps/server`: the optional, deferred sync server, opt-in from Settings: Cloudflare Worker (Hono, D1, Better Auth passkeys) at `box.bisel.app`, with the dashboard in `apps/server/web` and its assets in `apps/server/public`. Kept working and tested, not developed further for now.
 - `docs/`: `SPEC.md` is the source of truth for the design; `SECURITY-REVIEW.md`; `design/`.
 
 Repo-wide rules only. App-level docs: `apps/server/README.md` and `DEPLOY.md` (the production runbook), `apps/mac/Packages/BiselCore/README.md`. Explicit user instructions override every repository file.

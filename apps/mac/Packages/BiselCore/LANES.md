@@ -1,8 +1,8 @@
 # Lanes: what the UI must show (L4)
 
 For Rodrigo's UI. Design: [`docs/SYNC-LANES.md`](../../../../docs/SYNC-LANES.md) (§4 enrollment, §5 rotation, §6 accounts, §9 moves, §14-§16
-what was built). Everything below is on the `Vault` actor (BiselCore) or on `VaultService` (the app). No view, copy or layout was
-changed for this; the one call site that moved is "Create a box" (`SetupView.create` now calls `VaultService.createBox`).
+what was built). Everything below is on the `Vault` actor (BiselCore) or on `VaultService` (the app). First run (create, add this
+Mac, restore) goes through the `BoxSetup` state machine: [SETUP.md](SETUP.md).
 
 "Box" is what the person reads; "vault" and "lane" stay in code.
 
@@ -14,9 +14,10 @@ changed for this; the one call site that moved is "Create a box" (`SetupView.cre
 | `cloudkit://iCloud.app.bisel/box-…` | the person's iCloud (private database, one zone per box)       | `.active`                      |
 | `https://…`                        | the Bisel server (opt-in: `connectServer`)                      | `.active`                      |
 
-New boxes: `VaultService.createBox(deviceName:)` creates the box in iCloud when the signed build has it (`BISEL_CLOUDKIT`) and an
-iCloud account is signed in, else on this Mac only. BiselDev never uses iCloud. "I already have one" (`VaultService.recover`) first
-looks for a box in this Mac's iCloud that the 24 words open, then the server.
+New boxes go to iCloud (`BoxSetup.create`, SETUP.md): when iCloud cannot take one, nothing is made and the reason is a typed
+error; "this Mac only" is the person's explicit choice (`createOnThisMacOnly`). BiselDev (no `BISEL_CLOUDKIT`) never uses iCloud
+and makes boxes on this Mac only. "I already have one" restores the box in this Apple Account's iCloud that the 24 words open
+(`BoxSetup.restore`); the server is not tried at first run. The server is opt-in, from Settings (`connectServer`).
 
 ## States the UI must show
 
@@ -27,7 +28,7 @@ sync gets through. Nothing is ever lost in any of them: the box keeps working on
 | State                        | Meaning                                                              | What the person can do                                                                                                       |
 | ---------------------------- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `.accountUnavailable(reason)` | iCloud signed out, restricted, or not determined                    | Nothing needed: sign in to iCloud; the next sync resumes by itself. Show it as paused, not as an error.                      |
-| `.accountChanged`             | Another Apple Account is signed in than the one the box was put on | Choose: **Move the box to this account** (`putBoxInICloudAgain()`) or **Stop syncing** (`stopSyncing()`). Never automatic. Say the other devices stay on the old account until they do the same. |
+| `.accountChanged`             | Another Apple Account is signed in than the one the box was put on | Choose: **Move the box to this account** (`putBoxInICloudAgain()`, through `BoxSetup.moveBoxToThisAccount`: refused with `SetupError.iCloudHasBox` when that account already holds another box, unless `evenIfItHoldsAnotherBox`) or **Stop syncing** (`stopSyncing()`). Never automatic. Say the other devices stay on the old account until they do the same. |
 | `.storeMissing`               | The box's data in iCloud was deleted (iCloud settings)             | **Upload this Mac's copy** (`putBoxInICloudAgain()`). Other devices then show the existing "server reset" alarm once and carry on after `acknowledgeServerReset()`. |
 | `.moved(to:)`                 | Another device moved the box to iCloud and this Mac cannot reach it (no iCloud, another account) | Sign in to the same Apple Account, or keep using this Mac on the old lane.                                                   |
 
@@ -52,14 +53,14 @@ manifest tells them). Show progress as one busy state (`isBusy`); it returns `La
 The zone is writable by anyone holding the Apple Account session (and by Apple), so the request is bound to an 88-bit pairing
 secret only the two devices see (SYNC-LANES §4, D6). The old out-of-band `EnrollmentRequest` path still works on every lane.
 
-New device:
+New device (through `BoxSetup`, SETUP.md §2):
 1. `VaultService.startICloudEnrollment(deviceName:)` → `PairingOffer`. **Show** `offer.secret.words` (8 words, the typed form for a
    Mac without camera), `offer.qrPayload` as a QR code, and `offer.fingerprint` (96 bits, to compare). The request is now in iCloud.
-2. Poll `VaultService.finishICloudEnrollment()` every few seconds while that screen is up. **States:**
-   `EnrollmentError.notApprovedYet` = "waiting for approval on your other device" (keep polling);
-   `EnrollmentError.approvalUnproven` = an envelope arrived that nobody with the words approved: **stop, show an alarm**, do not
-   continue; success = unlock, then the existing verification-code comparison (`verificationCode()` / `confirmEnrollment(code:)`).
-   `LaneError.storeMissing` from step 1 = this iCloud account holds no box ("create one, or recover with the 24 words").
+   `SetupError.noBoxInICloud` = this iCloud account holds no box ("create one, or recover with the 24 words").
+2. Poll `VaultService.finishICloudEnrollment()` every few seconds while that screen is up: `false` = "waiting for approval on your
+   other device" (keep polling); `SetupError.approvalUnproven` = an envelope arrived that nobody with the words approved: **stop,
+   show an alarm**, do not continue; `true` = unlocked, and `setupState` is `.compareCode(code)`: the verification-code comparison,
+   `VaultService.confirmICloudEnrollment(code:)` with the code the other device shows.
 
 Approving device (unlocked, after a sync):
 1. `VaultService.pendingEnrollments()` → `[PendingEnrollment]` (name, kind, `request.fingerprint`, `receivedAt`, `isExpired`).

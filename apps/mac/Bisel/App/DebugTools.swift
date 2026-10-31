@@ -13,7 +13,7 @@ enum DebugTools {
         guard ProcessInfo.processInfo.environment["BISEL_DEV_TOUR"] != nil else { return }
         Task {
             try? await Task.sleep(for: .seconds(4))
-            try? await service.bootstrapLocal(deviceName: "tour")
+            try? await service.createBoxOnThisMacOnly(deviceName: "tour")
             try? await Task.sleep(for: .seconds(4))
             if ProcessInfo.processInfo.environment["BISEL_DEV_TOUR"] == "continue" {
                 NotificationCenter.default.post(name: .init("app.bisel.dev.tour.continue"), object: nil)   // MainWindowView presses Continue
@@ -30,7 +30,9 @@ enum DebugTools {
             DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: .main) { note in
                 guard let path = note.userInfo?["path"] as? String else { return }
                 MainActor.assumeIsolated {
-                    guard let w = NSApp.windows.first(where: { $0.title.hasPrefix("Bisel") && $0.isVisible && !($0 is NSPanel) }),
+                    // The onboarding screens clear the title (it would draw over the progress bar): take the main window then.
+                    guard let w = NSApp.windows.first(where: { $0.title.hasPrefix("Bisel") && $0.isVisible && !($0 is NSPanel) })
+                            ?? NSApp.windows.first(where: { $0.title.isEmpty && $0.isVisible && $0.canBecomeMain && !($0 is NSPanel) }),
                           let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else {
                         Log.app.notice("snapshot: no main window"); return
                     }

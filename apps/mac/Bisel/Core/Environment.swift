@@ -3,7 +3,8 @@ import BiselCore
 
 /// Where this process keeps its vault, and which key store backs it.
 enum BiselEnvironment {
-    /// The one server every box uses. Not a setting: the person only ever chooses to connect or not.
+    /// The Bisel server, opt-in from Settings (first run puts the box in iCloud). Not a setting: the person only ever chooses
+    /// to connect or not.
     static let defaultServer = "https://box.bisel.app"
 
     /// `~/Library/Application Support/bisel/vault`. SPEC §7 wants the App Group container from day one; that needs a
