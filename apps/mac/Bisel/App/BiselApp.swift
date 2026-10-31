@@ -1,5 +1,8 @@
 import KeyboardShortcuts
 import SwiftUI
+#if BISEL_CLOUDKIT
+import BiselCloudKit
+#endif
 
 @main
 struct BiselApp: App {
@@ -42,7 +45,22 @@ private struct OpenWindowBridge: ViewModifier {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated { AppModel.shared.start() }
+        #if BISEL_CLOUDKIT
+        // CloudKit's silent pushes for the box's zone. Without the push entitlement registration fails (logged) and the 60 s poll
+        // carries on alone (docs/SYNC-LANES.md §15, "What needs Rodrigo").
+        NSApp.registerForRemoteNotifications()
+        #endif
     }
+
+    #if BISEL_CLOUDKIT
+    func application(_ application: NSApplication, didFailToRegisterForRemoteNotificationsWithError error: any Error) {
+        Log.app.notice("push registration failed: \(error.localizedDescription)")
+    }
+
+    func application(_ application: NSApplication, didReceiveRemoteNotification userInfo: [String: Any]) {
+        CloudKitLane.handleRemoteNotification(userInfo)   // the vault service syncs on the signal
+    }
+    #endif
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { AppModel.shared.terminate() }

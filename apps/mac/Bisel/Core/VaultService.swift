@@ -1,6 +1,9 @@
 import AppKit
 import Observation
 import BiselCore
+#if BISEL_CLOUDKIT
+import BiselCloudKit
+#endif
 
 /// Non-secret view of an item: what the list, the search index and the panel need. Passwords, notes and TOTP
 /// secrets are never held here; they are decrypted on demand through the `Vault` actor.
@@ -60,6 +63,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     private(set) var startupError: String?
     private(set) var deviceName = ""
     private(set) var serverURL: URL?
+    /// Where the box syncs and whether that works right now (iCloud signed out, another Apple Account, data deleted in
+    /// iCloud, moved elsewhere). Refreshed at launch and after every sync. See BiselCore/LANES.md for what each state asks of the UI.
+    private(set) var laneStatus: LaneStatus = .thisDeviceOnly
     private(set) var deviceID = ""
     /// Recovery phrase shown right after set-up, until the user confirms "I have stored it".
     private(set) var pendingPhrase: RecoveryPhrase?
@@ -102,7 +108,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             let keyStore = BiselEnvironment.makeKeyStore(directory: directory)
             // The core's own window is a backstop (30 min); the app enforces the user's fill window and idle timeout.
             vault = try Vault(.init(location: StoreLocation(directory: directory), keyStore: keyStore, gate: AppGate(),
-                                    fillWindow: 30 * 60, deviceKind: "mac"))
+                                    fillWindow: 30 * 60, deviceKind: "mac", laneProvider: Self.laneProvider))
         } catch {
             startupError = "Could not open the local box store: \(error.localizedDescription)"
             Log.app.error("vault init failed: \(error.localizedDescription)")
@@ -113,6 +119,29 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         lockMonitor = LockMonitor(service: self)
         lockMonitor?.start()
         await refreshPhase()
+        listenForLaneSignals()
+    }
+
+    /// The signed build syncs boxes through iCloud (`cloudkit://` addresses); the server stays for boxes that use it.
+    private static var laneProvider: Vault.LaneProvider? {
+        #if BISEL_CLOUDKIT
+        CloudBox.provider
+        #else
+        nil
+        #endif
+    }
+
+    /// A push from CloudKit, or the iCloud account changing, means "sync now"; the 60 s poll stays the floor.
+    private func listenForLaneSignals() {
+        #if BISEL_CLOUDKIT
+        Task { [weak self] in
+            for await _ in CloudKitLane.signals() { await self?.sync(reason: "push") }
+        }
+        #endif
+    }
+
+    private func refreshLaneStatus() async {
+        laneStatus = ((try? await vault?.laneStatus()) ?? nil) ?? .thisDeviceOnly
     }
 
     // MARK: phase
@@ -122,6 +151,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         if let id = try? await vault.identity() {
             deviceName = id.deviceName; serverURL = id.serverURL; deviceID = id.deviceID
         }
+        await refreshLaneStatus()
         let configured = await vault.isConfigured
         let unlocked = await vault.isUnlocked
         pendingChanges = (try? await vault.pendingChanges()) ?? 0
@@ -201,6 +231,64 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         setPhase(.unlocked)
     }
 
+    /// "Create a box": in iCloud when this build has it and an account is signed in (no server involved), otherwise on this Mac
+    /// only (it can be moved to iCloud later with `moveToICloud`). The server is opt-in (`connectServer`).
+    func createBox(deviceName: String) async throws {
+        #if BISEL_CLOUDKIT
+        guard let vault else { throw BiselVault.VaultError.notConfigured }
+        if await CloudBox.isAvailable() {
+            isBusy = true; defer { isBusy = false }
+            let address = CloudBox.newAddress()
+            let phrase = try await vault.bootstrap(lane: address, deviceName: deviceName)
+            setRecoveryUnconfirmed(true)
+            pendingPhrase = phrase
+            freshBox = true
+            await refreshPhase()
+            setPhase(.unlocked)
+            await CloudBox.subscribe(address)
+            return
+        }
+        Log.app.notice("iCloud not available: creating the box on this Mac only")
+        #endif
+        try await bootstrapLocal(deviceName: deviceName)
+    }
+
+    /// Puts this box in iCloud and syncs through it from now on (from the server or from "this Mac only"). The server's copy
+    /// is left alone. `phrase` is needed when the box never lived in iCloud (`MigrationError.phraseRequired`).
+    func moveToICloud(phrase: String?) async throws {
+        #if BISEL_CLOUDKIT
+        guard let vault else { throw BiselVault.VaultError.notConfigured }
+        isBusy = true; defer { isBusy = false }
+        let address = CloudBox.newAddress()
+        try await vault.enableLane(address, phrase: try phrase.map(RecoveryPhrase.init))
+        await CloudBox.subscribe(address)
+        await refreshPhase()
+        await sync(reason: "moved to iCloud")
+        #else
+        throw LaneError.unsupported
+        #endif
+    }
+
+    /// After `.storeMissing` (the box's iCloud data was deleted) or `.accountChanged` (another Apple Account): upload this
+    /// Mac's copy to the iCloud account signed in now. Never done without the person asking.
+    func putBoxInICloudAgain(phrase: String? = nil) async throws {
+        guard let vault, let address = serverURL else { throw BiselVault.VaultError.notConfigured }
+        isBusy = true; defer { isBusy = false }
+        try await vault.enableLane(address, phrase: try phrase.map(RecoveryPhrase.init))
+        #if BISEL_CLOUDKIT
+        await CloudBox.subscribe(address)
+        #endif
+        await refreshPhase()
+        await sync(reason: "put back in iCloud")
+    }
+
+    /// Stops syncing; the box stays on this Mac and nothing is deleted where it synced.
+    func stopSyncing() async throws {
+        guard let vault else { throw BiselVault.VaultError.notConfigured }
+        try await vault.detachLane()
+        await refreshPhase()
+    }
+
     /// Back from the recovery phrase of a box that was created a moment ago and holds nothing: erase it and start over.
     func discardNewBox() async {
         guard freshBox, pendingPhrase != nil, let vault else { return }
@@ -234,11 +322,33 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     func recover(server: URL, phrase: String, deviceName: String) async throws {
         guard let vault else { throw BiselVault.VaultError.notConfigured }
         isBusy = true; defer { isBusy = false }
-        try await vault.recover(server: server, phrase: try RecoveryPhrase(phrase), deviceName: deviceName)
+        let words = try RecoveryPhrase(phrase)
+        if try await !recoverFromICloud(words, deviceName: deviceName) {
+            try await vault.recover(server: server, phrase: words, deviceName: deviceName)
+        }
         await refreshPhase()
         setPhase(.unlocked)
         await sync(reason: "recover")
         await reload()
+    }
+
+    /// "I already have one": a box in this Mac's iCloud that the 24 words open comes first; false when there is none (the
+    /// server is tried next).
+    private func recoverFromICloud(_ phrase: RecoveryPhrase, deviceName: String) async throws -> Bool {
+        #if BISEL_CLOUDKIT
+        guard let vault, await CloudBox.isAvailable() else { return false }
+        for address in (try? await CloudBox.existingBoxes()) ?? [] {
+            guard let lane = CloudBox.lane(for: address) else { continue }
+            do {
+                try await vault.recover(lane: RecordBox(storage: lane, deviceID: nil), address: address, phrase: phrase, deviceName: deviceName)
+                await CloudBox.subscribe(address)
+                return true
+            } catch {
+                Log.app.notice("an iCloud box did not open with these words: \(describe(error))")   // another box of the account
+            }
+        }
+        #endif
+        return false
     }
 
     func importBackup(from url: URL, phrase: String, server: URL, token: String, deviceName: String) async throws {
@@ -478,6 +588,11 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
                 return
             }
             if report.pulled > 0 || report.pushed > 0 || !report.conflicts.isEmpty { await reload() }
+            await refreshLaneStatus()
+            // D4 (docs/SYNC-LANES.md §6, §13): a box only in iCloud has no second copy if the Apple Account is lost. INTEGRATION
+            // POINT for the backup reminder of the .bisel-backup work (PR #4): once it is on main, ask
+            // `vault.backupStatus(policy:)` here (it classifies a `cloudkit://` address as iCloud-only) and raise its reminder.
+            // The UI for it is Rodrigo's (BiselCore/LANES.md).
             if !report.conflicts.isEmpty {
                 Toast.shared.show("\(report.conflicts.count) sync conflict(s): your edit was kept as “… (conflict)”", isError: true, duration: .seconds(4))
             }
@@ -488,6 +603,12 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             default: syncState = .failed(describe(e))
             }
             Log.app.notice("sync(\(reason)) failed: \(describe(e))")
+        } catch let e as LaneError {
+            // iCloud signed out, another account, data deleted: not a failure of this Mac. `laneStatus` says which.
+            pendingChanges = (try? await vault.pendingChanges()) ?? pendingChanges
+            syncState = .offline(describe(e))
+            await refreshLaneStatus()
+            Log.app.notice("sync(\(reason)) paused: \(describe(e))")
         } catch {
             syncState = .failed(describe(error))
             Log.app.error("sync(\(reason)) failed: \(describe(error))")

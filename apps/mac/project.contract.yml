@@ -13,9 +13,7 @@ packages:
     traits: [SoftwareKeys]
 targets:
   Bisel:
-    dependencies:
-      - package: BiselCore
-        product: BiselCloudKit
+    dependencies:   # BiselCloudKit comes from project.yml
       - package: BiselCore
         product: BiselLaneContract
     settings:

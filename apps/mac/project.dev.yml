@@ -16,6 +16,9 @@ targets:
     settings:
       base:
         CODE_SIGN_ENTITLEMENTS: Bisel/BiselDev.entitlements
+      # No BISEL_CLOUDKIT in any configuration: the dev build never talks to real CloudKit (docs/SYNC-LANES.md §3).
       configs:
         Debug:
           SWIFT_ACTIVE_COMPILATION_CONDITIONS: "DEBUG BISEL_DEV_FIXTURE BISEL_SOFTWARE_KEYS"
+        Release:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: ""
