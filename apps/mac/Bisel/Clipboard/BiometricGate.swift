@@ -60,5 +60,15 @@ enum BiometricGate {
         } catch let e as LAError {
             throw e.code == .userCancel || e.code == .appCancel ? Failure.denied : Failure.unavailable(e.localizedDescription)
         }
+        // The policy accepts any finger enrolled now. DK-enc (`.biometryCurrentSet`) refuses a finger added after the keys were made,
+        // but only at the next unlock: while the box is open, someone who knows the Mac password could add a finger and pass this
+        // gate for every copy, edit and revoke. That changes the enrolment, so it locks the box instead.
+        if enrollmentChanged?() == true {
+            throw Failure.unavailable("Touch ID fingerprints changed on this Mac, so the box was locked")
+        }
     }
+
+    /// Set by `VaultService`: locks an unlocked box and returns true when the enrolled fingerprints changed since this Mac's keys
+    /// were made.
+    static var enrollmentChanged: (@MainActor () -> Bool)?
 }
