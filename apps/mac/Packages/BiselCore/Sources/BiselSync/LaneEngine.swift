@@ -29,6 +29,9 @@ public struct SyncReport: Sendable, Equatable {
     public var repaired = 0
     /// Things the lane did that are not legitimate updates (hard deletes, a position that went backwards).
     public var incidents: [LaneIncident] = []
+    /// What the freshness witness (docs/SYNC-LANES.md §8) says about the lane. `.forked` is an alarm; `.laneBehind` resolves
+    /// itself once a device that holds the newer state syncs.
+    public var freshness: FreshnessState = .unavailable
     public init() {}
 }
 
@@ -39,10 +42,12 @@ public struct LaneEngine: Sendable {
     let lane: any BoxLane
     /// Needed only to build "(conflict)" copies; nil while locked.
     let vaultKey: @Sendable () -> LockedKey?
+    /// The second freshness witness (iCloud key-value storage on the signed app); nil: the lane's own checks only.
+    let freshness: (any FreshnessWitness)?
     let verifier = LaneVerifier()
 
-    public init(store: LocalStore, lane: any BoxLane, vaultKey: @escaping @Sendable () -> LockedKey?) {
-        self.store = store; self.lane = lane; self.vaultKey = vaultKey
+    public init(store: LocalStore, lane: any BoxLane, vaultKey: @escaping @Sendable () -> LockedKey?, freshness: (any FreshnessWitness)? = nil) {
+        self.store = store; self.lane = lane; self.vaultKey = vaultKey; self.freshness = freshness
     }
 
     private var laneKey: String { lane.id.rawValue }
@@ -84,6 +89,7 @@ public struct LaneEngine: Sendable {
             try await repair(&report, epoch: epoch)
             try await attest(report, epoch: epoch)
         }
+        report.freshness = await witness(epoch: epoch, writing: pushing && !report.rotationAdopted)
         return report
     }
 
@@ -352,6 +358,27 @@ public struct LaneEngine: Sendable {
                 report.repaired += 1
             }
         }
+    }
+
+    /// Checks the lane against the freshness witness and, when this device knows more (or the witness holds a fork or nothing
+    /// usable), writes its own statement signed by the current admin key. Never fails the sync: the witness is a second opinion.
+    private func witness(epoch: Int, writing: Bool) async -> FreshnessState {
+        guard let freshness, !lane.capabilities.headIsCursor, let state = try? store.laneState(laneKey) else { return .unavailable }
+        let known = witness(state)
+        guard let root = known.aks.first?.ak else { return .unwitnessed }   // locked and never pinned: nothing to compare yet
+        let key = FreshnessStatement.key(root: root)
+        let stored: SignedFreshness?
+        do { stored = try await freshness.read(key) } catch { return .unavailable }
+        let verdict = verifier.freshness(stored, chain: known.aks, counter: known.freshnessCounter)
+        // Only for the epoch this device is at, with the key the chain ends in: a statement must never vouch for a chain it did not pin.
+        guard verdict.rewrite, writing, known.epoch == epoch, let vk = vaultKey(), let me = try? store.identity()?.deviceID,
+              let admin = try? vk.withKey({ AdminSigner(key: try VaultAdmin.signingKey(vaultKey: $0)) }), admin.publicKey == known.aks.last?.ak
+        else { return verdict.state }
+        let statement = FreshnessStatement(epoch: known.epoch, aks: known.aks, counter: known.freshnessCounter, writer: me,
+                                           ts: Int(Date().timeIntervalSince1970))
+        guard let blob = try? ControlRecords.encode(statement), let sig = try? admin.sign(FreshnessStatement.message(blob)),
+              (try? await freshness.write(SignedFreshness(statement: blob, sig: sig), key: key)) != nil else { return verdict.state }
+        return verdict.state == .unwitnessed ? .current : verdict.state
     }
 
     /// Bumps this device's freshness counter after it wrote, on lanes that do not number their own history.
