@@ -554,7 +554,13 @@ public struct RecordBox: BoxLane {
 
     /// Unconditional write of one record; anything but an acceptance is a failure of the lane.
     private func put(_ record: LaneRecord) async throws {
-        guard case .accepted = try await storage.write([LaneWrite(record: record, expect: .any)])[0] else { throw SyncError.malformedResponse }
+        switch try await storage.write([LaneWrite(record: record, expect: .any)])[0] {
+        case .accepted: return
+        // Why the storage refused (a full iCloud is `quota`) is what the person needs to hear, not "unexpected response".
+        case .rejected(.tooLarge): throw SyncError.tooLarge
+        case .rejected(let why): throw SyncError.server(status: 409, code: "\(why)")
+        case .conflict: throw SyncError.malformedResponse
+        }
     }
 
     /// The first log slot not held by a genuine entry, the hash of the entry before it, and the tag of whatever squats on the
