@@ -309,6 +309,7 @@ public struct LaneEngine: Sendable {
                                                                      reason: $0.reason.rawValue, blob: $0.record.blob) })
             // Records the lane says it deleted for good are never honoured: forget that it holds them, and they go back up.
             try store.forgetAcks(laneKey, ids: changes.removed.filter { $0.kind == .item || $0.kind == .tombstone || $0.kind == .manifest }.map(\.id))
+            try noteEnrollments(changes, members: known.members)
             let localEpoch = try store.identity()?.epoch ?? 1
             let meta = verdict.meta ?? changes.meta ?? LaneMeta(epoch: localEpoch, headSeq: state.knownHead)
             for rec in changes.upserts {
@@ -344,6 +345,30 @@ public struct LaneEngine: Sendable {
             }
         }
     }
+
+    /// Requests to join that are newest on this device: the approver lists them (`Vault.pendingEnrollments`) and the person
+    /// approves one with the pairing secret. Only requests signed by the key they carry are kept, stamped with this device's
+    /// clock when first seen (a rewrite of the same request keeps that time, so nobody can keep one fresh), and dropped once the
+    /// lane deletes them or the device is a member. Anyone with the storage account can write requests: the newest few only.
+    private func noteEnrollments(_ changes: LaneChanges, members: [DeviceInfo]) throws {
+        let requests = changes.upserts.filter { $0.kind == .enroll }.compactMap(ControlRecords.verifiedEnrollRequest)
+        let gone = Set(changes.removed.filter { $0.kind == .enroll }.compactMap { ControlRecords.deviceOfEnrollRequest($0.id) })
+        guard !requests.isEmpty || !gone.isEmpty else { return }
+        var list = try store.receivedEnrollmentsJSON().flatMap { try? JSONDecoder().decode([ReceivedEnrollment].self, from: $0) } ?? []
+        let identity = try store.identity()
+        let joined = Set(members.map(\.id) + (identity?.roster.map(\.deviceID) ?? []) + (identity.map { [$0.deviceID] } ?? []))
+        let now = Int(Date().timeIntervalSince1970)
+        for request in requests {
+            let first = list.first { $0.request.deviceID == request.deviceID }?.receivedAt ?? now
+            list.removeAll { $0.request.deviceID == request.deviceID }
+            list.append(ReceivedEnrollment(request: request, receivedAt: first))
+        }
+        list.removeAll { gone.contains($0.request.deviceID) || joined.contains($0.request.deviceID) }
+        list = Array(list.sorted { $0.receivedAt < $1.receivedAt }.suffix(Self.keptEnrollments))
+        try store.setReceivedEnrollmentsJSON(try JSONEncoder().encode(list))
+    }
+
+    static let keptEnrollments = 8
 
     /// A complete reading of the lane against what this device knows: control records it has seen must still be there, and so
     /// must every record it was told the lane holds (the missing ones go back up).

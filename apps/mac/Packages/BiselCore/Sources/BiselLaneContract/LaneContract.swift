@@ -325,7 +325,139 @@ public enum LaneContract {
                 c.expect(try await fresh.vault.items().items.map(\.title).sorted() == ["Bank", "Made on the old lane"], "the 24 words recover the moved box")
             }
         },
+        ContractFlow(name: "a new device on the same account joins through the lane with the 8 words, and the lane keeps no request afterwards") { rig, c in
+            let storage = try c.require(rig.storage)
+            let a = try rig.device("a"), b = try rig.device("b")
+            _ = try await rig.bootstrap(a)
+            let bank = try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+
+            let offer = try await b.vault.prepareEnrollment(lane: rig.address, deviceName: b.name)
+            do { try await b.vault.completeEnrollment(); c.fail("nothing is taken before the approval") } catch EnrollmentError.notApprovedYet {}
+
+            try await a.vault.sync()
+            let pending = try c.require(try await a.vault.pendingEnrollments().first { $0.request.deviceID == offer.request.deviceID },
+                                        "the approver lists the request it saw on the lane")
+            c.expect(pending.request.fingerprint == offer.fingerprint, "the listed request carries the new device's own keys")
+            c.expect(!pending.isExpired, "a request just seen is not expired")
+            try await a.vault.approveEnrollment(pending, pairing: try PairingSecret(words: offer.secret.words))
+
+            try await b.vault.completeEnrollment()
+            try await b.vault.unlock()
+            try await b.vault.confirmEnrollment(code: try await a.vault.verificationCode())
+            try await b.vault.sync()
+            c.expect(try await b.vault.revealPassword(id: bank.id) == "bank-pw", "the new device reads the box")
+            c.expect(try await b.vault.identity()?.pairingSecret == nil, "the pairing secret is gone once the device joined")
+
+            try await a.vault.sync()
+            c.expect(try await a.vault.pendingEnrollments().isEmpty, "the approver lists nothing once the device joined")
+            c.expect(try await enrollRecords(storage.lane).isEmpty, "the lane holds no enroll records afterwards")
+        },
+
+        ContractFlow(name: "a request whose keys were swapped, or the wrong words, are never approved, and a new device takes no envelope nobody with the words approved") { rig, c in
+            let lane = try c.require(rig.storage).lane
+            let a = try rig.device("a"), b = try rig.device("b")
+            _ = try await rig.bootstrap(a)
+            try await a.vault.save(login("Bank", password: "bank-pw"))
+            try await a.vault.sync()
+            let offer = try await b.vault.prepareEnrollment(lane: rig.address, deviceName: b.name)
+            let bID = offer.request.deviceID
+
+            // Someone with the storage account rewrites the request with keys of their own: same device id, their own valid
+            // signature, the new device's proof copied over.
+            let genuine = try c.require(try await lane.read([LaneRecordRef(kind: .enroll, id: ControlRecords.enrollID(bID))]).first ?? nil,
+                                        "the request is on the lane")
+            var request = try c.require(ControlRecords.decode(ControlRecords.EnrollRequest.self, genuine.blob))
+            let mallorySig = P256.Signing.PrivateKey(), malloryEnc = P256.KeyAgreement.PrivateKey()
+            request.sigPubkey = mallorySig.publicKey.x963Representation.base64URLEncoded()
+            request.encPubkey = malloryEnc.publicKey.x963Representation.base64URLEncoded()
+            var swapped = LaneRecord(kind: .enroll, id: genuine.id, rev: 0, epoch: genuine.epoch, blob: try ControlRecords.encode(request), writer: bID)
+            swapped.sig = try mallorySig.signature(for: swapped.canonical).rawRepresentation
+            try await put(swapped, on: lane, c)
+
+            try await a.vault.sync()
+            let forged = try c.require(try await a.vault.pendingEnrollments().first { $0.request.deviceID == bID }, "the rewritten request is listed")
+            c.expect(forged.request.fingerprint != offer.fingerprint, "sanity: the listed request carries the swapped keys")
+            do { try await a.vault.approveEnrollment(forged, pairing: offer.secret); c.fail("swapped keys must not be approved") }
+            catch EnrollmentError.pairingMismatch {}
+
+            // The genuine request, with words the person mistyped.
+            try await put(genuine, on: lane, c)
+            try await a.vault.sync()
+            let real = try c.require(try await a.vault.pendingEnrollments().first { $0.request.deviceID == bID }, "the genuine request is listed")
+            c.expect(real.request.fingerprint == offer.fingerprint, "sanity: the genuine request is back")
+            do { try await a.vault.approveEnrollment(real, pairing: PairingSecret.generate()); c.fail("the wrong words must not approve") }
+            catch EnrollmentError.pairingMismatch {}
+
+            c.expect(try await a.vault.devices().allSatisfy { $0.id != bID }, "the device is not a member")
+            c.expect(try await a.vault.roster().allSatisfy { $0.deviceID != bID }, "the device is not in the roster")
+            c.expect(try await lane.read([LaneRecordRef(kind: .envelope, id: ControlRecords.envelopeID(epoch: 1, device: bID))]).first! == nil,
+                     "no envelope was sealed to anyone")
+            do { try await b.vault.completeEnrollment(); c.fail("nothing was approved") } catch EnrollmentError.notApprovedYet {}
+
+            // A holder of the box key (a device, or one that kept the key) seals an envelope to the new device, with an approval
+            // that carries the right pairing MAC but a signature nobody in the box made: not an approval.
+            let aEnvelope = try c.require(try await a.vault.identity()?.envelope)
+            let vk = try await a.keyStore.openEnvelope(aEnvelope, reason: "test")
+            let admin = try AdminSigner(vaultKey: vk)
+            let planted = try DeviceEnvelope.seal(vaultKey: vk, toEncryptionKey: offer.request.encPubkey)
+            try await put(try adminSigned(LaneRecord(kind: .envelope, id: ControlRecords.envelopeID(epoch: 1, device: bID), rev: 0, epoch: 1, blob: planted),
+                                          by: admin), on: lane, c)
+            let rightMAC = offer.secret.approval(deviceID: bID, envelopeHash: planted.sha256Hex(), rootAdminKey: admin.publicKey, epoch: 1)
+            try await put(try approvalRecord(bID, envelope: planted, epoch: 1, mac: rightMAC, by: AdminSigner(key: .init())), on: lane, c)
+            do { try await b.vault.completeEnrollment(); c.fail("an approval the box did not sign is no approval") } catch EnrollmentError.notApprovedYet {}
+
+            // Someone who cannot see the words builds a box of their own around the new device's public keys: their head, their
+            // admin key, an envelope with their key, an approval they signed. Everything checks out but the pairing MAC.
+            var theirs = BiselRandom.bytes(32)
+            defer { theirs.zeroize() }
+            let theirAdmin = try AdminSigner(vaultKey: theirs)
+            let head = ControlRecords.Head(epoch: 1, aks: [.init(epoch: 1, ak: theirAdmin.publicKey, sig: nil)])
+            try await put(try adminSigned(LaneRecord(kind: .head, id: ControlRecords.headID, rev: 0, epoch: 1, blob: try ControlRecords.encode(head)),
+                                          by: theirAdmin), on: lane, c)
+            let theirEnvelope = try DeviceEnvelope.seal(vaultKey: theirs, toEncryptionKey: offer.request.encPubkey)
+            try await put(try adminSigned(LaneRecord(kind: .envelope, id: ControlRecords.envelopeID(epoch: 1, device: bID), rev: 0, epoch: 1,
+                                                     blob: theirEnvelope), by: theirAdmin), on: lane, c)
+            let guessed = PairingSecret.generate().approval(deviceID: bID, envelopeHash: theirEnvelope.sha256Hex(),
+                                                            rootAdminKey: theirAdmin.publicKey, epoch: 1)
+            try await put(try approvalRecord(bID, envelope: theirEnvelope, epoch: 1, mac: guessed, by: theirAdmin), on: lane, c)
+            do { try await b.vault.completeEnrollment(); c.fail("an envelope nobody with the words approved is not taken") }
+            catch EnrollmentError.approvalUnproven {}
+            c.expect(await b.vault.isConfigured == false, "the new device holds no envelope")
+            c.expect(try await b.vault.identity()?.pairingSecret != nil, "the new device still waits for the real approval")
+        },
     ]
+
+    /// The `enroll` records a lane holds.
+    private static func enrollRecords(_ lane: any SyncLane) async throws -> [LaneRecord] {
+        var out: [LaneRecord] = []
+        var cursor: LaneCursor?
+        while true {
+            let page = try await lane.fetch(since: cursor, limit: 200)
+            out += page.upserts.filter { $0.kind == .enroll }
+            cursor = page.cursor
+            if !page.hasMore { return out }
+        }
+    }
+
+    /// Writes a record straight to the storage, as anyone with the account can.
+    private static func put(_ record: LaneRecord, on lane: any SyncLane, _ c: Checks) async throws {
+        guard case .accepted = try await lane.write([LaneWrite(record: record, expect: .any)])[0] else {
+            c.fail("the storage refused \(record.id)"); throw Checks.Stop()
+        }
+    }
+
+    private static func adminSigned(_ record: LaneRecord, by admin: AdminSigner) throws -> LaneRecord {
+        var r = record
+        r.sig = try admin.sign(r.canonical)
+        return r
+    }
+
+    private static func approvalRecord(_ device: String, envelope: Data, epoch: Int, mac: Data, by admin: AdminSigner) throws -> LaneRecord {
+        let approval = ControlRecords.EnrollApproval(deviceID: device, epoch: epoch, envelopeHash: envelope.sha256Hex(), mac: mac.base64URLEncoded())
+        return try adminSigned(LaneRecord(kind: .enroll, id: ControlRecords.enrollApprovedID(device), rev: 0, epoch: epoch,
+                                          blob: try ControlRecords.encode(approval)), by: admin)
+    }
 
     /// A lane that is only storage and misbehaves (nothing the server lane can be made to do). They drive `FakeLane` directly.
     public static let hostile: [ContractFlow] = [

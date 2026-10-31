@@ -271,6 +271,54 @@ public struct RecordBox: BoxLane {
         try await put(record)
     }
 
+    // MARK: enrollment (§4)
+
+    /// New device: puts its request on the lane (`enroll.<device>`), signed with its own DK-sig. The proof inside is what makes
+    /// it worth anything; the signature only keeps the record whole.
+    public func requestEnrollment(_ request: ControlRecords.EnrollRequest) async throws {
+        guard let deviceID, deviceID == request.deviceID, let signDevice else { throw SyncError.notAuthorized }
+        var record = LaneRecord(kind: .enroll, id: ControlRecords.enrollID(deviceID), rev: 0, epoch: 0,
+                                blob: try ControlRecords.encode(request), writer: deviceID)
+        record.sig = try signDevice(record.canonical)
+        try await put(record)
+    }
+
+    /// Approver, after `admit`: the approval the new device checks its envelope against. `mac` gets the root of the head's
+    /// admin-key chain (the key the box is known by), so the approval also names the box.
+    public func recordEnrollmentApproval(device: String, envelope: Data, epoch: Int, admin: AdminSigner,
+                                         mac: @Sendable (_ envelopeHash: String, _ rootAdminKey: Data) throws -> Data) async throws {
+        guard let (head, _) = try await currentHead(), let root = head.aks.first?.ak else { throw SyncError.notAuthorized }
+        if epoch != head.epoch { throw RotationError.staleEpoch(serverEpoch: head.epoch) }
+        let hash = envelope.sha256Hex()
+        let approval = ControlRecords.EnrollApproval(deviceID: device, epoch: epoch, envelopeHash: hash, mac: try mac(hash, root).base64URLEncoded())
+        try await put(try signed(LaneRecord(kind: .enroll, id: ControlRecords.enrollApprovedID(device), rev: 0, epoch: epoch,
+                                            blob: try ControlRecords.encode(approval), writer: deviceID), by: admin))
+    }
+
+    /// New device: its envelope (checked as `ownEnvelope` checks it), the root admin key of the head it hangs under, and the
+    /// approval for it if one is signed by that head's key for its epoch (nil: none yet, or a forged one). Throws
+    /// `SyncError.notFound` while there is no envelope. The pairing MAC is the caller's to check: it holds the secret.
+    public func enrollmentGrant() async throws -> (envelope: Data, epoch: Int, rootAdminKey: Data, approval: ControlRecords.EnrollApproval?) {
+        guard let deviceID, let (head, _) = try await currentHead(), let root = head.aks.first?.ak,
+              let key = ControlRecords.key(at: head.epoch, in: head.aks),
+              let record = try await readOne(.envelope, ControlRecords.envelopeID(epoch: head.epoch, device: deviceID)),
+              ControlRecords.adminSignatureValid(record, key: key) else { throw SyncError.notFound }
+        var approval: ControlRecords.EnrollApproval?
+        if let a = try await readOne(.enroll, ControlRecords.enrollApprovedID(deviceID)), a.epoch == head.epoch,
+           ControlRecords.adminSignatureValid(a, key: key),
+           let decoded = ControlRecords.decode(ControlRecords.EnrollApproval.self, a.blob), decoded.deviceID == deviceID, decoded.epoch == head.epoch {
+            approval = decoded
+        }
+        return (record.blob, head.epoch, root, approval)
+    }
+
+    /// New device, once it joined: the request and the approval served their purpose.
+    public func endEnrollment() async throws {
+        guard let deviceID else { return }
+        try await storage.remove([LaneRecordRef(kind: .enroll, id: ControlRecords.enrollID(deviceID)),
+                                  LaneRecordRef(kind: .enroll, id: ControlRecords.enrollApprovedID(deviceID))])
+    }
+
     // MARK: plumbing
 
     private static var now: Int { Int(Date().timeIntervalSince1970) }

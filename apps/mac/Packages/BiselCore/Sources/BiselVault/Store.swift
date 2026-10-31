@@ -99,6 +99,9 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
     /// of that move (each move bumps it). A `laneAddress` other than `serverURL` is a move this device has not followed yet.
     public var laneAddress: URL?
     public var laneGeneration: Int = 0
+    /// The pairing secret (`PairingSecret.rawValue`) of an enrollment over a storage lane, kept until it completes: the approval
+    /// the approver writes is checked against it. nil otherwise.
+    public var pairingSecret: Data?
 
     public init(deviceID: String, deviceName: String, serverURL: URL?, keyStore: String, envelope: Data? = nil,
                 recoveryPublicKey: Data? = nil, recoveryEnvelope: Data? = nil,
@@ -136,6 +139,7 @@ public struct LocalIdentity: Codable, Sendable, Equatable {
         recoveryAnchorGeneration = try c.decodeIfPresent(Int.self, forKey: .recoveryAnchorGeneration) ?? 0
         laneGeneration = try c.decodeIfPresent(Int.self, forKey: .laneGeneration) ?? 0
         laneAddress = try c.decodeIfPresent(URL.self, forKey: .laneAddress)
+        pairingSecret = try c.decodeIfPresent(Data.self, forKey: .pairingSecret)
     }
 }
 
@@ -624,6 +628,10 @@ public final class LocalStore: Sendable {
 
     public func recentEventsJSON() throws -> Data? { try getMeta("events") }
     public func setRecentEventsJSON(_ json: Data) throws { try setMeta("events", json) }
+
+    /// Enrollment requests seen on a storage lane (`[ReceivedEnrollment]`, kept by `LaneEngine`).
+    public func receivedEnrollmentsJSON() throws -> Data? { try getMeta("enrollments") }
+    public func setReceivedEnrollmentsJSON(_ json: Data) throws { try setMeta("enrollments", json) }
 
     /// Drops a record that never reached the server (local create followed by local delete).
     public func forget(_ id: String, keepInTrash: Bool = false) throws {
