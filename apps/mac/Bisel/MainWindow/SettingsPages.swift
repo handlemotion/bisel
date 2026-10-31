@@ -199,7 +199,7 @@ struct AccountSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.s) {
             SettingsCard(title: "This Mac") {
-                SettingsRow(label: "Name") { Text(service.deviceName).lineLimit(1) }
+                SettingsRow(label: "Name") { Text(DisplayText.clean(service.deviceName)).lineLimit(1) }
                 SettingsRow(label: "Keys") { Text(BiselEnvironment.usesSoftwareKeys ? "Software (debug build)" : "Secure Enclave") }
             }
             SettingsCard(title: "Locking") {

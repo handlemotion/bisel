@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import BiselCore
 
 struct ImportView: View {
     let service: VaultService
@@ -18,7 +19,7 @@ struct ImportView: View {
             Caption("1Password (.1pux) or a CSV with logins, notes and one-time codes. Everything is encrypted on this Mac before it syncs. Delete the export file afterwards: it contains your passwords in the clear.")
             HStack {
                 Button("Choose file…", systemImage: "doc") { picking = true }.controlSize(.small).accessibilityIdentifier("import-choose")
-                if let fileName { Text(fileName).foregroundStyle(theme.colors.secondaryText.color) }
+                if let fileName { Text(DisplayText.clean(fileName)).foregroundStyle(theme.colors.secondaryText.color) }
             }
             #if DEBUG
             // Debug builds only: lets flow tests pick a file without driving the out-of-process open panel.
@@ -32,7 +33,7 @@ struct ImportView: View {
                     Caption(Self.breakdown(o))
                     if !o.skipped.isEmpty {
                         Caption("\(o.skipped.count) skipped:")
-                        ForEach(Array(o.skipped.prefix(8).enumerated()), id: \.offset) { _, s in Caption("• " + s) }
+                        ForEach(Array(o.skipped.prefix(8).enumerated()), id: \.offset) { _, s in Caption("• " + DisplayText.clean(s)) }
                     }
                 }
                 Button(working ? "Importing… \(progress)/\(o.items.count)" : "Import \(Self.items(o.items.count))") { run(o) }

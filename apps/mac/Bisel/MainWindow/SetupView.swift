@@ -239,7 +239,7 @@ struct OnboardingImportView: View {
         OnboardingFrame(progress: 0.9, title: "Bring your passwords",
                         message: "Import a 1Password export (.1pux) or a CSV from Apple Passwords, Chrome and others. Everything is encrypted on this Mac first, and the export file stays on your disk, so delete it afterwards.") {
             VStack(alignment: .leading, spacing: theme.spacing.m) {
-                if let fileName { Caption(fileName) }
+                if let fileName { Caption(DisplayText.clean(fileName)) }
                 if let o = outcome {
                     Text("Found \(o.items.count) items, \(o.logins) logins and \(o.notes) notes")
                         .font(theme.font(theme.fonts.search)).foregroundStyle(theme.colors.secondaryText.color)

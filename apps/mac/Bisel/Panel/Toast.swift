@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import BiselCore
 
 /// Small non-activating HUD for results after the command panel has gone (fill failed, copied, …).
 @MainActor
@@ -9,6 +10,7 @@ final class Toast {
     private var hideTask: Task<Void, Never>?
 
     func show(_ text: String, isError: Bool = false, duration: Duration = .seconds(2.2)) {
+        let text = DisplayText.clean(text)   // toasts quote item titles and error text: no hidden direction characters
         let theme = ThemeStore.shared.current
         let prefs = AccessibilityStore.shared.preferences
         let host = NSHostingView(rootView: ToastView(text: text, isError: isError)

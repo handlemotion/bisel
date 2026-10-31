@@ -1,7 +1,11 @@
 import Foundation
+import BiselCore
 
 /// A lightweight search hit. Deliberately contains NO secret: the panel renders these in a list,
 /// and passwords are never rendered there (SPEC.md §8).
+///
+/// Display only: `title` and `username` are cleaned of direction and control characters (`DisplayText`) for every row,
+/// detail, VoiceOver label and announcement. Copy and fill read the item itself (`VaultSecretProvider`), never these.
 struct VaultSearchResult: Identifiable, Hashable, Sendable {
     let id: String
     let title: String
@@ -11,6 +15,16 @@ struct VaultSearchResult: Identifiable, Hashable, Sendable {
     /// What the item actually holds, so the panel only offers rows and actions that can work.
     var hasPassword = true
     var hasTOTP = true
+
+    init(id: String, title: String, username: String, domain: String, tags: [String], hasPassword: Bool = true, hasTOTP: Bool = true) {
+        self.id = id
+        self.title = DisplayText.clean(title)
+        self.username = DisplayText.clean(username)
+        self.domain = domain
+        self.tags = tags
+        self.hasPassword = hasPassword
+        self.hasTOTP = hasTOTP
+    }
 }
 
 enum SecretKind: String, Sendable {
