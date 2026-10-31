@@ -486,6 +486,47 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         await sync(reason: "import")
     }
 
+    // MARK: enrollment over iCloud (a second Mac or an iPhone on the same Apple Account)
+
+    /// New device, step 1: finds the box in this Mac's iCloud and asks to join it. Show `offer.secret.words` (8 words) and
+    /// `offer.qrPayload` (QR), and `offer.fingerprint`; then call `finishICloudEnrollment()` until it stops throwing
+    /// `EnrollmentError.notApprovedYet`. Throws `LaneError.storeMissing` when this iCloud account holds no box.
+    func startICloudEnrollment(deviceName: String) async throws -> PairingOffer {
+        #if BISEL_CLOUDKIT
+        guard let vault else { throw BiselVault.VaultError.notConfigured }
+        guard let address = try await CloudBox.existingBoxes().first else { throw LaneError.storeMissing }
+        return try await vault.prepareEnrollment(lane: address, deviceName: deviceName)
+        #else
+        throw LaneError.unsupported
+        #endif
+    }
+
+    /// New device, step 2 (poll every few seconds while the offer is on screen): takes the envelope once another device
+    /// approved with the words. Then unlock and compare `verificationCode()` as for any enrollment.
+    func finishICloudEnrollment() async throws {
+        guard let vault else { throw BiselVault.VaultError.notConfigured }
+        try await vault.completeEnrollment()
+        if let address = serverURL { await subscribeIfICloud(address) }
+        await refreshPhase()
+    }
+
+    /// Approving device: requests this box's iCloud lane has seen (sync first). Never approved without the person.
+    func pendingEnrollments() async -> [PendingEnrollment] {
+        ((try? await vault?.pendingEnrollments()) ?? nil) ?? []
+    }
+
+    /// Approving device: the person typed (or scanned) the new device's 8 words. Touch ID inside.
+    func approve(_ pending: PendingEnrollment, words: [String]) async throws {
+        guard let vault else { throw BiselVault.VaultError.notConfigured }
+        try await vault.approveEnrollment(pending, pairing: try PairingSecret(words: words))
+    }
+
+    private func subscribeIfICloud(_ address: URL) async {
+        #if BISEL_CLOUDKIT
+        await CloudBox.subscribe(address)
+        #endif
+    }
+
     // MARK: devices
 
     func devices() async throws -> [DeviceInfo] {
