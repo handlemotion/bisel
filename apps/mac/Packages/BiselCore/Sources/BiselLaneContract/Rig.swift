@@ -44,10 +44,14 @@ public struct StorageUnderTest: Sendable {
 public final class Rig: @unchecked Sendable {
     public let server: TestServer?
     public let storage: StorageUnderTest?
+    /// Every device reaches the storage through this, so a flow can make the lane stop taking writes part-way (pass-through until armed).
+    public let flaky: FlakyLane?
     public var fake: FakeLane? { storage?.fake }
     public var address: URL { server?.url ?? URL(string: "lane://\(storage?.name ?? "box")")! }
 
-    init(server: TestServer?, storage: StorageUnderTest?) { self.server = server; self.storage = storage }
+    init(server: TestServer?, storage: StorageUnderTest?) {
+        self.server = server; self.storage = storage; flaky = storage.map { FlakyLane($0.lane) }
+    }
 
     static func with<T>(_ lane: ContractLane, _ body: (Rig) async throws -> T) async throws -> T {
         switch lane {
@@ -67,7 +71,7 @@ public final class Rig: @unchecked Sendable {
 
     /// A device that syncs through this rig's storage when its address is the rig's (`lane://`), and with the server otherwise.
     public func device(_ name: String) throws -> Device {
-        guard let lane = storage?.lane else { return try Device(name) }
+        guard let lane = flaky else { return try Device(name) }
         return try Device(name, laneProvider: { id, _ in id.serverURL?.scheme == "lane" ? lane : nil })
     }
 
@@ -80,7 +84,7 @@ public final class Rig: @unchecked Sendable {
 
     public func recover(_ d: Device, phrase: RecoveryPhrase) async throws {
         if let server { try await d.vault.recover(server: server.url, phrase: phrase, deviceName: d.name, boxID: try server.onlyBoxID()) }
-        else if let storage { try await d.vault.recover(lane: RecordBox(storage: storage.lane, deviceID: nil), address: address, phrase: phrase, deviceName: d.name) }
+        else if let flaky { try await d.vault.recover(lane: RecordBox(storage: flaky, deviceID: nil), address: address, phrase: phrase, deviceName: d.name) }
     }
 
     /// Everything the lane holds, as `d` sees it.
@@ -99,6 +103,20 @@ public final class Rig: @unchecked Sendable {
         }
         let id = try c.require(try await d.vault.identity()?.deviceID)
         return try await d.signedClientFactory(address, id).pull(since: 0).records
+    }
+
+    /// The records of `kind` the storage holds right now (control records, which `records(as:)` leaves out).
+    public func stored(_ kind: LaneKind) async throws -> [LaneRecord] {
+        guard let storage else { return [] }
+        var out: [LaneRecord] = []
+        var cursor: LaneCursor?
+        while true {
+            let page = try await storage.lane.fetch(since: cursor, limit: 200)
+            out += page.upserts.filter { $0.kind == kind }
+            cursor = page.cursor
+            if !page.hasMore { break }
+        }
+        return out
     }
 
     /// The lane forgets its newest write (a restore from a slightly older point). Returns the id it lost.
