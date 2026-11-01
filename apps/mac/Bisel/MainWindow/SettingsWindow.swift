@@ -8,6 +8,7 @@ import BiselCore
 enum SettingsPage: String, CaseIterable, Identifiable {
     case general, fill, sync, account
     var id: String { rawValue }
+    static let defaultsKey = "settings.page"
 
     var title: String {
         switch self {
@@ -48,7 +49,7 @@ enum SettingsLayout {
 
 struct SettingsShell: View {
     let service: VaultService
-    @AppStorage("settings.page") private var page = SettingsPage.general
+    @AppStorage(SettingsPage.defaultsKey) private var page = SettingsPage.general
     @Environment(\.theme) private var theme
 
     var body: some View {

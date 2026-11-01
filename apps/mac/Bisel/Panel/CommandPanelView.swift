@@ -59,7 +59,9 @@ struct CommandPanelView: View {
         VStack(spacing: 0) {
             topBar
             Hairline()
-            if model.isUnlocked {
+            if model.boxIsEmpty {
+                emptyBoxState
+            } else if model.isUnlocked {
                 HStack(spacing: 0) {
                     listColumn.frame(width: theme.card.listWidth)
                     Hairline(axis: .vertical)
@@ -158,11 +160,17 @@ struct CommandPanelView: View {
         switch model.mode {
         case .search:
             if model.results.isEmpty {
-                Text("No matches")
-                    .accessibilityAddTraits(.isStaticText)
-                    .font(theme.font(theme.fonts.row))
-                    .foregroundStyle(theme.colors.tertiaryText.color)
-                    .frame(maxWidth: .infinity, minHeight: theme.card.rowHeight * 2)
+                VStack(spacing: theme.spacing.m) {
+                    Image("EmptyTray").renderingMode(.template).resizable().scaledToFit()
+                        .frame(width: theme.card.rowHeight * 1.5)
+                        .foregroundStyle(theme.colors.secondaryText.color)
+                        .accessibilityHidden(true)
+                    Text("No matches")
+                        .accessibilityAddTraits(.isStaticText)
+                        .font(theme.font(theme.fonts.row))
+                        .foregroundStyle(theme.colors.tertiaryText.color)
+                }
+                .frame(maxWidth: .infinity, minHeight: theme.card.rowHeight * 4)
             } else {
                 ForEach(Array(model.results.enumerated()), id: \.element.id) { i, r in
                     ListRow(selected: i == model.selected) {
@@ -204,6 +212,25 @@ struct CommandPanelView: View {
                 .accessibilityAction { model.activateAction(at: i) }
             }
         }
+    }
+
+    /// Unlocked with nothing in the box: the whole card, like the locked state, instead of an empty list and detail.
+    private var emptyBoxState: some View {
+        VStack(spacing: theme.spacing.s) {
+            Image("EmptyTray").renderingMode(.template).resizable().scaledToFit()
+                .frame(width: theme.card.rowHeight * 2.75)
+                .foregroundStyle(theme.colors.text.color)
+                .padding(.bottom, theme.spacing.l)
+                .accessibilityHidden(true)
+            Text("Your box is empty").font(theme.font(theme.fonts.detailTitle / 1.5, weight: .semibold))
+            Text("Press Return to import passwords")
+                .font(theme.font(theme.fonts.detail)).foregroundStyle(theme.colors.secondaryText.color)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { model.activate(.plain) }
+        .accessibilityIdentifier("panel.empty")
     }
 
     private var lockedState: some View {

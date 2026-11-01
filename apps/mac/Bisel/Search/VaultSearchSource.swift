@@ -38,6 +38,8 @@ enum SecretKind: String, Sendable {
 protocol VaultSearchSource: AnyObject, Sendable {
     /// False while the vault is locked. The panel then shows an "Unlock" empty state.
     var isUnlocked: Bool { get }
+    /// True once the unlocked box has loaded and holds nothing the panel can show. The panel then shows its import state.
+    var isEmpty: Bool { get }
     /// Footer label shown when the source is not the real vault (e.g. "DEV FIXTURE").
     var provenanceLabel: String? { get }
     /// `query` empty returns recents/frequent. Results are best-first.
@@ -55,6 +57,10 @@ protocol VaultSecretProvider: AnyObject, Sendable {
     func hosts(for id: String) -> [String]
     /// Seconds a TOTP code lives (the item's `period`).
     func totpPeriod(for id: String) -> Int
+}
+
+extension VaultSearchSource {
+    var isEmpty: Bool { false }
 }
 
 extension VaultSecretProvider {

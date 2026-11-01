@@ -24,7 +24,8 @@ enum DebugFlow {
                 await svc.start()
                 if svc.phase == .needsSetup { try? await svc.createBoxOnThisMacOnly(deviceName: "Flow Mac") }
                 svc.confirmPhraseStored()
-                AppModel.shared.showMainWindow()
+                // BISEL_DEV_PANEL=1: the command panel over the (empty) box instead of the window.
+                if env["BISEL_DEV_PANEL"] == "1" { AppModel.shared.panelController.show() } else { AppModel.shared.showMainWindow() }
             }
             return
         }

@@ -144,6 +144,8 @@ final class CommandPanelModel {
     @ObservationIgnored var runCopy: ((SecretKind, VaultSearchResult) -> Void)?
     @ObservationIgnored var runOpenURL: ((VaultSearchResult) -> Void)?
     @ObservationIgnored var runUnlock: (() -> Void)?
+    /// ⌘, and the empty box's Return: settings, on the given page.
+    @ObservationIgnored var runOpenSettings: ((SettingsPage) -> Void)?
     @ObservationIgnored var runClose: (() -> Void)?
 
     var query = "" { didSet { if query != oldValue { refresh() } } }
@@ -197,6 +199,8 @@ final class CommandPanelModel {
     @ObservationIgnored var lastKeyboardAt: ContinuousClock.Instant = .now
 
     var isUnlocked: Bool { source.isUnlocked }
+    /// Unlocked, loaded, and nothing in it: the panel shows the import state instead of an empty list.
+    var boxIsEmpty: Bool { source.isUnlocked && source.isEmpty }
     var actions: [PanelAction] {
         if case .actions(let item) = mode { return PanelAction.available(for: item) }
         return PanelAction.allCases
@@ -565,6 +569,7 @@ final class CommandPanelModel {
     /// In the actions menu, ↩ runs the highlighted action.
     func activate(_ key: ActivationKey) {
         if !source.isUnlocked { runUnlock?(); return }
+        if boxIsEmpty { if key == .plain { runOpenSettings?(.account) }; return }   // Import lives on the Account page
         switch mode {
         case .actions(let item):
             if key == .plain { perform(actions[actionIndex], on: item) }

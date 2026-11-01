@@ -500,6 +500,9 @@ final class CommandPanelController {
             else if mods.isEmpty { model.activate(.plain) }
             else { return false }
             return true
+        case 43 where mods == [.command]:  // ⌘,
+            model.runOpenSettings?(.general)
+            return true
         case 40 where mods == [.command]:  // ⌘K
             model.toggleActions()
             return true

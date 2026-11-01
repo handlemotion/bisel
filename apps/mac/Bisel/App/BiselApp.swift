@@ -20,7 +20,7 @@ struct BiselApp: App {
         } label: {
             // The label exists from launch (menu content only exists once opened), so it can hand non-view code the
             // `openWindow` action in time for the first-run set-up window.
-            Image(systemName: "lock.shield.fill").modifier(OpenWindowBridge())
+            Image("MenuBarIcon").modifier(OpenWindowBridge())
         }
 
         Window("Bisel", id: "main") {
@@ -72,10 +72,12 @@ private struct MenuBarContent: View {
 
     var body: some View {
         Button("Command Panel") { AppModel.shared.panelController.show() }
-        Button("Open Bisel") {
+        // Before a box exists the window is set-up, not settings.
+        Button(AppModel.shared.service.phase == .needsSetup ? "Set Up Bisel…" : "Settings…") {
             AppModel.shared.openMainWindow = { openWindow(id: "main") }
             AppModel.shared.showMainWindow()
         }
+        .keyboardShortcut(",")
         Button("Sync Now") { Task { await AppModel.shared.service.sync(reason: "menu") } }
         Button("Lock") { AppModel.shared.service.lock(reason: "menu") }
         Divider()

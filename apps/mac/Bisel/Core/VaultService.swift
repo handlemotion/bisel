@@ -70,6 +70,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     // MARK: observable state
     private(set) var phase: Phase = .needsSetup
     private(set) var rows: [ItemRow] = []
+    private var rowsLoaded = false
     private(set) var syncState: SyncState = .idle
     private(set) var pendingChanges = 0
     private(set) var lastConflicts = 0
@@ -102,6 +103,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
 
     // MARK: VaultSearchSource
     var isUnlocked: Bool { phase == .unlocked }
+    /// Only after a reload has installed rows, so the panel never flashes "empty" while the box is still decrypting.
+    var isEmpty: Bool { rowsLoaded && !rows.contains { $0.type == .login || $0.type == .secret } }
     var provenanceLabel: String? { BiselEnvironment.usesSoftwareKeys ? "SOFTWARE KEYS" : nil }
 
     // MARK: wiring
@@ -277,7 +280,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     }
 
     private func dropDecryptedState() {
-        rows = []; rowsByID = [:]; otpGatedAt = [:]
+        rows = []; rowsByID = [:]; otpGatedAt = [:]; rowsLoaded = false
         index.replace([])
         undecryptable = 0
         // pendingPhrase is deliberately kept: losing the only copy of a just-created phrase to an idle lock would be worse.
@@ -549,6 +552,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
 
     private func apply(_ built: Built) {
         rows = built.rows
+        rowsLoaded = true
         rowsByID = built.byID
         index.install(built.index)
     }
