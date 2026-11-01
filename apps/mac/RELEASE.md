@@ -110,7 +110,7 @@ record types until you deploy them, and the shipped app cannot save a record unt
    - CloudKit Console (Apple's documented path): <https://icloud.developer.apple.com> → CloudKit Database → container
      `iCloud.app.bisel` → **Deploy Schema Changes…** → check the list is record type `R` with its six fields and nothing else →
      **Deploy**.
-   - Or the script, which validates against Production, shows the diff and asks you to type a confirmation:
+   - Or the script, which exports Production, shows the diff against the repo file and asks you to type a confirmation:
 
      ```bash
      apps/mac/Tools/cloudkit-schema.sh deploy --production
