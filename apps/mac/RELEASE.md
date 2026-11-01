@@ -15,7 +15,8 @@ What is in the repo:
 | Entitlements                            | `Bisel/Bisel.entitlements`: iCloud container `iCloud.app.bisel` (CloudKit), key-value storage, container environment                        |
 | CloudKit environment                    | `BISEL_ICLOUD_ENVIRONMENT`: `Development` in Debug, `Production` in Release; `iCloudContainerEnvironment: Production` in the export options |
 | Export options                          | `Tools/ExportOptions.plist` (`developer-id`, manual, profile `Bisel Developer ID`)                                                          |
-| Release script                          | `Tools/release.sh`: preflight, archive, export, verify, notarize, staple, assess, DMG or zip                                                |
+| Release script                          | `Tools/release.sh`: preflight, archive, export, verify, notarize, staple, assess, DMG or zip, Sparkle appcast; `--publish <tag>` uploads     |
+| In-app updates (Sparkle 2)              | `project.yml`: the `Sparkle` package, `SUFeedURL`, `SUPublicEDKey` and the update keys in `info`; `Bisel/App/Updater.swift`; see "Updates"  |
 | CloudKit schema                         | `CloudKit/schema.ckdb` (created by step 5) and `Tools/cloudkit-schema.sh`                                                                   |
 
 The unsigned builds are unchanged: `project.dev.yml` (BiselDev) and CI never sign, and CI has no signing secrets. The Release job
@@ -121,6 +122,28 @@ record types until you deploy them, and the shipped app cannot save a record unt
 
 Check: `apps/mac/Tools/cloudkit-schema.sh validate --production` reports no drift between Production and the repo file.
 
+### 6. Sparkle update-signing key
+
+Every update is signed with an EdDSA key; the app only installs updates signed by the key whose public half is `SUPublicEDKey` in
+`project.yml`. Done once, on the Mac that builds releases.
+
+1. Resolve the packages once (any build does it; `release.sh` puts them in `apps/mac/build-dist/dd/SourcePackages`), then:
+
+   ```bash
+   "$(find ~/Library/Developer/Xcode/DerivedData apps/mac/build-dist -path '*artifacts/sparkle/Sparkle/bin/generate_keys' | head -n 1)" --account bisel
+   ```
+
+   It stores the private key in the login keychain (item "Private key for signing Sparkle updates", account `bisel`) and prints
+   only the public key. Put that in `project.yml` as `SUPublicEDKey`, by PR.
+2. Back it up: `generate_keys --account bisel -x bisel-sparkle.key` writes the private key to a file. Store it with the Developer ID
+   `.p12`, outside this Mac, and delete the file. **If the key is lost, installed copies can never be updated again**: they reject
+   anything signed by another key, and everyone has to download a new DMG by hand.
+3. On another Mac: `generate_keys --account bisel -f bisel-sparkle.key` imports it.
+
+The keychain asks once whether Sparkle's tools may read the item (again after a Sparkle upgrade, since the tools change):
+**Always Allow**. Check: `release.sh --preflight` reports `sparkle: keychain account "bisel"`; the full run also refuses an app whose
+`SUPublicEDKey` is not this key's public half.
+
 ### The keychain access group (decided 2026-10-31: pinned)
 
 Device keys and secrets live in `ZVGTVNUPVA.app.bisel`: `keychain-access-groups` in `Bisel.entitlements`, read back at run time
@@ -145,11 +168,50 @@ reset those throwaway boxes.
    hardened runtime, secure timestamp, `icloud-container-environment = Production`, the iCloud and key-value storage entitlements, the application and team identifiers the keychain needs,
    the embedded profile, and `Tools/check-release.sh` (no `get-task-allow`, no software keys, no debug hooks). It notarizes the app
    (`notarytool submit --wait`), staples it, requires `spctl -a -vv` to say `source=Notarized Developer ID` and
-   `codesign --verify --deep --strict` to pass, then builds the DMG, signs, notarizes, staples and assesses that too. Output is in
-   `apps/mac/build-dist/` with its SHA-256. Notarization usually takes a few minutes; on rejection the script prints Apple's log.
+   `codesign --verify --deep --strict` to pass, then builds the DMG, signs, notarizes, staples and assesses that too. Last, Sparkle's
+   `generate_appcast` signs the DMG with the keychain key and writes `appcast.xml` (one item, pointing at
+   `releases/download/vX.Y.Z/Bisel-X.Y.Z.dmg`, itself signed), and `sign_update --verify` checks both signatures. Output is in
+   `apps/mac/build-dist/`: the DMG, `Bisel-X.Y.Z.dmg.sha256` and `appcast.xml`. Notarization usually takes a few minutes; on
+   rejection the script prints Apple's log.
 4. Smoke test on a Mac or user account that has never run a Debug build: open the DMG, drag Bisel to Applications, launch. There
    should be no Gatekeeper warning beyond the usual "downloaded from the internet" prompt. Create a box in iCloud and check it syncs.
-5. Publish: tag `vX.Y.Z` and attach the DMG and its SHA-256 to a GitHub release.
+5. Publish: merge the release-please PR (it tags `vX.Y.Z` and creates the GitHub release), build from that tag's commit, then
+
+   ```bash
+   apps/mac/Tools/release.sh --publish vX.Y.Z
+   ```
+
+   It uploads the DMG, its `.sha256` and `appcast.xml` to that release with `gh release upload`, after checking that the last build
+   is this version from the tagged commit, that the appcast points at this tag and verifies, and that the release does not already
+   have the files. From then on every installed copy finds the update within a day, or at once from "Check for Updates…".
+
+## Updates
+
+Sparkle 2 (`SPUStandardUpdaterController`, `Bisel/App/Updater.swift`), with Sparkle's standard dialogs. The app is not sandboxed,
+so Sparkle's XPC services are unused.
+
+- **Feed.** `SUFeedURL` is `https://github.com/handlemotion/bisel/releases/latest/download/appcast.xml`: GitHub redirects
+  `latest/download/<name>` to the asset of the newest release that is neither a draft nor a pre-release. Between merging the
+  release PR and `--publish` that release has no `appcast.xml`, so checks get a 404: background checks fail silently, and
+  "Check for Updates…" shows an error. Publish right after the release PR merges.
+- **Trust.** `SUPublicEDKey` (step 6). `SURequireSignedFeed` makes the app reject a feed whose signature does not verify, and
+  `SUVerifyUpdateBeforeExtraction` checks the DMG's EdDSA signature before it is opened. The update is also a Developer ID
+  build of the same team, which Sparkle checks against the running app's signature.
+- **Schedule.** `SUEnableAutomaticChecks` and a daily `SUScheduledCheckInterval`. An update found in the background is shown
+  without taking focus (gentle reminders, a menu-bar app); "Check for Updates…" in the menu-bar menu checks at once and is
+  disabled while a check or an install is under way.
+- **Debug builds** never start the updater, so an Xcode run is not offered the shipped release, unless
+  `BISEL_DEV_FEED_URL=<appcast url>` is set (compiled out of Release, like the other `BISEL_DEV_` hooks).
+- **The first Sparkle build is installed by hand.** 0.1.1 and earlier have no updater: download that one DMG and replace the
+  app once. Every later version arrives through the app.
+
+To test an update end to end without touching a real box: build two Debug copies (`project.dev.yml`) with different
+`CFBundleShortVersionString` and `CURRENT_PROJECT_VERSION`, a test bundle id (`PRODUCT_BUNDLE_IDENTIFIER=app.bisel.mac.updatetest`,
+so Sparkle's state stays out of `app.bisel.mac`'s defaults) and a throwaway key's public half as `SUPublicEDKey`. Put the newer one
+in a DMG, run `generate_appcast --ed-key-file <key> --download-url-prefix http://127.0.0.1:<port>/` on it, serve that folder with
+`python3 -m http.server --bind 127.0.0.1 <port>`, and open the older copy from a scratch folder with
+`BISEL_DEV_FEED_URL=http://127.0.0.1:<port>/appcast.xml`. Sparkle relaunches the updated copy without that environment, so a
+Debug copy then opens the default store: point the test copies' `BiselEnvironment.dataDirectory` at a scratch folder first.
 
 The Developer ID app and the signed Debug app share the bundle id `app.bisel.mac`, so on one Mac they share the keychain items and
 `~/Library/Application Support/bisel`. A box created by a Debug build lives in the Development environment; the shipped app looks

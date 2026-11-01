@@ -73,3 +73,16 @@ if found="$(scan "$REL_APP")"; then
   exit 1
 fi
 echo "PASS: no BISEL_DEV_ strings or software key store in $REL_APP"
+
+# The updater's trust settings (apps/mac/RELEASE.md, "Updates"): without them a shipped build would take an unsigned feed, or could
+# never verify an update at all.
+plist="$REL_APP/Contents/Info.plist"
+pl() { /usr/libexec/PlistBuddy -c "Print :$1" "$plist" 2>/dev/null; }
+key="$(pl SUPublicEDKey)"
+[[ "$(printf '%s' "$key" | base64 -d 2>/dev/null | wc -c | tr -d ' ')" == 32 ]] \
+  || { echo "FAIL: SUPublicEDKey in $plist is not a 32-byte EdDSA public key: '$key'" >&2; exit 1; }
+[[ "$(pl SUFeedURL)" == https://* ]] || { echo "FAIL: SUFeedURL is not https" >&2; exit 1; }
+for k in SURequireSignedFeed SUVerifyUpdateBeforeExtraction; do
+  [[ "$(pl $k)" == true ]] || { echo "FAIL: $k is not true in $plist" >&2; exit 1; }
+done
+echo "PASS: Sparkle feed is https, signed and checked against a real EdDSA key"

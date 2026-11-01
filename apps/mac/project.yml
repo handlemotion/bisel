@@ -55,6 +55,10 @@ packages:
   SwiftCSV:
     url: https://github.com/swiftcsv/SwiftCSV
     exactVersion: 0.10.0
+  # In-app updates (RELEASE.md, "Updates"). The app is not sandboxed, so Sparkle's XPC services are unused and need no setup.
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    exactVersion: 2.10.1
   # Production wiring: NO SoftwareKeys trait, so the software key store is not compiled in (SPEC §4/§8).
   # Debug runs on an unsigned build use project.dev.yml (-> BiselDev.xcodeproj), which enables the trait.
   BiselCore:
@@ -75,6 +79,7 @@ targets:
       - package: FuzzyMatch
       - package: ZIPFoundation
       - package: SwiftCSV
+      - package: Sparkle
       - package: BiselCore
         product: BiselCore
       # The iCloud lane (docs/SYNC-LANES.md §3, §15). Compiled in only with BISEL_CLOUDKIT (set below for this signed spec);
@@ -114,6 +119,15 @@ targets:
         NSFaceIDUsageDescription: "Bisel uses Touch ID to unlock your box."
         # The keychain group in Bisel.entitlements, read back at run time (BiselEnvironment.keychainGroup).
         BiselKeychainGroup: "$(AppIdentifierPrefix)app.bisel"
+        # Sparkle (Updater.swift): the feed is an appcast.xml attached to each GitHub release by Tools/release.sh --publish, and
+        # every update is checked against this EdDSA public key (the private key is in Rodrigo's login keychain). Checks run
+        # daily in the background. The feed must carry a valid signature, and the archive's is checked before it is even extracted.
+        SUFeedURL: https://github.com/handlemotion/bisel/releases/latest/download/appcast.xml
+        SUPublicEDKey: XpIW9gQV4E3/tzdOZOkL/I3L+xJXQ7PkRl1OWDHw0Q0=
+        SUEnableAutomaticChecks: true
+        SUScheduledCheckInterval: 86400
+        SUVerifyUpdateBeforeExtraction: true
+        SURequireSignedFeed: true
         # No ATS exception here: Release is https-only. Debug builds get NSAllowsLocalNetworking from the build phase below so the
         # local dev server (http://localhost) works (security review L13).
     settings:

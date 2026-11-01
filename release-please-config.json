@@ -9,7 +9,17 @@
     ".": {
       "package-name": "bisel",
       "changelog-path": "CHANGELOG.md",
-      "extra-files": [{ "type": "generic", "path": "apps/mac/project.yml" }]
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "apps/mac/project.yml"
+        },
+        {
+          "type": "xml",
+          "path": "apps/mac/Bisel/Info.plist",
+          "xpath": "//plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::string[1]"
+        }
+      ]
     }
   }
 }
