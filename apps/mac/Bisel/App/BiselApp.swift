@@ -81,7 +81,6 @@ private struct MenuBarContent: View {
         Button("Sync Now") { Task { await AppModel.shared.service.sync(reason: "menu") } }
         Button("Lock") { AppModel.shared.service.lock(reason: "menu") }
         Divider()
-        Button("Accessibility Setup…") { AppModel.shared.onboarding.show() }
         Button("Reload Themes") { ThemeStore.shared.reload() }
         #if DEBUG
         Divider()

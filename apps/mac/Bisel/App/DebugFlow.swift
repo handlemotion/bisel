@@ -23,9 +23,30 @@ enum DebugFlow {
                 let svc = AppModel.shared.service
                 await svc.start()
                 if svc.phase == .needsSetup { try? await svc.createBoxOnThisMacOnly(deviceName: "Flow Mac") }
+                else if svc.phase == .locked { try? await svc.unlock() }
                 svc.confirmPhraseStored()
-                // BISEL_DEV_PANEL=1: the command panel over the (empty) box instead of the window.
-                if env["BISEL_DEV_PANEL"] == "1" { AppModel.shared.panelController.show() } else { AppModel.shared.showMainWindow() }
+                // BISEL_DEV_SEED=1: a few made-up logins, so the panel has rows (throwaway store only).
+                if env["BISEL_DEV_SEED"] == "1", svc.isUnlocked, svc.rows.isEmpty {
+                    for (title, user, site) in [("GitHub", "rodrigo", "github.com"), ("Figma", "rodrigo@example.com", "figma.com"),
+                                                ("Linear", "rodrigo@example.com", "linear.app"), ("Cloudflare", "ops@example.com", "dash.cloudflare.com"),
+                                                ("Apple Developer", "rodrigo@example.com", "developer.apple.com"), ("Stripe", "billing@example.com", "dashboard.stripe.com")] {
+                        var d = ItemDraft(type: .login)
+                        d.title = title; d.username = user; d.urls = ["https://\(site)"]; d.password = "correct-horse-\(title.count)"
+                        _ = try? await svc.createItem(d)
+                    }
+                    await svc.reload()
+                }
+                // BISEL_DEV_PANEL=1: the command panel over the box instead of the window (BISEL_DEV_PANEL_QUERY types a search).
+                if env["BISEL_DEV_PANEL"] == "1" {
+                    AppModel.shared.panelController.show()
+                    if let q = env["BISEL_DEV_PANEL_QUERY"] { try? await Task.sleep(for: .milliseconds(300)); AppModel.shared.panelModel.query = q }
+                } else { AppModel.shared.showMainWindow() }
+                // BISEL_DEV_SHOT=<png>: an in-process picture of what is up, a moment later (works with the screen locked).
+                if let shot = env["BISEL_DEV_SHOT"] {
+                    try? await Task.sleep(for: .milliseconds(1500))
+                    if env["BISEL_DEV_PANEL"] == "1" { AppModel.shared.panelController.debugSnapshot(to: shot) }
+                    else { DebugTools.snapshotMainWindow(to: shot) }
+                }
             }
             return
         }

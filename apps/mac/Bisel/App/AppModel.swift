@@ -14,8 +14,12 @@ final class AppModel {
     let vault: any PanelVault
     let panelModel: CommandPanelModel
     let panelController: CommandPanelController
-    let accessibility = AccessibilityMonitor()
-    private(set) lazy var onboarding = OnboardingWindowController(monitor: accessibility)
+    /// Polls from the start (scripted dev flows skip `start()`), so the pill, the Fill page and set-up never read a stale value.
+    let accessibility: AccessibilityMonitor = {
+        let m = AccessibilityMonitor()
+        m.start()
+        return m
+    }()
 
     /// Set by the SwiftUI scene so non-view code can open the main window.
     var openMainWindow: (() -> Void)?
@@ -38,6 +42,7 @@ final class AppModel {
     func start() {
         Log.app.notice("bisel started; accessibility trusted=\(AccessibilityInspector.isTrusted())")
         service.onLockStateChange = { [weak self] in self?.panelModel.refresh() }
+        service.onRowsChange = { [weak self] in self?.panelModel.refresh(keepingSelection: true) }
         Task {
             await service.start()
             #if DEBUG
@@ -46,10 +51,9 @@ final class AppModel {
                 try? await service.unlock(reason: "dev autounlock")
             }
             #endif
-            // First launch: the main window is where set-up happens. Accessibility onboarding follows once a vault exists.
+            // First launch: the main window is where set-up happens (Accessibility is one of its steps; later the panel's pill).
             if isScriptedFlow { return }
             if service.phase == .needsSetup && !BiselEnvironment.useDevFixture { showMainWindow() }
-            else if !AccessibilityInspector.isTrusted() { onboarding.show() }
         }
         // Panel opened → sync (SPEC §6: on panel open).
         NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] note in
@@ -180,7 +184,7 @@ final class AppModel {
             vault.recordUse(id: itemID)
             Log.fill.notice("\(text)")
         case .needsAccessibility:
-            onboarding.show()
+            showSettings(.fill)   // the Permission card, with the button that opens System Settings
         case .notATextField(let why):
             Toast.shared.show(why, isError: true)
         case .failed(let why):

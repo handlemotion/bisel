@@ -125,6 +125,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     @ObservationIgnored private var auditedThisLaunch = false
     /// Called on lock/unlock so the panel can redraw.
     @ObservationIgnored var onLockStateChange: (() -> Void)?
+    /// New rows were installed (after an unlock, a sync, an import): the panel re-runs its search, or it keeps showing
+    /// the results it had before the box finished loading.
+    @ObservationIgnored var onRowsChange: (() -> Void)?
 
     /// A panel open within this many seconds of the last finished sync does not sync again.
     private static let panelSyncMinInterval: TimeInterval = 10
@@ -553,6 +556,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     private func apply(_ built: Built) {
         rows = built.rows
         rowsLoaded = true
+        defer { onRowsChange?() }
         rowsByID = built.byID
         index.install(built.index)
     }

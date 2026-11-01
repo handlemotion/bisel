@@ -23,23 +23,27 @@ enum DebugTools {
         }
     }
 
+    /// A PNG of the main window's contents, rendered in-process (works with the screen locked).
+    @MainActor
+    static func snapshotMainWindow(to path: String) {
+        // The onboarding screens clear the title (it would draw over the progress bar): take the main window then.
+        guard let w = NSApp.windows.first(where: { $0.title.hasPrefix("Bisel") && $0.isVisible && !($0 is NSPanel) })
+                ?? NSApp.windows.first(where: { $0.title.isEmpty && $0.isVisible && $0.canBecomeMain && !($0 is NSPanel) }),
+              let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else {
+            Log.app.notice("snapshot: no main window"); return
+        }
+        v.cacheDisplay(in: v.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        Log.app.notice("snapshot written")
+    }
+
     @MainActor
     static func installSnapshotListener() {
         // `app.bisel.dev.snapshot.<pid>` reaches one process when several debug builds run at once.
         for name in ["app.bisel.dev.snapshot", "app.bisel.dev.snapshot.\(getpid())"] {
             DistributedNotificationCenter.default().addObserver(forName: Notification.Name(name), object: nil, queue: .main) { note in
                 guard let path = note.userInfo?["path"] as? String else { return }
-                MainActor.assumeIsolated {
-                    // The onboarding screens clear the title (it would draw over the progress bar): take the main window then.
-                    guard let w = NSApp.windows.first(where: { $0.title.hasPrefix("Bisel") && $0.isVisible && !($0 is NSPanel) })
-                            ?? NSApp.windows.first(where: { $0.title.isEmpty && $0.isVisible && $0.canBecomeMain && !($0 is NSPanel) }),
-                          let v = w.contentView, let rep = v.bitmapImageRepForCachingDisplay(in: v.bounds) else {
-                        Log.app.notice("snapshot: no main window"); return
-                    }
-                    v.cacheDisplay(in: v.bounds, to: rep)
-                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
-                    Log.app.notice("snapshot written")
-                }
+                MainActor.assumeIsolated { snapshotMainWindow(to: path) }
             }
         }
     }
