@@ -160,7 +160,7 @@ struct CommandPanelView: View {
         switch model.mode {
         case .search:
             if model.results.isEmpty {
-                VStack(spacing: theme.spacing.s) {
+                VStack(spacing: theme.spacing.m) {
                     Image("EmptyTray").renderingMode(.template).resizable().scaledToFit()
                         .frame(width: theme.card.rowHeight * 1.5)
                         .foregroundStyle(theme.colors.secondaryText.color)
@@ -220,7 +220,7 @@ struct CommandPanelView: View {
             Image("EmptyTray").renderingMode(.template).resizable().scaledToFit()
                 .frame(width: theme.card.rowHeight * 2.75)
                 .foregroundStyle(theme.colors.text.color)
-                .padding(.bottom, theme.spacing.xs)
+                .padding(.bottom, theme.spacing.l)
                 .accessibilityHidden(true)
             Text("Your box is empty").font(theme.font(theme.fonts.detailTitle / 1.5, weight: .semibold))
             Text("Press Return to import passwords")
