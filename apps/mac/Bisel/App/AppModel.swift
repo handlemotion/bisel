@@ -64,6 +64,12 @@ final class AppModel {
         #endif
     }
 
+    /// The settings window on one page (the page is the window's own `settings.page` setting, so it follows live).
+    func showSettings(_ page: SettingsPage) {
+        UserDefaults.standard.set(page.rawValue, forKey: SettingsPage.defaultsKey)
+        showMainWindow()
+    }
+
     func showMainWindow() {
         Task {
             // `openMainWindow` is installed by the menu-bar label a moment after launch.
@@ -87,6 +93,10 @@ final class AppModel {
 
     private func wirePanelActions() {
         panelModel.runUnlock = { [weak self] in self?.unlockFromPanel() }
+        panelModel.runOpenSettings = { [weak self] page in
+            self?.panelController.hide("settings", immediate: true)
+            self?.showSettings(page)
+        }
 
         panelModel.runClose = { [weak self] in self?.panelController.hide("api") }
 
