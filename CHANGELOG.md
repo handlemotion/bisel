@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/handlemotion/bisel/compare/v0.1.1...v0.1.2) (2026-11-01)
+
+
+### Features
+
+* in-app updates with Sparkle ([21d8bf2](https://github.com/handlemotion/bisel/commit/21d8bf2201b946eea37befe82b5b65d05001644d))
+
 ## [0.1.1](https://github.com/handlemotion/bisel/compare/v0.1.0...v0.1.1) (2026-11-01)
 
 

@@ -109,7 +109,7 @@ targets:
         CFBundleName: Bisel
         # release-please bumps the version on its release PR (release-please-config.json); the build number is stamped by
         # Tools/release.sh (the commit count), so every notarized build has a higher one.
-        CFBundleShortVersionString: "0.1.1" # x-release-please-version
+        CFBundleShortVersionString: "0.1.2" # x-release-please-version
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSMinimumSystemVersion: "26.0"
         LSUIElement: true
