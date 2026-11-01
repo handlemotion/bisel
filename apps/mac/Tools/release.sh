@@ -63,7 +63,7 @@ if [[ -n "$PUBLISH" ]]; then
   tagged="$(git -C "$ROOT" rev-parse --verify --quiet "$PUBLISH^{commit}")" || die "tag $PUBLISH not found (merge the release PR first)."
   [[ "$tagged" == "$COMMIT" ]] || die "the last build is from $COMMIT, but $PUBLISH is $tagged. Check out the tag and rebuild."
   grep -q "releases/download/$PUBLISH/$(basename "$ARTIFACT")" "$OUT/appcast.xml" || die "appcast.xml does not point at $PUBLISH."
-  "$SPARKLE_BIN/sign_update" --verify "$OUT/appcast.xml" >/dev/null || die "appcast.xml's signature does not verify."
+  "$SPARKLE_BIN/sign_update" --account "$SPARKLE_ACCOUNT" --verify "$OUT/appcast.xml" >/dev/null || die "appcast.xml's signature does not verify."
   existing="$(gh release view "$PUBLISH" -R "$REPO" --json assets,isDraft,isPrerelease --jq '.assets[].name')" \
     || die "no GitHub release $PUBLISH in $REPO."
   for f in "$(basename "$ARTIFACT")" "$(basename "$ARTIFACT").sha256" appcast.xml; do
@@ -259,10 +259,10 @@ cp "$ARTIFACT" "$feed/"
   || { cat "$OUT/appcast.log" >&2; die "generate_appcast failed."; }
 rm -rf "$feed"
 # Check what the app will check: the feed's signature, and the enclosure's EdDSA signature over the exact bytes being shipped.
-"$SPARKLE_BIN/sign_update" --verify "$OUT/appcast.xml" >/dev/null || die "the appcast's signature does not verify."
+"$SPARKLE_BIN/sign_update" --account "$SPARKLE_ACCOUNT" --verify "$OUT/appcast.xml" >/dev/null || die "the appcast's signature does not verify."
 ed_sig="$(sed -nE 's/.*sparkle:edSignature="([^"]+)".*/\1/p' "$OUT/appcast.xml" | head -n 1)"
 [[ -n "$ed_sig" ]] || die "appcast.xml has no sparkle:edSignature."
-"$SPARKLE_BIN/sign_update" --verify "$ARTIFACT" "$ed_sig" >/dev/null || die "the package's EdDSA signature does not verify."
+"$SPARKLE_BIN/sign_update" --account "$SPARKLE_ACCOUNT" --verify "$ARTIFACT" "$ed_sig" >/dev/null || die "the package's EdDSA signature does not verify."
 grep -q "<sparkle:version>$BUILD</sparkle:version>" "$OUT/appcast.xml" || die "appcast.xml does not carry build $BUILD."
 
 (cd "$OUT" && shasum -a 256 "$(basename "$ARTIFACT")" >"$(basename "$ARTIFACT").sha256")
