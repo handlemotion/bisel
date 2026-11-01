@@ -129,6 +129,7 @@ final class CommandPanelController {
         clearEditingHistory()
         model.presented = true  // instant open: no animation (user preference, like Raycast)
         renderRoot()
+        if !trackingAccessTab { trackAccessTab() }
         layoutPanel(animated: false, reposition: true)
         panel.ignoresMouseEvents = false
         #if DEBUG
@@ -367,6 +368,25 @@ final class CommandPanelController {
         }
     }
 
+    /// Fill turned on (or off) while the panel is up: the window gains or loses the tab's room. The trust poll writes every
+    /// second, so only an actual height change lays the panel out again. Started from the first `show()`, not `init`
+    /// (`AppModel.shared` is still being built then).
+    private var trackingAccessTab = false
+    private func trackAccessTab() {
+        trackingAccessTab = true
+        withObservationTracking {
+            _ = AppModel.shared.accessibility.trusted
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                let theme = self.themeStore.current
+                let want = theme.card.height + CommandPanelView.accessTabHeight(theme, trusted: AppModel.shared.accessibility.trusted)
+                if self.state == .shown, self.panel.frame.height != want { self.layoutPanel(animated: false) }
+                self.trackAccessTab()
+            }
+        }
+    }
+
     /// The display that has the pointer, else the main one, else any; nil only while no display is attached.
     private static var screenUnderPointer: NSScreen? {
         NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens.first
@@ -376,19 +396,24 @@ final class CommandPanelController {
     /// spacing token from `visibleFrame` so it clears the Dock and the menu bar. The window never resizes.
     private func layoutPanel(animated: Bool, reposition: Bool = false) {
         let theme = themeStore.current
-        let size = CGSize(width: theme.card.width, height: theme.card.height)
+        // While Fill is off the window also holds the tab below the card; the card stays where it would be.
+        let tab = CommandPanelView.accessTabHeight(theme, trusted: AppModel.shared.accessibility.trusted)
+        let size = CGSize(width: theme.card.width, height: theme.card.height + tab)
         // No screen at all (every display asleep or mid-reconfiguration): keep the current frame; the screen-change
         // observer lays the panel out again as soon as one is back.
         guard let screen = Self.screenUnderPointer else { return }
         let vf = screen.visibleFrame
         let inset = theme.spacing.l
-        let base: CGPoint = switch PanelPosition.current {
+        let card = CGSize(width: theme.card.width, height: theme.card.height)
+        let cardBase: CGPoint = switch PanelPosition.current {
         // Raycast-style: horizontally centered, card centre raised ~8% of the usable height above the screen centre.
-        case .center: CGPoint(x: vf.midX - size.width / 2, y: vf.midY - size.height / 2 + vf.height * 0.08)
-        case .bottomRight: CGPoint(x: vf.maxX - size.width - inset, y: vf.minY + inset)
-        case .topRight: CGPoint(x: vf.maxX - size.width - inset, y: vf.maxY - size.height - inset)
-        case .bottomCenter: CGPoint(x: vf.midX - size.width / 2, y: vf.minY + inset)
+        case .center: CGPoint(x: vf.midX - card.width / 2, y: vf.midY - card.height / 2 + vf.height * 0.08)
+        case .bottomRight: CGPoint(x: vf.maxX - card.width - inset, y: vf.minY + inset)
+        case .topRight: CGPoint(x: vf.maxX - card.width - inset, y: vf.maxY - card.height - inset)
+        case .bottomCenter: CGPoint(x: vf.midX - card.width / 2, y: vf.minY + inset)
         }
+        // At the bottom positions the card rises by the tab's height so the tab keeps the inset above the Dock.
+        let base = CGPoint(x: cardBase.x, y: max(cardBase.y - tab, vf.minY + inset))
         baseOrigin = base
         panel.dragBarHeight = theme.card.topBarHeight
         panel.dragHandleWidth = theme.spacing.l + theme.card.searchIconBox + theme.spacing.xs

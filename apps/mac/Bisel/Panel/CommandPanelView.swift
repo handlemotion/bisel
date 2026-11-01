@@ -20,16 +20,7 @@ struct CommandPanelView: View {
     private var reduceMotion: Bool { a11y.reduceMotion }
     private var glass: Bool { materialRaw != PanelMaterial.solid.rawValue && !a11y.reduceTransparency }
 
-    /// Where the card sits inside the (fixed-size, transparent) window: matches the screen position setting, so the
-    /// open/close scale and the card→pill morph anchor at the same spot.
-    private var anchor: Alignment {
-        switch PanelPosition.current {
-        case .center: .center
-        case .bottomCenter: .bottom
-        case .bottomRight: .bottomTrailing
-        case .topRight: .topTrailing
-        }
-    }
+    /// The open/close scale anchors at the screen position setting's spot, like the card→pill morph.
     private var anchorPoint: UnitPoint {
         switch PanelPosition.current {
         case .center: .center
@@ -41,21 +32,28 @@ struct CommandPanelView: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: theme.radii.card, style: .continuous)
-        cardContent
-            .frame(width: theme.card.width, height: theme.card.height)
-            .background { CardFill() }
-            .clipShape(shape)
-            .overlay(shape.strokeBorder(theme.borderColor(glass: glass), lineWidth: theme.card.hairline).allowsHitTesting(false))
-            .panelMaterial()
-            // Open: scale 0.96 → 1 + fade from the anchor, driven by the controller. The window never resizes.
-            .scaleEffect(model.presented || reduceMotion ? 1 : 0.96, anchor: anchorPoint)
-            .opacity(model.presented ? 1 : 0)
-            .frame(width: theme.card.width, height: theme.card.height, alignment: anchor)
-            .coordinateSpace(.named("panelRoot"))
-            .environment(\.colorScheme, theme.colorScheme)
-            .foregroundStyle(theme.colors.text.color)
-            .onChange(of: model.focusToken, initial: true) { searchFocused = true }
+        VStack(spacing: 0) {
+            cardContent
+                .frame(width: theme.card.width, height: theme.card.height)
+                .background { CardFill() }
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(theme.borderColor(glass: glass), lineWidth: theme.card.hairline).allowsHitTesting(false))
+                // Open: scale 0.96 → 1 + fade from the anchor, driven by the controller.
+                .scaleEffect(model.presented || reduceMotion ? 1 : 0.96, anchor: anchorPoint)
+            if !access.trusted && model.isUnlocked { accessTab }
+        }
+        .panelMaterial()
+        .opacity(model.presented ? 1 : 0)
+        // The card is pinned to the top of the window; while Fill is off the window is taller by the tab's height.
+        .frame(width: theme.card.width, height: theme.card.height + Self.accessTabHeight(theme, trusted: access.trusted), alignment: .top)
+        .coordinateSpace(.named("panelRoot"))
+        .environment(\.colorScheme, theme.colorScheme)
+        .foregroundStyle(theme.colors.text.color)
+        .onChange(of: model.focusToken, initial: true) { searchFocused = true }
     }
+
+    /// Room the "Fill is off" tab takes below the card (the controller grows the window by this much), 0 once Fill works.
+    static func accessTabHeight(_ theme: Theme, trusted: Bool) -> CGFloat { trusted ? 0 : theme.spacing.l * 2 }
 
     private var cardContent: some View {
         VStack(spacing: 0) {
@@ -63,12 +61,13 @@ struct CommandPanelView: View {
             Hairline()
             if model.boxIsEmpty {
                 emptyBoxState
+            } else if model.isUnlocked, model.mode == .search, model.results.isEmpty {
+                noMatchesState
             } else if model.isUnlocked {
                 HStack(spacing: 0) {
                     listColumn.frame(width: theme.card.listWidth)
                     Hairline(axis: .vertical)
                     DetailPane(model: model)
-                        .overlay(alignment: .bottom) { if !access.trusted { accessPill } }
                 }
             } else {
                 lockedState
@@ -162,39 +161,25 @@ struct CommandPanelView: View {
     @ViewBuilder private var rows: some View {
         switch model.mode {
         case .search:
-            if model.results.isEmpty {
-                VStack(spacing: theme.spacing.m) {
-                    Image("EmptyTray").renderingMode(.template).resizable().scaledToFit()
-                        .frame(width: theme.card.rowHeight * 1.5)
-                        .foregroundStyle(theme.colors.secondaryText.color)
-                        .accessibilityHidden(true)
-                    Text("No matches")
-                        .accessibilityAddTraits(.isStaticText)
-                        .font(theme.font(theme.fonts.row))
-                        .foregroundStyle(theme.colors.tertiaryText.color)
+            ForEach(Array(model.results.enumerated()), id: \.element.id) { i, r in
+                ListRow(selected: i == model.selected) {
+                    SiteIcon(title: r.title, domain: r.domain)
+                    Text(r.title).font(theme.font(theme.fonts.row)).lineLimit(1)
                 }
-                .frame(maxWidth: .infinity, minHeight: theme.card.rowHeight * 4)
-            } else {
-                ForEach(Array(model.results.enumerated()), id: \.element.id) { i, r in
-                    ListRow(selected: i == model.selected) {
-                        SiteIcon(title: r.title, domain: r.domain)
-                        Text(r.title).font(theme.font(theme.fonts.row)).lineLimit(1)
-                    }
-                    .id(r.id)
-                    // One element per login: title, then "user, site, 3 of 12", selected state, press = select.
-                    // Custom actions give VoiceOver / Voice Control the same routes as the keys.
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(r.title)
-                    .accessibilityValue(model.spokenDescription(ofResultAt: i))
-                    .accessibilityAddTraits(i == model.selected ? [.isButton, .isSelected] : .isButton)
-                    .accessibilityInputLabels([r.title, r.domain].filter { !$0.isEmpty })
-                    .accessibilityAction { model.selectResult(at: i) }
-                    .accessibilityAction(named: Text("Copy password")) { model.activateResult(at: i, .plain) }
-                    .accessibilityAction(named: Text("Copy username")) { model.activateResult(at: i, .shift) }
-                    .accessibilityAction(named: Text("Copy one-time code")) { model.activateResult(at: i, .command) }
-                    .accessibilityAction(named: Text("Fill focused field")) { model.activateResult(at: i, .option) }
-                    .accessibilityIdentifier("panel.row.\(r.id)")
-                }
+                .id(r.id)
+                // One element per login: title, then "user, site, 3 of 12", selected state, press = select.
+                // Custom actions give VoiceOver / Voice Control the same routes as the keys.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(r.title)
+                .accessibilityValue(model.spokenDescription(ofResultAt: i))
+                .accessibilityAddTraits(i == model.selected ? [.isButton, .isSelected] : .isButton)
+                .accessibilityInputLabels([r.title, r.domain].filter { !$0.isEmpty })
+                .accessibilityAction { model.selectResult(at: i) }
+                .accessibilityAction(named: Text("Copy password")) { model.activateResult(at: i, .plain) }
+                .accessibilityAction(named: Text("Copy username")) { model.activateResult(at: i, .shift) }
+                .accessibilityAction(named: Text("Copy one-time code")) { model.activateResult(at: i, .command) }
+                .accessibilityAction(named: Text("Fill focused field")) { model.activateResult(at: i, .option) }
+                .accessibilityIdentifier("panel.row.\(r.id)")
             }
         case .actions:
             ForEach(Array(model.actions.enumerated()), id: \.element.id) { i, a in
@@ -217,22 +202,23 @@ struct CommandPanelView: View {
         }
     }
 
-    /// Non-blocking: everything but Fill works, so a warning above the key hints, not a screen of its own.
-    private var accessPill: some View {
-        Button { AccessibilityInspector.requestAccess() } label: {
-            HStack(spacing: theme.spacing.xs) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(theme.colors.warning.color)
+    /// Non-blocking: everything but Fill works, so a solid tab hanging off the card's bottom edge, not a screen of its own.
+    private var accessTab: some View {
+        let shape = UnevenRoundedRectangle(bottomLeadingRadius: theme.radii.field, bottomTrailingRadius: theme.radii.field,
+                                           style: .continuous)
+        return Button { AccessibilityInspector.requestAccess() } label: {
+            HStack(spacing: theme.spacing.xs + 2) {
+                Image(systemName: "exclamationmark.triangle.fill")
                 Text("Fill is off. Allow Accessibility")
             }
-            .font(theme.font(theme.fonts.detail, weight: .medium))
-            .padding(.horizontal, theme.spacing.m)
-            .padding(.vertical, theme.spacing.xs + 2)
-            .background(theme.colors.warning.color.opacity(0.14), in: Capsule())
-            .overlay(Capsule().strokeBorder(theme.colors.warning.color.opacity(0.35), lineWidth: theme.card.hairline))
-            .contentShape(Capsule())
+            .font(theme.font(theme.fonts.detail, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, theme.spacing.l)
+            .frame(height: Self.accessTabHeight(theme, trusted: false) - theme.spacing.xs)
+            .background(Color.orange, in: shape)
+            .contentShape(shape)
         }
         .buttonStyle(.plain)
-        .padding(.bottom, theme.spacing.l * 3.5)
         .accessibilityHint(Text("Opens System Settings, where you turn on Accessibility for Bisel"))
         .accessibilityIdentifier("panel.accessPill")
     }
@@ -254,6 +240,27 @@ struct CommandPanelView: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { model.activate(.plain) }
         .accessibilityIdentifier("panel.empty")
+    }
+
+    /// A search with no results: the whole card, like the empty box, naming what was typed.
+    private var noMatchesState: some View {
+        VStack(spacing: theme.spacing.s) {
+            Image("EmptyTray").renderingMode(.template).resizable().scaledToFit()
+                .frame(width: theme.card.rowHeight * 2.75)
+                .foregroundStyle(theme.colors.text.color)
+                .padding(.bottom, theme.spacing.l)
+                .accessibilityHidden(true)
+            Text("No matches for “\(model.query)”")
+                .font(theme.font(theme.fonts.detailTitle / 1.5, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text("Try a site, a name or a username")
+                .font(theme.font(theme.fonts.detail)).foregroundStyle(theme.colors.secondaryText.color)
+        }
+        .padding(.horizontal, theme.spacing.l * 2)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("panel.noMatches")
     }
 
     private var lockedState: some View {
