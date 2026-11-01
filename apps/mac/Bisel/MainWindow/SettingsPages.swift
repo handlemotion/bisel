@@ -105,7 +105,9 @@ struct FillSettings: View {
         VStack(alignment: .leading, spacing: theme.spacing.s) {
             SettingsCard(title: "Permission") {
                 SettingsRow(label: accessibility.trusted ? "Accessibility: allowed" : "Accessibility: not allowed") {
-                    Button(accessibility.trusted ? "Check…" : "Set up…") { AppModel.shared.onboarding.show() }.controlSize(.small)
+                    if !accessibility.trusted {
+                        Button("Allow…") { AccessibilityInspector.requestAccess() }.controlSize(.small)
+                    }
                 }
                 Caption("Bisel types usernames, passwords and codes into the field you are in through the Accessibility permission.")
             }

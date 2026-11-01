@@ -231,10 +231,12 @@ final class CommandPanelModel {
         focusToken += 1
     }
 
-    func refresh() {
+    /// `keepingSelection`: a background reload keeps the highlighted login where it is, if it is still in the results.
+    func refresh(keepingSelection: Bool = false) {
         let t0 = ContinuousClock.now
+        let keep = keepingSelection ? selectedResult?.id : nil
         results = source.search(query, limit: Self.resultLimit)
-        selected = 0
+        selected = keep.flatMap { id in results.firstIndex { $0.id == id } } ?? 0
         notice = nil
         prepareValues()
         let dt = ContinuousClock.now - t0

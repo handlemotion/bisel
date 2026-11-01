@@ -7,6 +7,8 @@ struct MainWindowView: View {
     private let service = AppModel.shared.service
     /// After the recovery phrase of a new box: one last onboarding step to import passwords.
     @State private var showImport = false
+    /// Between the phrase and the import: the Accessibility step, only while the permission is off.
+    @State private var showAccess = false
     /// The titlebar's height, measured from the window: the scene sizes the content area, the titlebar comes on top of it,
     /// so the island's frame is its height minus this.
     @State private var titlebarInset: CGFloat = 32
@@ -24,7 +26,10 @@ struct MainWindowView: View {
             } else if inSetup {
                 SetupView(service: service).transition(Self.swap)
             } else if let phrase = service.pendingPhrase {
-                PhraseGateView(service: service, phrase: phrase) { showImport = true; service.confirmPhraseStored() }
+                PhraseGateView(service: service, phrase: phrase) { phraseStored() }
+                    .transition(Self.swap)
+            } else if showAccess {
+                OnboardingAccessibilityView(monitor: AppModel.shared.accessibility) { showAccess = false; showImport = true }
                     .transition(Self.swap)
             } else if showImport {
                 OnboardingImportView(service: service) {
@@ -59,7 +64,7 @@ struct MainWindowView: View {
         })
         .onReceive(NotificationCenter.default.publisher(for: .init("app.bisel.dev.tour.continue"))) { _ in
             #if DEBUG
-            showImport = true; service.confirmPhraseStored()   // what the Continue button does
+            phraseStored()   // what the Continue button does
             #endif
         }
         .toolbarBackgroundVisibility(cardSize == nil ? .automatic : .hidden, for: .windowToolbar)
@@ -72,7 +77,7 @@ struct MainWindowView: View {
     /// fixture notices use the normal window.
     private var cardSize: NSSize? {
         guard service.startupError == nil, !usesFixture else { return nil }
-        if service.pendingPhrase != nil || showImport || inSetup { return OnboardingLayout.island }
+        if service.pendingPhrase != nil || showAccess || showImport || inSetup { return OnboardingLayout.island }
         switch service.phase {
         case .needsSetup: return OnboardingLayout.island
         case .locked: return OnboardingLayout.island
@@ -109,6 +114,12 @@ struct MainWindowView: View {
         }
     }
 
+    /// The phrase is stored: on to the Accessibility step when the permission is off, else straight to the import.
+    private func phraseStored() {
+        if AppModel.shared.accessibility.trusted { showImport = true } else { showAccess = true }
+        service.confirmPhraseStored()
+    }
+
     /// First run, and a pairing until the codes are compared: the box key arrives (and the vault counts as set up) before
     /// the person has checked the other device's code, so that step must not give way to the settings.
     private var inSetup: Bool {
@@ -130,6 +141,7 @@ struct MainWindowView: View {
         if service.startupError != nil { return "error" }
         if inSetup { return "setup" }
         if service.pendingPhrase != nil { return "phrase" }
+        if showAccess { return "access" }
         if showImport { return "import" }
         return service.phase == .locked ? "locked" : "unlocked"
     }

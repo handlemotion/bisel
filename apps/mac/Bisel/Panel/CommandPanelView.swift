@@ -12,6 +12,8 @@ struct CommandPanelView: View {
     @Bindable var model: CommandPanelModel
     @Environment(\.theme) private var theme
     @FocusState private var searchFocused: Bool
+    /// Filling needs the Accessibility permission (copying does not): while it is off, a pill floats over the detail pane.
+    @State private var access = AppModel.shared.accessibility
 
     @Environment(\.accessibilityPreferences) private var a11y
     @AppStorage(PanelMaterial.defaultsKey) private var materialRaw = PanelMaterial.glass.rawValue
@@ -66,6 +68,7 @@ struct CommandPanelView: View {
                     listColumn.frame(width: theme.card.listWidth)
                     Hairline(axis: .vertical)
                     DetailPane(model: model)
+                        .overlay(alignment: .bottom) { if !access.trusted { accessPill } }
                 }
             } else {
                 lockedState
@@ -212,6 +215,26 @@ struct CommandPanelView: View {
                 .accessibilityAction { model.activateAction(at: i) }
             }
         }
+    }
+
+    /// Non-blocking: everything but Fill works, so a warning above the key hints, not a screen of its own.
+    private var accessPill: some View {
+        Button { AccessibilityInspector.requestAccess() } label: {
+            HStack(spacing: theme.spacing.xs) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(theme.colors.warning.color)
+                Text("Fill is off. Allow Accessibility")
+            }
+            .font(theme.font(theme.fonts.detail, weight: .medium))
+            .padding(.horizontal, theme.spacing.m)
+            .padding(.vertical, theme.spacing.xs + 2)
+            .background(theme.colors.warning.color.opacity(0.14), in: Capsule())
+            .overlay(Capsule().strokeBorder(theme.colors.warning.color.opacity(0.35), lineWidth: theme.card.hairline))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .padding(.bottom, theme.spacing.l * 3.5)
+        .accessibilityHint(Text("Opens System Settings, where you turn on Accessibility for Bisel"))
+        .accessibilityIdentifier("panel.accessPill")
     }
 
     /// Unlocked with nothing in the box: the whole card, like the locked state, instead of an empty list and detail.
