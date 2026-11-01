@@ -13,6 +13,7 @@ options:
 
 settings:
   base:
+    CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
     MACOSX_DEPLOYMENT_TARGET: "26.0"
@@ -101,8 +102,10 @@ targets:
       properties:
         CFBundleDisplayName: Bisel
         CFBundleName: Bisel
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
+        # release-please bumps the version on its release PR (release-please-config.json); the build number is stamped by
+        # Tools/release.sh (the commit count), so every notarized build has a higher one.
+        CFBundleShortVersionString: "0.1.0" # x-release-please-version
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSMinimumSystemVersion: "26.0"
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.utilities

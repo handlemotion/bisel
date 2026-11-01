@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "include-component-in-tag": false,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "bootstrap-sha": "cb18a6d101fb2a52cb8b2814db89cf4e20968f64",
+  "packages": {
+    ".": {
+      "package-name": "bisel",
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [{ "type": "generic", "path": "apps/mac/project.yml" }]
+    }
+  }
+}

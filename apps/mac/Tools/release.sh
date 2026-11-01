@@ -104,8 +104,10 @@ say "xcodegen (project.yml)"
 (cd "$APPLE" && xcodegen generate --quiet)
 
 say "archive (Release, Developer ID)"
+# The build number only grows: the number of commits on this branch.
+BUILD_NUMBER="$(git -C "$APPLE" rev-list --count HEAD)"
 (cd "$APPLE" && xcodebuild -project Bisel.xcodeproj -scheme Bisel -configuration Release -destination 'generic/platform=macOS' \
-  -derivedDataPath "$OUT/dd" -archivePath "$ARCHIVE" archive >"$OUT/archive.log" 2>&1) \
+  -derivedDataPath "$OUT/dd" -archivePath "$ARCHIVE" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" archive >"$OUT/archive.log" 2>&1) \
   || { grep -E "error:" "$OUT/archive.log" | head -20 >&2; die "archive failed, see $OUT/archive.log"; }
 
 say "export (developer-id)"
