@@ -44,7 +44,10 @@ private struct OpenWindowBridge: ViewModifier {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        MainActor.assumeIsolated { AppModel.shared.start() }
+        MainActor.assumeIsolated {
+            AppModel.shared.start()
+            _ = Updater.shared   // starts Sparkle's scheduled checks
+        }
         #if BISEL_CLOUDKIT
         // CloudKit's silent pushes for the box's zone. Without the push entitlement registration fails (logged) and the 60 s poll
         // carries on alone (docs/SYNC-LANES.md §15, "What needs Rodrigo").
@@ -78,6 +81,8 @@ private struct MenuBarContent: View {
             AppModel.shared.showMainWindow()
         }
         .keyboardShortcut(",")
+        Button("Check for Updates…") { Updater.shared.checkForUpdates() }
+            .disabled(!Updater.shared.canCheckForUpdates)
         Button("Sync Now") { Task { await AppModel.shared.service.sync(reason: "menu") } }
         Button("Lock") { AppModel.shared.service.lock(reason: "menu") }
         Divider()

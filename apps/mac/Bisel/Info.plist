@@ -34,5 +34,17 @@
 	<string>Bisel uses Touch ID to unlock your box.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Personal use.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://github.com/handlemotion/bisel/releases/latest/download/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>XpIW9gQV4E3/tzdOZOkL/I3L+xJXQ7PkRl1OWDHw0Q0=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 </dict>
 </plist>
