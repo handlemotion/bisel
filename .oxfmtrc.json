@@ -8,6 +8,7 @@
     "**/worker-configuration.d.ts",
     "pnpm-lock.yaml",
     "**/public/app.js",
-    ".claude/**"
+    ".claude/**",
+    "CHANGELOG.md"
   ]
 }
