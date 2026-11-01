@@ -384,7 +384,8 @@ struct PhraseGateView: View {
                         }
                     }
                 }
-                if let saved { Caption("Saved as \(saved)") }
+                // The line is always there (empty until a download), so the grid and the buttons never move when it fills in.
+                Caption(saved.map { "Saved as \($0)" } ?? " ").lineLimit(1).truncationMode(.middle).opacity(saved == nil ? 0 : 1)
             }
         } actions: {
             if canGoBack {
