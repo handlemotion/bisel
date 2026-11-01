@@ -20,7 +20,10 @@ final class CommandPanelController {
     var debugStealth = false
     #endif
     /// True while the Touch ID sheet is up: it takes key from the panel, which must not read as "click away".
-    var authenticating = false
+    var authenticating = false {
+        // The sheet took key; give it back so typing goes to the search field once it is gone.
+        didSet { if oldValue, !authenticating, state == .shown { panel.makeKeyAndOrderFront(nil) } }
+    }
     private var stealth: Bool {
         #if DEBUG
         debugStealth
@@ -247,7 +250,8 @@ final class CommandPanelController {
         observers.append(ws.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] n in
             let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             MainActor.assumeIsolated {
-                guard let self, let app, app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+                // The Touch ID sheet is its own process and comes to the front: not a switch either.
+                guard let self, let app, !self.authenticating, app.processIdentifier != ProcessInfo.processInfo.processIdentifier,
                       app.processIdentifier != self.target?.processIdentifier else { return }  // bisel itself / the app we are filling: not a switch
                 Log.panel.notice("frontmost app changed to \(app.bundleIdentifier ?? "?", privacy: .private)")
                 self.hide("appActivated")
