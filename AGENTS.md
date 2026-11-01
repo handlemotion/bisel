@@ -47,6 +47,8 @@ Repo-wide rules only. App-level docs: `apps/server/README.md` and `DEPLOY.md` (t
 ## Shipping
 
 - Never push to `main`. Work on a branch, small commits, rebase on `origin/main`, push the branch, open a PR (`gh pr create`).
+- PR titles are Conventional Commits (`feat: …`, `fix: …`, `chore: …`, `docs: …`; `feat!:` for a breaking change): the squash commit takes the title, and release-please reads it.
+- Releases: release-please (`.github/workflows/release-please.yml`) keeps one open release PR with the next version and `CHANGELOG.md`. Merging it tags `vX.Y.Z` and makes the GitHub release; the notarized DMG is built on a Mac with `apps/mac/Tools/release.sh` and attached to it. Fixes merge to `main` without a release; nothing ships until the release PR is merged. Close and reopen the release PR to run CI on it.
 - Wait for every CI check on the PR to pass (`gh pr checks --watch`), then squash-merge (`gh pr merge --squash --delete-branch`). A red or pending check is never merged; fix it on the branch.
 - CI (`.github/workflows/ci.yml`) runs `scripts/check-all.sh` in four jobs: Server (`--server`), Core (`--core`), App (`--app`, unsigned BiselDev build), Release (`--release`); CodeQL scans actions and TypeScript on every PR, and Swift (~16 min) on every push to `main` and weekly, so it does not gate PRs. The `main` ruleset requires the six PR checks but not an up-to-date branch: green PRs merge back to back, and the post-merge CI on `main` catches a bad combination. Run `pnpm ci:local` before pushing when a change touches more than one of them.
 - CI and `scripts/check-all.sh` change together: a new check goes into a check-all mode, and the job calls that mode.
