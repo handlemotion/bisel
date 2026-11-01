@@ -27,8 +27,13 @@ struct MainWindowView: View {
                 PhraseGateView(service: service, phrase: phrase) { showImport = true; service.confirmPhraseStored() }
                     .transition(Self.swap)
             } else if showImport {
-                OnboardingImportView(service: service) { dismissWindow(id: "main") }   // state dies with the window: no settings flash
-                    .transition(Self.swap)
+                OnboardingImportView(service: service) {
+                    // A closed `Window` keeps its view state, so `showImport` must be reset or every later "Open Bisel" lands
+                    // here again. Reset after the close so the settings card never flashes in its place.
+                    dismissWindow(id: "main")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { showImport = false }
+                }
+                .transition(Self.swap)
             } else if service.phase == .locked {
                 LockedView(service: service).transition(Self.swap)
             } else {
