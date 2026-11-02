@@ -88,7 +88,7 @@ struct SettingsView: View {
     @State private var forward: [SettingsPage] = []
 
     var body: some View {
-        // The sidebar is always shown at one width: no toggle in the toolbar, and the divider cannot collapse or resize it.
+        // The sidebar is always shown: no toggle in the toolbar, and dragging the divider resizes it but never closes it.
         NavigationSplitView(columnVisibility: .constant(.all)) {
             List(selection: Binding<SettingsPage?>(get: { page }, set: { if let p = $0 { go(to: p) } })) {
                 AccountRow().tag(SettingsPage.account)
@@ -96,7 +96,8 @@ struct SettingsView: View {
                 Section { ForEach(SettingsPage.more) { SidebarRow(page: $0).tag($0) } }
             }
             .toolbar(removing: .sidebarToggle)
-            .navigationSplitViewColumnWidth(260)   // one width: the divider does not resize the sidebar
+            .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 320)
+            .background(SidebarCannotCollapse())
         } detail: {
             Form {
                 Section { } header: { PageHeader(page: page) }
@@ -203,6 +204,22 @@ private struct PageHeader: View {
         .padding(.bottom, 44)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// Dragging the divider past the sidebar's minimum would collapse it (AppKit's split view item); this turns that off.
+private struct SidebarCannotCollapse: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            var v: NSView? = view
+            while let s = v, !(s is NSSplitView) { v = s.superview }
+            guard let split = v as? NSSplitView, let controller = split.delegate as? NSSplitViewController,
+                  let sidebar = controller.splitViewItems.first, sidebar.canCollapse else { return }
+            sidebar.canCollapse = false
+            Log.app.notice("settings sidebar: collapse off")
+        }
     }
 }
 
