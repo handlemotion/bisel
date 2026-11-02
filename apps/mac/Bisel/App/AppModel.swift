@@ -14,8 +14,6 @@ final class AppModel {
     let vault: any PanelVault
     let panelModel: CommandPanelModel
     let panelController: CommandPanelController
-    /// Settings, a floating card like the command panel. Set-up and the recovery phrase stay in the main window.
-    private(set) lazy var settingsController = SettingsPanelController(service: service)
     /// Polls from the start (scripted dev flows skip `start()`), so the pill, the Fill page and set-up never read a stale value.
     let accessibility: AccessibilityMonitor = {
         let m = AccessibilityMonitor()
@@ -70,21 +68,10 @@ final class AppModel {
         #endif
     }
 
-    /// Settings on one page (the page is the card's own `settings.page` setting, so it follows live), or on the page it was
-    /// last left on. While set-up or the recovery phrase is pending the main window comes up instead: that comes first.
-    func showSettings(_ page: SettingsPage? = nil) {
-        if let page { UserDefaults.standard.set(page.rawValue, forKey: SettingsPage.defaultsKey) }
-        if needsOnboardingWindow { showMainWindow(); return }
-        settingsController.show()
-    }
-
-    /// No box on this Mac yet, a pairing still comparing codes, or a recovery phrase that was never confirmed.
-    var needsOnboardingWindow: Bool {
-        if service.phase == .needsSetup || service.pendingPhrase != nil { return true }
-        switch service.setupState {
-        case .pairing, .compareCode, .working(.finishingPairing): return true
-        default: return false
-        }
+    /// The settings window on one page (the page is the window's own `settings.page` setting, so it follows live).
+    func showSettings(_ page: SettingsPage) {
+        UserDefaults.standard.set(page.rawValue, forKey: SettingsPage.defaultsKey)
+        showMainWindow()
     }
 
     func showMainWindow() {
@@ -93,6 +80,22 @@ final class AppModel {
             for _ in 0..<20 where openMainWindow == nil { try? await Task.sleep(for: .milliseconds(150)) }
             openMainWindow?()
             NSApp.activate()
+            // Settings while the box is locked: ask for Touch ID right away, like the command panel. Return is the retry.
+            if service.phase == .locked, !isScriptedFlow { unlockFromSettings() }
+        }
+    }
+
+    private var unlockingFromSettings = false
+
+    func unlockFromSettings() {
+        guard service.phase == .locked, !unlockingFromSettings else { return }
+        unlockingFromSettings = true
+        Task {
+            defer { unlockingFromSettings = false }
+            do { try await service.unlock(reason: "Unlock your box to change its settings") }
+            catch KeyStoreError.userCancelled {}
+            catch BiometricGate.Failure.denied {}
+            catch { Toast.shared.show(describe(error), isError: true) }
         }
     }
 
