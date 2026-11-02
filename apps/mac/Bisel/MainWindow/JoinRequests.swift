@@ -14,10 +14,10 @@ struct JoinRequestsCard: View {
     private static let poll: Duration = .seconds(8)
 
     var body: some View {
-        SettingsCard(title: "Add a device") {
+        SettingsSection(title: "Add a device") {
             let shown = requests.filter { !hidden.contains($0.id) }.sorted { $0.receivedAt > $1.receivedAt }
             if shown.isEmpty {
-                Caption("On the new Mac, choose Add this Mac. Its request shows up here, and you approve it with the 8 words it shows.")
+                SettingsNote("On the new Mac, choose Add this Mac. Its request shows up here, and you approve it with the 8 words it shows.")
             }
             ForEach(shown) { r in
                 SettingsRow(label: DisplayText.clean(r.request.name)) {
@@ -27,7 +27,7 @@ struct JoinRequestsCard: View {
                         Button("Approve…") { approving = r }.accessibilityIdentifier("join-approve")
                     }
                 }
-                Caption(r.isExpired ? "Expired. Start again on the new device." : "Asked \(r.receivedAt.formatted(.relative(presentation: .named))).")
+                SettingsNote(r.isExpired ? "Expired. Start again on the new device." : "Asked \(r.receivedAt.formatted(.relative(presentation: .named))).")
             }
         }
         .task(id: service.isOnICloud) {

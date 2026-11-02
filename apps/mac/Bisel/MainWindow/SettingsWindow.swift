@@ -1,118 +1,146 @@
-import KeyboardShortcuts
+import OpenDirectory
 import SwiftUI
 import BiselCore
 
-/// The settings window: a standard titled window (the system's corners and traffic lights) on the theme's background,
-/// which follows the Mac's light/dark appearance. One scrolling page, its sections in a 480 pt column; text is a size up
-/// from the command panel's.
+/// The settings window, all native: a split view with the Mac user's account row and the pages in the sidebar, each
+/// page a grouped form. System colors, fonts and controls throughout, so it follows the Mac's light/dark appearance.
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case general, fill, sync, account
+    case account, general, appearance, fill, security, sync, backup, advanced, about
     var id: String { rawValue }
-    /// The section to scroll to when Settings opens (`AppModel.showSettings`).
+    /// The page Settings opens on (`AppModel.showSettings` sets it).
     static let defaultsKey = "settings.page"
-    static let scrollNotification = Notification.Name("app.bisel.settings.scroll")
 
     var title: String {
         switch self {
-        case .general: String(localized: "General")
-        case .fill: String(localized: "Fill")
-        case .sync: String(localized: "Sync")
         case .account: String(localized: "Account")
+        case .general: String(localized: "General")
+        case .appearance: String(localized: "Appearance")
+        case .fill: String(localized: "Fill")
+        case .security: String(localized: "Security")
+        case .sync: String(localized: "Sync")
+        case .backup: String(localized: "Backup & Import")
+        case .advanced: String(localized: "Advanced")
+        case .about: String(localized: "About")
         }
     }
 
-    static var current: SettingsPage {
-        UserDefaults.standard.string(forKey: defaultsKey).flatMap(SettingsPage.init(rawValue:)) ?? .general
+    var symbol: String {
+        switch self {
+        case .account: "person.crop.circle"
+        case .general: "gearshape"
+        case .appearance: "paintbrush"
+        case .fill: "keyboard"
+        case .security: "lock"
+        case .sync: "icloud"
+        case .backup: "externaldrive"
+        case .advanced: "wrench.and.screwdriver"
+        case .about: "info.circle"
+        }
     }
+
+    /// Sidebar groups below the account row.
+    static let main: [SettingsPage] = [.general, .appearance, .fill, .security, .sync, .backup]
+    static let more: [SettingsPage] = [.advanced, .about]
 }
 
-enum SettingsLayout {
-    /// The whole window, title bar included.
-    static let window = NSSize(width: 640, height: 640)
-    static let column: CGFloat = 480
-    static let cardRadius: CGFloat = 14
-    /// Settings text is this much larger than the command panel's (13 pt body → 15 pt).
-    static let textScale = 15.0 / 13.0
-}
-
-struct SettingsShell: View {
+struct SettingsView: View {
     let service: VaultService
-    @Environment(\.theme) private var panelTheme
-    private var theme: Theme { panelTheme.scaledText(SettingsLayout.textScale) }
+    @AppStorage(SettingsPage.defaultsKey) private var page = SettingsPage.general
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: theme.spacing.l * 2) {
-                    ForEach(SettingsPage.allCases) { page in
-                        VStack(alignment: .leading, spacing: theme.spacing.m) {
-                            Text(page.title)
-                                .font(theme.font(theme.fonts.detailTitle - 6, weight: .semibold))   // 22 pt
-                                .accessibilityAddTraits(.isHeader)
-                            section(page)
-                        }
-                        .padding(.top, theme.spacing.s)
-                        .id(page)   // scrolled to with this margin above its title
-                    }
-                }
-                .frame(width: SettingsLayout.column, alignment: .leading)
-                .padding(.bottom, theme.spacing.l)
-                .frame(maxWidth: .infinity)
+        NavigationSplitView {
+            List(selection: Binding<SettingsPage?>(get: { page }, set: { if let p = $0 { page = p } })) {
+                AccountRow().tag(SettingsPage.account)
+                Section { ForEach(SettingsPage.main) { Label($0.title, systemImage: $0.symbol).tag($0) } }
+                Section { ForEach(SettingsPage.more) { Label($0.title, systemImage: $0.symbol).tag($0) } }
             }
-            .onAppear { proxy.scrollTo(SettingsPage.current, anchor: .top) }
-            .onReceive(NotificationCenter.default.publisher(for: SettingsPage.scrollNotification)) { _ in
-                withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(SettingsPage.current, anchor: .top) }
-            }
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
+        } detail: {
+            Form { content }
+                .formStyle(.grouped)
+                .navigationTitle(page.title)
+                .id(page)
         }
-        .font(theme.font(theme.fonts.detail))
-        .environment(\.theme, theme)
-        .environment(\.glassMode, false)
-        .containerBackground(theme.colors.background.color, for: .window)
     }
 
-    @ViewBuilder private func section(_ page: SettingsPage) -> some View {
+    @ViewBuilder private var content: some View {
         switch page {
-        case .general: GeneralSettings()
-        case .fill: FillSettings()
-        case .sync: SyncSettings(service: service)
         case .account: AccountSettings(service: service)
+        case .general: GeneralSettings()
+        case .appearance: AppearanceSettings()
+        case .fill: FillSettings()
+        case .security: SecurityPage(service: service)
+        case .sync: SyncSettings(service: service)
+        case .backup: BackupSettings(service: service)
+        case .advanced: AdvancedSettings(service: service)
+        case .about: AboutSettings()
         }
+    }
+}
+
+/// The Mac user's picture and name, like the account row at the top of System Settings.
+private struct AccountRow: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            UserPictureView().frame(width: 32, height: 32)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(NSFullUserName())
+                Text("Account").font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
     }
 }
 
 /// The locked box in the settings window: the command panel's locked state. Return unlocks, like in the panel (opening
 /// Settings while locked asks for Touch ID right away, see `AppModel.showMainWindow`).
 struct SettingsLockedView: View {
-    @Environment(\.theme) private var theme
-
     var body: some View {
         BoxLockedState { AppModel.shared.unlockFromSettings() }
             .background {
                 Button("") { AppModel.shared.unlockFromSettings() }
                     .keyboardShortcut(.defaultAction).opacity(0).accessibilityHidden(true)
             }
-            .environment(\.glassMode, false)
-            .containerBackground(theme.colors.background.color, for: .window)
+            .navigationTitle("Settings")
     }
+}
+
+/// The Mac user's account picture (Users & Groups), or a generic person.
+private struct UserPictureView: View {
+    var body: some View {
+        if let image = UserPicture.image {
+            Image(nsImage: image).resizable().scaledToFill().clipShape(Circle())
+        } else {
+            Image(systemName: "person.crop.circle.fill").resizable().scaledToFit().foregroundStyle(.secondary)
+        }
+    }
+}
+
+@MainActor
+enum UserPicture {
+    static let image: NSImage? = {
+        guard let node = try? ODNode(session: ODSession.default(), type: ODNodeType(kODNodeTypeLocalNodes)),
+              let record = try? node.record(withRecordType: kODRecordTypeUsers, name: NSUserName(),
+                                            attributes: [kODAttributeTypeJPEGPhoto, kODAttributeTypePicture])
+        else { return nil }
+        if let data = (try? record.values(forAttribute: kODAttributeTypeJPEGPhoto))?.first as? Data, let image = NSImage(data: data) {
+            return image
+        }
+        if let path = (try? record.values(forAttribute: kODAttributeTypePicture))?.first as? String { return NSImage(contentsOfFile: path) }
+        return nil
+    }()
 }
 
 // MARK: - Building blocks
 
-/// Figma card: #282828 (the selection color), 14 pt radius, 16 pt padding, a label, then its rows.
-struct SettingsCard<Content: View>: View {
+/// A form section with an optional header.
+struct SettingsSection<Content: View>: View {
     var title: String?
     @ViewBuilder var content: Content
-    @Environment(\.theme) private var theme
-    @Environment(\.glassMode) private var glass
 
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.m) {
-            if let title { Text(title).font(theme.font(theme.fonts.detail, weight: .medium)) }
-            content
-        }
-        .padding(theme.spacing.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: SettingsLayout.cardRadius, style: .continuous).fill(theme.selectionFill(glass: glass)))
+        if let title { Section(title) { content } } else { Section { content } }
     }
 }
 
@@ -120,14 +148,18 @@ struct SettingsCard<Content: View>: View {
 struct SettingsRow<Control: View>: View {
     var label: String
     @ViewBuilder var control: Control
-    @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: theme.spacing.s) {
-            Text(label).foregroundStyle(theme.colors.secondaryText.color).fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: theme.spacing.s)
-            control
-        }
+        LabeledContent(label) { control }
+    }
+}
+
+/// An explanation under a setting, in the form's secondary style.
+struct SettingsNote: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -146,5 +178,5 @@ struct NumberPicker: View {
 }
 
 extension Toggle {
-    func settingsSwitch() -> some View { self.labelsHidden().toggleStyle(.switch).controlSize(.small) }
+    func settingsSwitch() -> some View { self.labelsHidden().toggleStyle(.switch) }
 }

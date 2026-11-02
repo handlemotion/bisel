@@ -68,10 +68,9 @@ final class AppModel {
         #endif
     }
 
-    /// The settings window, scrolled to one section.
+    /// The settings window on one page (the page is the window's own `settings.page` setting, so it follows live).
     func showSettings(_ page: SettingsPage) {
         UserDefaults.standard.set(page.rawValue, forKey: SettingsPage.defaultsKey)
-        NotificationCenter.default.post(name: SettingsPage.scrollNotification, object: nil)
         showMainWindow()
     }
 

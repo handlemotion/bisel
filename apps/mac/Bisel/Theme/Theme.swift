@@ -216,14 +216,6 @@ extension Theme {
     /// 4.5:1 (SPEC.md §8 Accessibility); Increase Contrast lifts them further.
     func dimColor(_ solid: HexColor, glass: Bool) -> Color { glass ? colors.text.color.opacity(dimOpacity) : solid.color }
     var dimOpacity: Double { increaseContrast ? 0.80 : (appearance == .dark ? 0.55 : 0.64) }
-    /// Every font size times `factor` (Settings sets its text a size up from the panel's).
-    func scaledText(_ factor: Double) -> Theme {
-        var t = self
-        for k in [\Fonts.search, \.row, \.detailTitle, \.detail, \.pill, \.pillIcon, \.valuesLabel, \.value, \.caption, \.title, \.subtitle] {
-            t.fonts[keyPath: k] = (fonts[keyPath: k] * factor).rounded()
-        }
-        return t
-    }
     func borderColor(glass: Bool) -> Color { glass ? colors.text.color.opacity(self.glass.borderOpacity) : colors.border.color }
 }
 

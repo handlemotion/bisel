@@ -571,7 +571,7 @@ final class CommandPanelModel {
     /// In the actions menu, ↩ runs the highlighted action.
     func activate(_ key: ActivationKey) {
         if !source.isUnlocked { runUnlock?(); return }
-        if boxIsEmpty { if key == .plain { runOpenSettings?(.account) }; return }   // Import lives on the Account page
+        if boxIsEmpty { if key == .plain { runOpenSettings?(.backup) }; return }   // Import lives on the Backup & Import page
         switch mode {
         case .actions(let item):
             if key == .plain { perform(actions[actionIndex], on: item) }
