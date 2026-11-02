@@ -13,16 +13,10 @@ struct DevicesView: View {
     @State private var queued: [DevicesSheet] = []
     @State private var working = false
 
+    /// A form section of its own (Settings → Sync): one row per device, refresh in the header.
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.m) {
-            HStack {
-                Text("Devices").font(theme.font(theme.fonts.detail, weight: .medium))
-                Spacer()
-                Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.borderless).help("Refresh").accessibilityLabel("Refresh").disabled(loading || service.isLocalOnly)
-                    .accessibilityIdentifier("devices-refresh")
-            }
-            ErrorLine(text: error)
+        Section {
+            if let error { ErrorLine(text: error) }
             ForEach(service.securityAlerts) { alert in
                 HStack(alignment: .top, spacing: theme.spacing.s) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(theme.colors.danger.color)
@@ -49,9 +43,13 @@ struct DevicesView: View {
                     .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("recovery-changed")
             }
             if service.isLocalOnly {
-                Caption("\(service.deviceName) holds the only copy of your box.")
+                LabeledContent {
+                    Text("This Mac").foregroundStyle(.secondary)
+                } label: {
+                    Label { Text(Self.clean(service.deviceName)); Text("Holds the only copy of your box") } icon: { Image(systemName: "laptopcomputer") }
+                }
             } else if devices.isEmpty && !loading {
-                Caption("No devices yet.")
+                Text("No devices yet.").foregroundStyle(.secondary)
             }
             ForEach(devices) { d in
                 HStack(spacing: theme.spacing.m) {
@@ -76,7 +74,6 @@ struct DevicesView: View {
                             .disabled(working).accessibilityIdentifier("revoke-\(Self.clean(d.name))")
                     }
                 }
-                .padding(.vertical, 2)
             }
             if !events.isEmpty {
                 DisclosureGroup("Recent activity") {
@@ -86,7 +83,18 @@ struct DevicesView: View {
                 }
                 .font(theme.font(theme.fonts.caption))
             }
-            if !service.isLocalOnly { Caption("A revoked device can no longer sync, and the box key is replaced.") }
+        } header: {
+            HStack {
+                Text("Devices")
+                Spacer()
+                if !service.isLocalOnly {
+                    Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.borderless).help("Refresh").accessibilityLabel("Refresh").disabled(loading)
+                        .accessibilityIdentifier("devices-refresh")
+                }
+            }
+        } footer: {
+            if !service.isLocalOnly { SettingsNote("A revoked device can no longer sync, and the box key is replaced.") }
         }
         .task { await load() }
         .sheet(item: $sheet, onDismiss: showNext) { shown in

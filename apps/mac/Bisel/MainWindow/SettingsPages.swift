@@ -20,12 +20,11 @@ struct AccountSettings: View {
             SettingsRow(label: "Name") { Text(DisplayText.clean(service.deviceName)).lineLimit(1) }
             SettingsRow(label: "Keys") { Text(BiselEnvironment.usesSoftwareKeys ? "Software (debug build)" : "Secure Enclave") }
         }
-        SettingsSection(title: "Recovery phrase") {
-            SettingsRow(label: "Replace the 24 words") {
+        SettingsSection(title: "Recovery phrase", footer: recoveryMessage) {
+            SettingsRow(label: "Replace the 24 words",
+                        detail: "The phrase is the only way back in if you lose every device. The old one stops working.") {
                 Button("New phrase…") { newPhrase() }.accessibilityIdentifier("settings-new-phrase")
             }
-            if let recoveryMessage { SettingsNote(recoveryMessage) }
-            SettingsNote("The phrase is the only way back in if you lose every device. The old one stops working.")
         }
         .sheet(item: Binding(get: { phraseSheet.map { PhraseBox(phrase: $0) } }, set: { if $0 == nil { phraseSheet = nil } })) { box in
             PhraseGateView(service: service, phrase: box.phrase, title: "Your new recovery phrase") { phraseSheet = nil; service.confirmPhraseStored() }
@@ -50,9 +49,8 @@ struct GeneralSettings: View {
     @State private var login = LoginItem()
 
     var body: some View {
-        SettingsSection(title: "Startup") {
+        SettingsSection(title: "Startup", footer: login.note) {
             SettingsRow(label: "Open Bisel at login") { Toggle("", isOn: $login.enabled).settingsSwitch() }
-            if let note = login.note { SettingsNote(note) }
         }
         SettingsSection(title: "Command panel") {
             SettingsRow(label: "Shortcut") { KeyboardShortcuts.Recorder(for: .commandPanel) }
@@ -95,26 +93,26 @@ struct AppearanceSettings: View {
     @State private var icons = IconStore.shared
 
     var body: some View {
-        SettingsSection(title: "Theme") {
-            SettingsRow(label: "Theme") {
+        SettingsSection {
+            SettingsRow(label: "Theme", detail: "Follows the system light/dark appearance.") {
                 Picker("", selection: $themes.selectedFamily) { ForEach(themes.families, id: \.id) { Text($0.name).tag($0.id) } }
                     .labelsHidden().fixedSize()
             }
-            SettingsNote("Follows the system light/dark appearance. Custom themes are JSON files in the themes folder.")
-            HStack {
-                Button("Themes folder") {
-                    themes.reload()
-                    NSWorkspace.shared.activateFileViewerSelecting([ThemeStore.themesDirectory])
+            SettingsRow(label: "Custom themes", detail: "JSON files in the themes folder.") {
+                HStack {
+                    Button("Themes folder") {
+                        themes.reload()
+                        NSWorkspace.shared.activateFileViewerSelecting([ThemeStore.themesDirectory])
+                    }
+                    Button("Write examples") { themes.exportTemplates() }
+                    Button("Reload") { themes.reload() }
                 }
-                Button("Write examples") { themes.exportTemplates() }
-                Button("Reload") { themes.reload() }
             }
             ForEach(themes.loadErrors, id: \.self) { Text($0).font(.callout).foregroundStyle(.orange) }
         }
-        SettingsSection(title: "Site icons") {
+        SettingsSection(title: "Site icons", footer: "Bisel fetches each site's icon straight from the site (HTTPS, no cookies, no third-party service), so your network can see which sites you use. Cached on this Mac only.") {
             SettingsRow(label: "Load site icons") { Toggle("", isOn: $icons.enabled).settingsSwitch() }
-            SettingsNote("When on, Bisel fetches each site's icon straight from the site (HTTPS, no cookies, no third-party service), so your network can see which sites you use. Cached on this Mac only.")
-            SettingsRow(label: icons.cacheSizeDescription) { Button("Clear cache") { icons.clearCache() } }
+            SettingsRow(label: "Cache", detail: icons.cacheSizeDescription) { Button("Clear cache") { icons.clearCache() } }
         }
     }
 }
@@ -126,16 +124,18 @@ struct FillSettings: View {
 
     var body: some View {
         SettingsSection(title: "Permission") {
-            SettingsRow(label: accessibility.trusted ? "Accessibility: allowed" : "Accessibility: not allowed") {
-                if !accessibility.trusted {
+            SettingsRow(label: "Accessibility",
+                        detail: "Bisel types usernames, passwords and codes into the field you are in through the Accessibility permission.") {
+                if accessibility.trusted {
+                    Text("Allowed").foregroundStyle(.secondary)
+                } else {
                     Button("Allow…") { AccessibilityInspector.requestAccess() }
                 }
             }
-            SettingsNote("Bisel types usernames, passwords and codes into the field you are in through the Accessibility permission.")
         }
         .onAppear { accessibility.start() }
         .onDisappear { accessibility.stop() }
-        SettingsSection(title: "Copying") {
+        SettingsSection(title: "Copying", footer: "Copied values are hidden from clipboard managers and never sent to your other devices.") {
             SettingsRow(label: "Clear clipboard after") {
                 NumberPicker(value: $clearAfter, choices: SecureClipboard.clearSecondsChoices, unit: "s", key: SecureClipboard.clearSecondsKey)
             }
@@ -143,7 +143,6 @@ struct FillSettings: View {
                 Toggle("", isOn: $closeAfterCopy).settingsSwitch()
                     .onChange(of: closeAfterCopy) { _, new in UserDefaults.standard.set(new, forKey: CommandPanelModel.closeAfterCopyKey) }
             }
-            SettingsNote("Copied values are hidden from clipboard managers and never sent to your other devices.")
         }
     }
 }
@@ -155,20 +154,19 @@ struct SecurityPage: View {
     @State private var unlockedFor = VaultService.fillWindowMinutes
 
     var body: some View {
-        SettingsSection(title: "Locking") {
+        SettingsSection(title: "Locking", footer: "The box also locks on sleep, screen lock and fast user switching.") {
             SettingsRow(label: "Lock now") {
                 Button("Lock", systemImage: "lock") { service.lock(reason: "manual") }.accessibilityIdentifier("lock-button")
             }
             SettingsRow(label: "Lock after idle") { NumberPicker(value: $idleLock, key: VaultService.idleLockKey) }
             SettingsRow(label: "Lock after unlocking, at most") { NumberPicker(value: $unlockedFor, key: VaultService.fillWindowKey) }
-            SettingsNote("The box also locks on sleep, screen lock and fast user switching.")
         }
         SettingsSection(title: "Touch ID") {
-            SettingsRow(label: "Touch ID for every reveal and copy") {
+            SettingsRow(label: "Touch ID for every reveal and copy",
+                        detail: "Off: passwords and codes show and copy freely while the box is unlocked. On: each one asks for Touch ID.") {
                 Toggle("", isOn: $strict).settingsSwitch()
                     .onChange(of: strict) { _, new in UserDefaults.standard.set(new, forKey: SecuritySettings.requireTouchIDKey) }
             }
-            SettingsNote("Off: passwords and codes show and copy freely while the box is unlocked. On: each one asks for Touch ID.")
         }
     }
 }
@@ -177,13 +175,25 @@ struct SyncSettings: View {
     let service: VaultService
 
     var body: some View {
-        SettingsSection(title: "iCloud") {
-            SettingsRow(label: "Storage") { Text(laneText).multilineTextAlignment(.trailing) }
-            SyncStatusView(service: service)
-            SettingsNote("Your box is end-to-end encrypted before it reaches iCloud. Apple can't read it.")
+        SettingsSection(title: "iCloud", footer: "Your box is end-to-end encrypted before it reaches iCloud. Apple can't read it.") {
+            LabeledContent {
+                HStack {
+                    Text(laneText).multilineTextAlignment(.trailing)
+                    if service.isUnlocked && !service.isLocalOnly {
+                        Button { Task { await service.sync(reason: "manual") } } label: { Image(systemName: "arrow.clockwise") }
+                            .buttonStyle(.borderless).help("Sync now").accessibilityLabel("Sync now").accessibilityIdentifier("sync-now")
+                            .disabled(service.syncState == .syncing)
+                    }
+                }
+            } label: {
+                Text("Storage")
+                if !service.isLocalOnly || !service.securityAlerts.isEmpty || service.recoveryKeyChanged {
+                    SyncStatusView(service: service, compact: true)   // "On this Mac only" would repeat the value
+                }
+            }
         }
         if service.isOnICloud { JoinRequestsCard(service: service) }
-        SettingsSection { DevicesView(service: service) }
+        DevicesView(service: service)
     }
 
     private var laneText: String {
@@ -203,20 +213,20 @@ struct BackupSettings: View {
     @State private var backupMessage: String?
 
     var body: some View {
-        SettingsSection(title: "Backup") {
-            SettingsRow(label: backupText) {
+        SettingsSection(title: "Backup", footer: backupMessage) {
+            SettingsRow(label: "Export a backup",
+                        detail: "An encrypted .bisel-backup file that only your recovery phrase opens. Keep one off this Mac and off iCloud.") {
                 Button("Export…") { exportBackup() }.accessibilityIdentifier("settings-export")
             }
-            if let backupMessage { SettingsNote(backupMessage) }
-            SettingsNote("An encrypted .bisel-backup file that only your recovery phrase opens. Keep one off this Mac and off iCloud.")
+            SettingsRow(label: "Last backup") { Text(backupText).foregroundStyle(.secondary) }
         }
         SettingsSection(title: "Import") { ImportView(service: service) }
     }
 
     private var backupText: String {
-        guard let status = service.backupStatus, let at = status.lastBackupAt else { return String(localized: "No backup yet") }
+        guard let status = service.backupStatus, let at = status.lastBackupAt else { return String(localized: "None yet") }
         let changes = status.changesSinceBackup
-        return String(localized: "Last backup \(at.formatted(.relative(presentation: .named)))")
+        return at.formatted(.relative(presentation: .named))
             + (changes > 0 ? String(localized: ", \(changes) changes since") : "")
     }
 
@@ -248,7 +258,7 @@ struct AdvancedSettings: View {
     @State private var connectError: String?
 
     var body: some View {
-        SettingsSection(title: "Self-hosted server") {
+        SettingsSection(title: "Self-hosted server", footer: service.isLocalOnly ? "Optional. Registers this Mac with your own Bisel server and uploads your items, encrypted." : nil) {
             if service.isLocalOnly {
                 DisclosureGroup("Connect a server you run…") {
                     TextField("Server URL", text: $connectServer, prompt: Text("https://your-server.example")).accessibilityIdentifier("connect-server")
@@ -256,12 +266,11 @@ struct AdvancedSettings: View {
                     ErrorLine(text: connectError)
                     Button("Connect and upload") { connect() }
                         .disabled(service.isBusy || connectServer.isEmpty || connectToken.isEmpty).accessibilityIdentifier("connect-go")
-                    SettingsNote("Optional. Registers this Mac with your own Bisel server and uploads your items, encrypted.")
                 }
             } else if let url = service.serverURL {
                 SettingsRow(label: "Server") { Text(url.absoluteString).textSelection(.enabled).lineLimit(1) }
             } else {
-                SettingsNote("Not used. iCloud keeps your devices in sync.")
+                SettingsRow(label: "Server") { Text("Not used. iCloud keeps your devices in sync.").foregroundStyle(.secondary) }
             }
         }
     }

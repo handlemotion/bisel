@@ -178,27 +178,41 @@ enum UserPicture {
 
 // MARK: - Building blocks
 
-/// A form section with an optional header.
+/// A form section: an optional header, its rows, and an optional footer for what applies to the whole group (HIG: a note
+/// about a group goes below it, not in a row of its own).
 struct SettingsSection<Content: View>: View {
     var title: String?
+    var footer: String?
     @ViewBuilder var content: Content
 
     var body: some View {
-        if let title { Section(title) { content } } else { Section { content } }
+        Section {
+            content
+        } header: {
+            if let title { Text(title) }
+        } footer: {
+            if let footer { SettingsNote(footer) }
+        }
     }
 }
 
-/// A label on the left, its control on the right.
+/// One setting: its title, an optional description under it, and its control on the right.
 struct SettingsRow<Control: View>: View {
     var label: String
+    var detail: String?
     @ViewBuilder var control: Control
 
     var body: some View {
-        LabeledContent(label) { control }
+        LabeledContent {
+            control
+        } label: {
+            Text(label)
+            if let detail { Text(detail) }
+        }
     }
 }
 
-/// An explanation under a setting, in the form's secondary style.
+/// An explanation in the form's secondary style (section footers).
 struct SettingsNote: View {
     let text: String
     init(_ text: String) { self.text = text }

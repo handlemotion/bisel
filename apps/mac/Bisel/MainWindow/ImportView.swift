@@ -15,12 +15,13 @@ struct ImportView: View {
     @State private var debugPath = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.m) {
-            Caption("1Password (.1pux) or a CSV with logins, notes and one-time codes. Everything is encrypted on this Mac before it syncs. Delete the export file afterwards: it contains your passwords in the clear.")
-            HStack {
+        // Form rows (Settings → Backup & Import): the import itself, then what was found in the file.
+        Group {
+            SettingsRow(label: "Import passwords",
+                        detail: "1Password (.1pux) or a CSV with logins, notes and one-time codes. Everything is encrypted on this Mac before it syncs. Delete the export file afterwards: it contains your passwords in the clear.") {
                 Button("Choose file…", systemImage: "doc") { picking = true }.accessibilityIdentifier("import-choose")
-                if let fileName { Text(DisplayText.clean(fileName)).foregroundStyle(theme.colors.secondaryText.color) }
             }
+            if let fileName { SettingsRow(label: "File") { Text(DisplayText.clean(fileName)).foregroundStyle(.secondary) } }
             #if DEBUG
             // Debug builds only: lets flow tests pick a file without driving the out-of-process open panel.
             TextField("", text: $debugPath, prompt: Text("debug: file path")).textFieldStyle(.roundedBorder)

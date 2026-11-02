@@ -46,6 +46,11 @@ enum DebugTools {
                 MainActor.assumeIsolated { snapshotMainWindow(to: path) }
             }
         }
+        // `app.bisel.dev.settings.<pid>` (userInfo `page`): Settings on that page, so one run can capture every page.
+        DistributedNotificationCenter.default().addObserver(forName: Notification.Name("app.bisel.dev.settings.\(getpid())"), object: nil, queue: .main) { note in
+            guard let raw = note.userInfo?["page"] as? String, let page = SettingsPage(rawValue: raw) else { return }
+            MainActor.assumeIsolated { AppModel.shared.showSettings(page) }
+        }
     }
 
     /// Gives you 3 s to focus a field in another app, then logs how the fill engine classifies it
