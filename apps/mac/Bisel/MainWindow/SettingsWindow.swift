@@ -199,7 +199,7 @@ private struct PageHeader: View {
         .multilineTextAlignment(.center)
         .frame(maxWidth: .infinity)
         .padding(.top, -12)
-        .padding(.bottom, 28)
+        .padding(.bottom, 44)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isHeader)
     }
