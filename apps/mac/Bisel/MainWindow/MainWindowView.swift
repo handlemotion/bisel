@@ -86,19 +86,21 @@ struct MainWindowView: View {
 
     private func style(_ w: NSWindow) {
         if isSettings {
-            // A standard titled window: the system's corners, shadow and traffic lights. The panel's fill comes from
-            // `containerBackground(for: .window)` under a hidden toolbar background.
-            w.isOpaque = false
-            w.backgroundColor = .clear
+            // A standard titled window: the system's corners, shadow and traffic lights, the content below the title bar,
+            // the theme's background behind both, and the Mac's light/dark appearance (the onboarding cards force dark).
+            w.isOpaque = true
+            w.backgroundColor = NSColor(theme.colors.background.color)
+            w.appearance = nil
             w.titleVisibility = .hidden
             w.titlebarAppearsTransparent = true
             w.titlebarSeparatorStyle = .none
-            w.styleMask.insert(.fullSizeContentView)
+            w.styleMask.remove(.fullSizeContentView)
             w.styleMask.remove(.resizable)
             for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = false }
             w.isMovableByWindowBackground = false
             w.hasShadow = true
         } else if cardSize != nil {
+            w.appearance = NSAppearance(named: .darkAqua)
             w.isOpaque = false
             w.backgroundColor = .clear
             w.titlebarAppearsTransparent = true

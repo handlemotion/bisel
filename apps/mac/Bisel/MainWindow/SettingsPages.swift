@@ -3,7 +3,7 @@ import ServiceManagement
 import SwiftUI
 import BiselCore
 
-/// The four settings pages. One rule for where a setting goes:
+/// The four settings sections (one scrolling page). One rule for where a setting goes:
 ///  - General: how Bisel starts and looks (login item, command panel, theme, site icons, about).
 ///  - Fill: getting values out (Accessibility permission, copying).
 ///  - Sync: where the box lives (iCloud status, devices, the optional self-hosted server).
