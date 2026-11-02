@@ -30,17 +30,31 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         }
     }
 
+    /// A white SF Symbol on a colored rounded square, like System Settings.
     var symbol: String {
         switch self {
-        case .account: "person.crop.circle"
-        case .general: "gearshape"
-        case .appearance: "paintbrush"
-        case .fill: "keyboard"
-        case .security: "lock"
-        case .sync: "icloud"
-        case .backup: "externaldrive"
-        case .advanced: "wrench.and.screwdriver"
-        case .about: "info.circle"
+        case .account: "person.crop.circle.fill"
+        case .general: "gearshape.fill"
+        case .appearance: "circle.lefthalf.filled"
+        case .fill: "keyboard.fill"
+        case .security: "touchid"
+        case .sync: "icloud.fill"
+        case .backup: "externaldrive.fill"
+        case .advanced: "wrench.and.screwdriver.fill"
+        case .about: "info"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .account: .blue
+        case .general, .advanced: .gray
+        case .appearance: .black
+        case .fill: .indigo
+        case .security: .red
+        case .sync: .blue
+        case .backup: .green
+        case .about: .cyan
         }
     }
 
@@ -58,8 +72,8 @@ struct SettingsView: View {
         NavigationSplitView {
             List(selection: Binding<SettingsPage?>(get: { page }, set: { if let p = $0 { select(p) } })) {
                 AccountRow().tag(SettingsPage.account)
-                Section { ForEach(SettingsPage.main) { Label($0.title, systemImage: $0.symbol).tag($0) } }
-                Section { ForEach(SettingsPage.more) { Label($0.title, systemImage: $0.symbol).tag($0) } }
+                Section { ForEach(SettingsPage.main) { SidebarRow(page: $0).tag($0) } }
+                Section { ForEach(SettingsPage.more) { SidebarRow(page: $0).tag($0) } }
             }
             .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
         } detail: {
@@ -89,6 +103,22 @@ struct SettingsView: View {
         case .backup: BackupSettings(service: service)
         case .advanced: AdvancedSettings(service: service)
         case .about: AboutSettings()
+        }
+    }
+}
+
+private struct SidebarRow: View {
+    let page: SettingsPage
+
+    var body: some View {
+        Label {
+            Text(page.title)
+        } icon: {
+            Image(systemName: page.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 22, height: 22)
+                .background(page.tint.gradient, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
     }
 }

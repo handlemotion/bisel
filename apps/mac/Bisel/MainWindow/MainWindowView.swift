@@ -13,6 +13,7 @@ struct MainWindowView: View {
     /// The titlebar's height, measured from the window: the scene sizes the content area, the titlebar comes on top of it,
     /// so the island's frame is its height minus this.
     @State private var titlebarInset: CGFloat = 32
+    @State private var styled = StyledWindow()
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.theme) private var theme
 
@@ -59,7 +60,14 @@ struct MainWindowView: View {
             w.sharingType = .readOnly   // nothing is hidden from screenshots; sensitive values are masked in the UI instead
             w.isRestorable = false
             DockPresence.windowAppeared(w)
-            style(w)
+            // Only when the screen kind changes: re-applying the style mask on every update fights the split view's
+            // sidebar animation.
+            let mode = cardSize == nil ? "window" : "island.\(screenKey)"
+            if styled.window !== w || styled.mode != mode {
+                style(w)
+                styled.window = w
+                styled.mode = mode
+            }
             let inset = w.frame.height - w.contentLayoutRect.height
             if cardSize != nil, abs(inset - titlebarInset) > 0.5, inset >= 0 { DispatchQueue.main.async { titlebarInset = inset } }
         })
@@ -160,6 +168,12 @@ struct MainWindowView: View {
 }
 
 
+
+/// Which window was last styled, and for what screen kind. A plain class: changing it must not update the view.
+private final class StyledWindow {
+    weak var window: NSWindow?
+    var mode = ""
+}
 
 /// The Bisel theme (colors, tint, light/dark) and window title for every screen but Settings, which stays native.
 private struct ThemedScreens: ViewModifier {
