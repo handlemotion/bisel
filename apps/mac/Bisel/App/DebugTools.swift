@@ -37,6 +37,26 @@ enum DebugTools {
         Log.app.notice("snapshot written")
     }
 
+    /// The menu bar mark with a dot cut into its lower right corner (a template image, like the original).
+    @MainActor
+    static let menuBarIcon: NSImage = {
+        guard let base = NSImage(named: "MenuBarIcon") else { return NSImage() }
+        let size = base.size
+        let image = NSImage(size: size, flipped: false) { rect in
+            base.draw(in: rect)
+            let d = size.height * 0.42
+            let dot = NSRect(x: rect.maxX - d, y: rect.minY, width: d, height: d)
+            NSGraphicsContext.current?.compositingOperation = .clear
+            NSBezierPath(ovalIn: dot.insetBy(dx: -1.5, dy: -1.5)).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: dot).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
     @MainActor
     static func installSnapshotListener() {
         // `app.bisel.dev.snapshot.<pid>` reaches one process when several debug builds run at once.

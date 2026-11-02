@@ -20,7 +20,7 @@ struct BiselApp: App {
         } label: {
             // The label exists from launch (menu content only exists once opened), so it can hand non-view code the
             // `openWindow` action in time for the first-run set-up window.
-            Image("MenuBarIcon").modifier(OpenWindowBridge())
+            menuBarIcon.modifier(OpenWindowBridge())
         }
 
         Window("Bisel", id: "main") {
@@ -30,6 +30,17 @@ struct BiselApp: App {
         }
         .defaultLaunchBehavior(.suppressed)
         .windowResizability(.contentSize)   // every screen has a fixed frame
+    }
+}
+
+extension BiselApp {
+    /// A debug build's menu bar icon carries a dot, so it is never mistaken for the installed app's.
+    private var menuBarIcon: Image {
+        #if DEBUG
+        Image(nsImage: DebugTools.menuBarIcon)
+        #else
+        Image("MenuBarIcon")
+        #endif
     }
 }
 
