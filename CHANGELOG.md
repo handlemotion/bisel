@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.3](https://github.com/handlemotion/bisel/compare/v0.1.2...v0.1.3) (2026-11-02)
+
+
+### Features
+
+* native Settings window with a sidebar ([#32](https://github.com/handlemotion/bisel/issues/32)) ([26de49e](https://github.com/handlemotion/bisel/commit/26de49efaaa8ce3bcd57ff25fd57dec299742744))
+
+
+### Bug Fixes
+
+* Settings sidebar starts wider and never closes ([fcfd7a4](https://github.com/handlemotion/bisel/commit/fcfd7a4bbd1398b1234abdc081b5b73d48c34915))
+
 ## [0.1.2](https://github.com/handlemotion/bisel/compare/v0.1.1...v0.1.2) (2026-11-01)
 
 
