@@ -88,7 +88,7 @@ struct SettingsView: View {
     @State private var forward: [SettingsPage] = []
 
     var body: some View {
-        // The sidebar is always shown: no toggle in the toolbar, and the divider cannot collapse it.
+        // The sidebar is always shown at one width: no toggle in the toolbar, and the divider cannot collapse or resize it.
         NavigationSplitView(columnVisibility: .constant(.all)) {
             List(selection: Binding<SettingsPage?>(get: { page }, set: { if let p = $0 { go(to: p) } })) {
                 AccountRow().tag(SettingsPage.account)
@@ -96,6 +96,7 @@ struct SettingsView: View {
                 Section { ForEach(SettingsPage.more) { SidebarRow(page: $0).tag($0) } }
             }
             .toolbar(removing: .sidebarToggle)
+            .navigationSplitViewColumnWidth(260)   // one width: the divider does not resize the sidebar
         } detail: {
             Form {
                 Section { } header: { PageHeader(page: page) }
