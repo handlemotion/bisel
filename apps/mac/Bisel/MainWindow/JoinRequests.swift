@@ -14,20 +14,20 @@ struct JoinRequestsCard: View {
     private static let poll: Duration = .seconds(8)
 
     var body: some View {
-        SettingsCard(title: "Add a device") {
+        SettingsSection(title: "Add a device") {
             let shown = requests.filter { !hidden.contains($0.id) }.sorted { $0.receivedAt > $1.receivedAt }
             if shown.isEmpty {
-                Caption("On the new Mac, choose Add this Mac. Its request shows up here, and you approve it with the 8 words it shows.")
+                SettingsNote("On the new Mac, choose Add this Mac. Its request shows up here, and you approve it with the 8 words it shows.")
             }
             ForEach(shown) { r in
                 SettingsRow(label: DisplayText.clean(r.request.name)) {
                     if r.isExpired {
-                        Button("Dismiss") { hidden.insert(r.id) }.controlSize(.small)
+                        Button("Dismiss") { hidden.insert(r.id) }
                     } else {
-                        Button("Approve…") { approving = r }.controlSize(.small).accessibilityIdentifier("join-approve")
+                        Button("Approve…") { approving = r }.accessibilityIdentifier("join-approve")
                     }
                 }
-                Caption(r.isExpired ? "Expired. Start again on the new device." : "Asked \(r.receivedAt.formatted(.relative(presentation: .named))).")
+                SettingsNote(r.isExpired ? "Expired. Start again on the new device." : "Asked \(r.receivedAt.formatted(.relative(presentation: .named))).")
             }
         }
         .task(id: service.isOnICloud) {
@@ -107,6 +107,7 @@ private struct ApproveJoinSheet: View {
         Task {
             defer { working = false }
             do {
+                try await AppModel.shared.unlockIfLocked("Unlock your box to approve the device")
                 try await service.approve(pending, words: typed)
                 code = try await service.verificationCode()
             } catch BiselCryptoError.invalidPairingSecret {

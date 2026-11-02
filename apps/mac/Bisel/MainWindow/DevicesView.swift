@@ -13,16 +13,10 @@ struct DevicesView: View {
     @State private var queued: [DevicesSheet] = []
     @State private var working = false
 
+    /// A form section of its own (Settings → Sync): one row per device, refresh in the header.
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.m) {
-            HStack {
-                Text("Devices").font(theme.font(theme.fonts.detail, weight: .medium))
-                Spacer()
-                Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.borderless).help("Refresh").accessibilityLabel("Refresh").disabled(loading || service.isLocalOnly)
-                    .accessibilityIdentifier("devices-refresh")
-            }
-            ErrorLine(text: error)
+        Section {
+            if let error { ErrorLine(text: error) }
             ForEach(service.securityAlerts) { alert in
                 HStack(alignment: .top, spacing: theme.spacing.s) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(theme.colors.danger.color)
@@ -35,7 +29,7 @@ struct DevicesView: View {
                         Button("Dismiss") { service.dismissAlert(alert.id) }.buttonStyle(.borderless).accessibilityIdentifier("dismiss-alert")
                         if alert.recoveredDeviceID != nil {
                             Button("New phrase and revoke") { Task { await answer(alert) } }
-                                .controlSize(.small).disabled(working).accessibilityIdentifier("alert-new-phrase-revoke")
+                                .disabled(working).accessibilityIdentifier("alert-new-phrase-revoke")
                         }
                     }
                 }
@@ -49,9 +43,17 @@ struct DevicesView: View {
                     .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("recovery-changed")
             }
             if service.isLocalOnly {
-                Caption("\(service.deviceName) holds the only copy of your box.")
+                LabeledContent {
+                    Text("This Mac").foregroundStyle(.secondary)
+                } label: {
+                    Label { Text(Self.clean(service.deviceName)); Text("Holds the only copy of your box") } icon: { Image(systemName: "laptopcomputer") }
+                }
+            } else if !service.isUnlocked {
+                SettingsRow(label: "Your devices", detail: "Shown once the box is unlocked.") {
+                    Button("Unlock…") { Task { try? await AppModel.shared.unlockIfLocked("Unlock your box to see your devices") } }
+                }
             } else if devices.isEmpty && !loading {
-                Caption("No devices yet.")
+                Text("No devices yet.").foregroundStyle(.secondary)
             }
             ForEach(devices) { d in
                 HStack(spacing: theme.spacing.m) {
@@ -76,7 +78,6 @@ struct DevicesView: View {
                             .disabled(working).accessibilityIdentifier("revoke-\(Self.clean(d.name))")
                     }
                 }
-                .padding(.vertical, 2)
             }
             if !events.isEmpty {
                 DisclosureGroup("Recent activity") {
@@ -86,9 +87,20 @@ struct DevicesView: View {
                 }
                 .font(theme.font(theme.fonts.caption))
             }
-            if !service.isLocalOnly { Caption("A revoked device can no longer sync, and the box key is replaced.") }
+        } header: {
+            HStack {
+                Text("Devices").font(.headline).foregroundStyle(.primary)
+                Spacer()
+                if !service.isLocalOnly {
+                    Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.borderless).help("Refresh").accessibilityLabel("Refresh").disabled(loading)
+                        .accessibilityIdentifier("devices-refresh")
+                }
+            }
+        } footer: {
+            if !service.isLocalOnly { SettingsNote("A revoked device can no longer sync, and the box key is replaced.") }
         }
-        .task { await load() }
+        .task(id: service.isUnlocked) { await load() }
         .sheet(item: $sheet, onDismiss: showNext) { shown in
             switch shown {
             case .confirm(let d):
@@ -141,7 +153,7 @@ struct DevicesView: View {
     }
 
     private func load() async {
-        guard !service.isLocalOnly else { devices = []; error = nil; return }
+        guard !service.isLocalOnly, service.isUnlocked else { devices = []; error = nil; return }
         loading = true; defer { loading = false }
         do { devices = try await service.devices(); error = nil }
         catch { self.error = describe(error) }
@@ -151,6 +163,7 @@ struct DevicesView: View {
     private func revoke(_ d: DeviceInfo, newPhrase: Bool) async {
         working = true; defer { working = false }
         do {
+            try await AppModel.shared.unlockIfLocked("Unlock your box to revoke the device")
             let report = try await service.revoke(deviceID: d.id)
             let outcome = newPhrase ? await service.replacePhrase(after: report) : RevokeOutcome(report: report, phrase: nil)
             await finished(outcome)
@@ -162,7 +175,10 @@ struct DevicesView: View {
     /// The alert's one action: revoke the device that recovered with the phrase, then replace the phrase.
     private func answer(_ alert: SecurityAlert) async {
         working = true; defer { working = false }
-        do { await finished(try await service.answerRecovery(alert)) }
+        do {
+            try await AppModel.shared.unlockIfLocked("Unlock your box to revoke the device")
+            await finished(try await service.answerRecovery(alert))
+        }
         catch KeyStoreError.userCancelled { error = "Touch ID cancelled, nothing was revoked" }
         catch { self.error = describe(error) }
     }
@@ -236,7 +252,7 @@ private struct AppleAccountNote: View {
             Caption("“\(name)” is still signed in to your Apple Account, so it can still reach the box in iCloud. Remove it from your Apple Account too.")
                 .fixedSize(horizontal: false, vertical: true)
             Button("Open Apple Account Settings") { AppleAccountSettings.openDevices() }
-                .controlSize(.small).accessibilityIdentifier("open-apple-account")
+                .accessibilityIdentifier("open-apple-account")
         }
     }
 }

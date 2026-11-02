@@ -496,34 +496,3 @@ struct OnboardingImportView: View {
         }
     }
 }
-
-struct LockedView: View {
-    let service: VaultService
-    private let theme = Theme.biselDark
-    @State private var error: String?
-    @State private var working = false
-
-    var body: some View {
-        OnboardingFrame(progress: nil, title: "Bisel is locked", message: "Use Touch ID to open your box.") {
-            VStack(alignment: .leading, spacing: theme.spacing.m) {
-                ErrorLine(text: error)
-                SyncStatusView(service: service, compact: true)
-            }
-        } actions: {
-            Button { unlock() } label: { Label("Unlock with Touch ID", systemImage: "touchid") }
-                .buttonStyle(PillButtonStyle()).keyboardShortcut(.defaultAction)
-                .disabled(working).accessibilityIdentifier("unlock-button")
-        }
-    }
-
-    private func unlock() {
-        error = nil; working = true
-        Task {
-            defer { working = false }
-            do { try await service.unlock() }
-            catch KeyStoreError.userCancelled {}
-            catch BiometricGate.Failure.denied {}
-            catch { self.error = describe(error) }
-        }
-    }
-}

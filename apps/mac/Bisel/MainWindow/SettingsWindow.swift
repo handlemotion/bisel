@@ -1,159 +1,232 @@
-import KeyboardShortcuts
 import OpenDirectory
 import SwiftUI
 import BiselCore
 
-/// The settings window (Figma "Bisel", node 16:2): pitch-black card, a rail of round page buttons on the left (the selected
-/// one lighter), the page centred in a 310 pt column. Keeps the traffic lights.
+/// The settings window, all native: a split view with the Mac user's account row and the pages in the sidebar, each
+/// page a grouped form. System colors, fonts and controls throughout, so it follows the Mac's light/dark appearance.
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case general, fill, sync, account
+    case account, general, appearance, fill, security, sync, backup, advanced, about
     var id: String { rawValue }
+    /// The page Settings opens on, and the last one shown.
     static let defaultsKey = "settings.page"
+    /// Posted by `AppModel.showSettings` with the page as the object: an open window switches to it.
+    static let showNotification = Notification.Name("app.bisel.settings.show")
+
+    static var current: SettingsPage {
+        UserDefaults.standard.string(forKey: defaultsKey).flatMap(SettingsPage.init(rawValue:)) ?? .general
+    }
 
     var title: String {
         switch self {
-        case .general: String(localized: "General")
-        case .fill: String(localized: "Fill")
-        case .sync: String(localized: "Sync")
         case .account: String(localized: "Account")
+        case .general: String(localized: "General")
+        case .appearance: String(localized: "Appearance")
+        case .fill: String(localized: "Fill")
+        case .security: String(localized: "Security")
+        case .sync: String(localized: "Sync")
+        case .backup: String(localized: "Backup & Import")
+        case .advanced: String(localized: "Advanced")
+        case .about: String(localized: "About")
         }
     }
 
-    /// Asset catalog glyph; the account page shows the Mac user's picture instead.
-    var icon: String? {
+    /// A white SF Symbol on a colored rounded square, like System Settings.
+    var symbol: String {
         switch self {
-        case .general: "IconSettingsGear1"
-        case .fill: "IconAiBotHeadLeaf"
-        case .sync: "IconCloudSync"
-        case .account: nil
+        case .account: "person.crop.circle.fill"
+        case .general: "gearshape.fill"
+        case .appearance: "circle.lefthalf.filled"
+        case .fill: "keyboard.fill"
+        case .security: "touchid"
+        case .sync: "icloud.fill"
+        case .backup: "externaldrive.fill"
+        case .advanced: "wrench.and.screwdriver.fill"
+        case .about: "info"
         }
     }
+
+    var tint: Color {
+        switch self {
+        case .account: .blue
+        case .general, .advanced: .gray
+        case .appearance: .black
+        case .fill: .indigo
+        case .security: .red
+        case .sync: .blue
+        case .backup: .green
+        case .about: .cyan
+        }
+    }
+
+    /// The line under the page's title.
+    var summary: String {
+        switch self {
+        case .account: String(localized: "This Mac and your recovery phrase.")
+        case .general: String(localized: "How Bisel starts, and the command panel.")
+        case .appearance: String(localized: "Theme and site icons.")
+        case .fill: String(localized: "Filling and copying usernames, passwords and codes.")
+        case .security: String(localized: "When your box locks, and when it asks for Touch ID.")
+        case .sync: String(localized: "Where your box lives, and the devices that share it.")
+        case .backup: String(localized: "An encrypted backup, and passwords from other apps.")
+        case .advanced: String(localized: "A self-hosted server, if you run one.")
+        case .about: String(localized: "A zero-knowledge password manager for your Mac.")
+        }
+    }
+
+    /// Sidebar groups below the account row.
+    static let main: [SettingsPage] = [.general, .appearance, .fill, .security, .sync, .backup]
+    static let more: [SettingsPage] = [.advanced, .about]
 }
 
-enum SettingsLayout {
-    /// Figma frame 646×404.
-    static let window = NSSize(width: 646, height: 404)
-    static let column: CGFloat = 310
-    /// Frame padding: 16 pt on the sides, 28 pt on top.
-    static let top: CGFloat = 28
-    static let rail: CGFloat = 24
-    static let railGlyph: CGFloat = 15
-    static let railGap: CGFloat = 6
-    static let avatar: CGFloat = 20
-    static let cardRadius: CGFloat = 12
-    /// Rail fills are the text color over the background: 11% is Figma's #1d1d1d, 37% its #5e5e5e on black.
-    static let railOpacity = 0.114
-    static let railHoverOpacity = 0.2
-    static let railSelectedOpacity = 0.37
-}
-
-struct SettingsShell: View {
+struct SettingsView: View {
     let service: VaultService
-    @AppStorage(SettingsPage.defaultsKey) private var page = SettingsPage.general
-    @Environment(\.theme) private var theme
+    /// The window's own selection: a launch argument (`-settings.page`) shadows the default and must not pin the sidebar.
+    @State private var page = SettingsPage.current
+
+    /// Pages visited before and after this one, for the toolbar's back and forward (like Raycast's settings).
+    @State private var back: [SettingsPage] = []
+    @State private var forward: [SettingsPage] = []
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: theme.spacing.l) {
-                    Text(page.title)
-                        .font(theme.font(theme.fonts.detailTitle - 6))   // 18 pt
-                        .accessibilityAddTraits(.isHeader)
-                    content
-                }
-                .frame(width: SettingsLayout.column, alignment: .leading)
-                .padding(.top, SettingsLayout.top)
-                .padding(.bottom, theme.spacing.l)
-                .frame(maxWidth: .infinity)
-                .id(page)
-                .transition(.opacity)
+        // The sidebar is always shown: no toggle in the toolbar, and the divider cannot collapse it.
+        NavigationSplitView(columnVisibility: .constant(.all)) {
+            List(selection: Binding<SettingsPage?>(get: { page }, set: { if let p = $0 { go(to: p) } })) {
+                AccountRow().tag(SettingsPage.account)
+                Section { ForEach(SettingsPage.main) { SidebarRow(page: $0).tag($0) } }
+                Section { ForEach(SettingsPage.more) { SidebarRow(page: $0).tag($0) } }
             }
-            .scrollIndicators(.never)
-            SettingsRail(page: $page)
-                .padding(.leading, theme.spacing.l - SettingsLayout.railGap + theme.card.hairline)
-                .padding(.top, SettingsLayout.top - SettingsLayout.railGap + theme.card.hairline)
+            .toolbar(removing: .sidebarToggle)
+        } detail: {
+            Form {
+                Section { } header: { PageHeader(page: page) }
+                content
+            }
+                .formStyle(.grouped)
+                .navigationTitle(page.title)
+                .toolbar(removing: .title)   // the page header says it; the toolbar keeps back and forward
+                .id(page)
+                .toolbar {
+                    ToolbarItemGroup(placement: .navigation) {
+                        Button { goBack() } label: { Label("Back", systemImage: "chevron.left") }
+                            .help("Back").disabled(back.isEmpty).keyboardShortcut("[", modifiers: .command)
+                        Button { goForward() } label: { Label("Forward", systemImage: "chevron.right") }
+                            .help("Forward").disabled(forward.isEmpty).keyboardShortcut("]", modifiers: .command)
+                    }
+                }
         }
-        .animation(.easeInOut(duration: 0.2), value: page)
-        .font(theme.font(theme.fonts.detail))
-        .ignoresSafeArea()
-        .background {
-            let shape = RoundedRectangle(cornerRadius: theme.radii.card, style: .continuous)
-            shape.fill(theme.colors.background.color)
-                .overlay(shape.strokeBorder(theme.colors.border.color, lineWidth: theme.card.hairline))
-                .ignoresSafeArea()
+        .onReceive(NotificationCenter.default.publisher(for: SettingsPage.showNotification)) { n in
+            if let p = n.object as? SettingsPage { go(to: p) }
         }
+    }
+
+    private func go(to p: SettingsPage) {
+        guard p != page else { return }
+        back.append(page)
+        forward.removeAll()
+        show(p)
+    }
+
+    private func goBack() {
+        guard let p = back.popLast() else { return }
+        forward.append(page)
+        show(p)
+    }
+
+    private func goForward() {
+        guard let p = forward.popLast() else { return }
+        back.append(page)
+        show(p)
+    }
+
+    private func show(_ p: SettingsPage) {
+        page = p
+        UserDefaults.standard.set(p.rawValue, forKey: SettingsPage.defaultsKey)
     }
 
     @ViewBuilder private var content: some View {
         switch page {
-        case .general: GeneralSettings()
-        case .fill: FillSettings()
-        case .sync: SyncSettings(service: service)
         case .account: AccountSettings(service: service)
+        case .general: GeneralSettings()
+        case .appearance: AppearanceSettings()
+        case .fill: FillSettings()
+        case .security: SecurityPage(service: service)
+        case .sync: SyncSettings(service: service)
+        case .backup: BackupSettings(service: service)
+        case .advanced: AdvancedSettings(service: service)
+        case .about: AboutSettings()
         }
     }
 }
 
-private struct SettingsRail: View {
-    @Binding var page: SettingsPage
-
-    var body: some View {
-        VStack(spacing: SettingsLayout.railGap) {
-            ForEach(SettingsPage.allCases) { p in RailButton(page: p, selected: page == p) { page = p } }
-        }
-        .padding(SettingsLayout.railGap)
-    }
-}
-
-private struct RailButton: View {
+private struct SidebarRow: View {
     let page: SettingsPage
-    let selected: Bool
-    let action: () -> Void
-    @Environment(\.theme) private var theme
-    @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            ZStack {
-                Circle().fill(theme.colors.text.color.opacity(fill))
-                if let icon = page.icon {
-                    Image(icon).renderingMode(.template).resizable().scaledToFit()
-                        .frame(width: SettingsLayout.railGlyph, height: SettingsLayout.railGlyph)
-                } else {
-                    UserPictureView().frame(width: SettingsLayout.avatar, height: SettingsLayout.avatar)
-                }
-            }
-            .frame(width: SettingsLayout.rail, height: SettingsLayout.rail)
-            .foregroundStyle(theme.colors.text.color)
-            .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: hovering)
-        .animation(.easeOut(duration: 0.12), value: selected)
-        .help(page.title)
-        .accessibilityLabel(page.title)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .accessibilityIdentifier("nav-\(page.rawValue)")
+        Label { Text(page.title) } icon: { PageIcon(page: page, size: 22) }
     }
+}
 
-    /// The account button has no fill of its own (the picture is the button) until it is hovered or selected.
-    private var fill: Double {
-        if selected { return SettingsLayout.railSelectedOpacity }
-        if hovering { return SettingsLayout.railHoverOpacity }
-        return page.icon == nil ? 0 : SettingsLayout.railOpacity
+/// The page's symbol in white on its color, a rounded square like System Settings' icons.
+private struct PageIcon: View {
+    let page: SettingsPage
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: page.symbol)
+            .font(.system(size: size * 0.55, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(page.tint.gradient, in: RoundedRectangle(cornerRadius: size * 0.27, style: .continuous))
+    }
+}
+
+/// The top of a page: its icon (the Mac user's picture on Account), its title and a line about it.
+private struct PageHeader: View {
+    let page: SettingsPage
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if page == .account {
+                UserPictureView().frame(width: 64, height: 64)
+            } else {
+                PageIcon(page: page, size: 64)
+            }
+            Text(page == .account ? NSFullUserName() : page.title)
+                .font(.system(size: 26, weight: .bold)).foregroundStyle(.primary)
+                .padding(.top, 6)
+            Text(page.summary).font(.body).foregroundStyle(.secondary)
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .padding(.top, -12)
+        .padding(.bottom, 44)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// The Mac user's picture and name, like the account row at the top of System Settings.
+private struct AccountRow: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            UserPictureView().frame(width: 32, height: 32)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(NSFullUserName())
+                Text("Account").font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .combine)
     }
 }
 
 /// The Mac user's account picture (Users & Groups), or a generic person.
 private struct UserPictureView: View {
-    @Environment(\.theme) private var theme
     var body: some View {
         if let image = UserPicture.image {
             Image(nsImage: image).resizable().scaledToFill().clipShape(Circle())
         } else {
-            Image(systemName: "person.crop.circle.fill").resizable().scaledToFit()
-                .foregroundStyle(theme.colors.secondaryText.color)
+            Image(systemName: "person.crop.circle.fill").resizable().scaledToFit().foregroundStyle(.secondary)
         }
     }
 }
@@ -175,35 +248,47 @@ enum UserPicture {
 
 // MARK: - Building blocks
 
-/// Figma card: #282828 (the selection color), 12 pt radius and padding, a 13 pt label, then its rows.
-struct SettingsCard<Content: View>: View {
+/// A form section: an optional header, its rows, and an optional footer for what applies to the whole group (HIG: a note
+/// about a group goes below it, not in a row of its own).
+struct SettingsSection<Content: View>: View {
     var title: String?
+    var footer: String?
     @ViewBuilder var content: Content
-    @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.m) {
-            if let title { Text(title).font(theme.font(theme.fonts.detail, weight: .medium)) }
+        Section {
             content
+        } header: {
+            // Styled explicitly: after the page header the form would draw the first section's title small and gray.
+            if let title { Text(title).font(.headline).foregroundStyle(.primary) }
+        } footer: {
+            if let footer { SettingsNote(footer) }
         }
-        .padding(theme.spacing.m)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: SettingsLayout.cardRadius, style: .continuous).fill(theme.colors.selection.color))
     }
 }
 
-/// A label on the left, its control on the right.
+/// One setting: its title, an optional description under it, and its control on the right.
 struct SettingsRow<Control: View>: View {
     var label: String
+    var detail: String?
     @ViewBuilder var control: Control
-    @Environment(\.theme) private var theme
 
     var body: some View {
-        HStack(spacing: theme.spacing.s) {
-            Text(label).foregroundStyle(theme.colors.secondaryText.color).fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: theme.spacing.s)
+        LabeledContent {
             control
+        } label: {
+            Text(label)
+            if let detail { Text(detail) }
         }
+    }
+}
+
+/// An explanation in the form's secondary style (section footers).
+struct SettingsNote: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -222,5 +307,5 @@ struct NumberPicker: View {
 }
 
 extension Toggle {
-    func settingsSwitch() -> some View { self.labelsHidden().toggleStyle(.switch).controlSize(.mini) }
+    func settingsSwitch() -> some View { self.labelsHidden().toggleStyle(.switch) }
 }

@@ -3,7 +3,8 @@ import SwiftUI
 import BiselCore
 
 struct MainWindowView: View {
-    /// The window is for settings only; the command panel (⌘⇧Space) is the way into the box.
+    /// Set-up and the recovery phrase (dark glass cards), then Settings (a native window); the command panel (⌘⇧Space) is
+    /// the way into the box.
     private let service = AppModel.shared.service
     /// After the recovery phrase of a new box: one last onboarding step to import passwords.
     @State private var showImport = false
@@ -12,6 +13,7 @@ struct MainWindowView: View {
     /// The titlebar's height, measured from the window: the scene sizes the content area, the titlebar comes on top of it,
     /// so the island's frame is its height minus this.
     @State private var titlebarInset: CGFloat = 32
+    @State private var styled = StyledWindow()
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.theme) private var theme
 
@@ -39,26 +41,32 @@ struct MainWindowView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { showImport = false }
                 }
                 .transition(Self.swap)
-            } else if service.phase == .locked {
-                LockedView(service: service).transition(Self.swap)
             } else {
+                // Locked or not: Settings never asks to unlock up front (see `AppModel.unlockIfLocked`).
                 unlocked
             }
         }
-        .background(cardSize == nil || isSettings ? Color.clear : Theme.biselDark.colors.background.color)   // settings draws its own card
+        .background(cardSize == nil ? Color.clear : Theme.biselDark.colors.background.color)
         .animation(.easeInOut(duration: 0.3), value: screenKey)
         .environment(\.cascadeLead, 0.3)   // a new screen waits for the old one to fade out
-        // SwiftUI owns the window size (the scene is .contentSize): the island is exactly its fixed frame, the settings window
-        // grows from a 820x540 minimum. No AppKit resizing, so the hosting view can never lag behind the window.
-        .frame(minWidth: cardSize?.width ?? 820, maxWidth: cardSize?.width ?? .infinity,
-               minHeight: cardSize.map { $0.height - titlebarInset } ?? 540, maxHeight: cardSize.map { $0.height - titlebarInset } ?? .infinity)
-        .themedPage(theme, opaque: cardSize == nil)
+        // SwiftUI owns the window size (the scene is .contentSize): the island and Settings are each exactly their fixed frame.
+        // No AppKit resizing, so the hosting view can never lag behind the window.
+        .frame(width: cardSize?.width ?? Self.settingsSize.width,
+               height: cardSize.map { $0.height - titlebarInset } ?? Self.settingsSize.height)
+        .modifier(ThemedScreens(theme: theme, active: !isSettings, opaque: cardSize == nil))
         .panelMaterial()
         .background(WindowAccessor { w in
             w.sharingType = .readOnly   // nothing is hidden from screenshots; sensitive values are masked in the UI instead
             w.isRestorable = false
             DockPresence.windowAppeared(w)
-            style(w)
+            // Only when the screen kind changes: re-applying the style mask on every update fights the split view's
+            // sidebar animation.
+            let mode = cardSize == nil ? "window" : "island.\(screenKey)"
+            if styled.window !== w || styled.mode != mode {
+                style(w)
+                styled.window = w
+                styled.mode = mode
+            }
             let inset = w.frame.height - w.contentLayoutRect.height
             if cardSize != nil, abs(inset - titlebarInset) > 0.5, inset >= 0 { DispatchQueue.main.async { titlebarInset = inset } }
         })
@@ -68,21 +76,14 @@ struct MainWindowView: View {
             #endif
         }
         .toolbarBackgroundVisibility(cardSize == nil ? .automatic : .hidden, for: .windowToolbar)
-        // Onboarding screens have no window title at all (it would be drawn in the titlebar, over the progress bar).
-        .navigationTitle(cardSize != nil ? "" : (service.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel"))
     }
 
-    /// Set-up, the recovery phrase and the lock screen are the glass island itself: the window is small, borderless-looking
-    /// and shows the command panel's material. Settings is a card of its own (with traffic lights). Only the error and
-    /// fixture notices use the normal window.
+    /// Set-up and the recovery phrase are the glass island itself: the window is small, borderless-looking and shows the
+    /// command panel's material. Settings (locked or not) and the error and fixture notices use the normal window.
     private var cardSize: NSSize? {
         guard service.startupError == nil, !usesFixture else { return nil }
         if service.pendingPhrase != nil || showAccess || showImport || inSetup { return OnboardingLayout.island }
-        switch service.phase {
-        case .needsSetup: return OnboardingLayout.island
-        case .locked: return OnboardingLayout.island
-        default: return SettingsLayout.window
-        }
+        return nil
     }
 
     private func style(_ w: NSWindow) {
@@ -95,24 +96,28 @@ struct MainWindowView: View {
             w.title = ""
             w.styleMask.insert(.fullSizeContentView)
             w.styleMask.remove(.resizable)
-            // No traffic lights on the onboarding screens (the window closes from the Dock); settings keeps close and minimise.
-            w.standardWindowButton(.closeButton)?.isHidden = !isSettings
-            w.standardWindowButton(.miniaturizeButton)?.isHidden = !isSettings
-            w.standardWindowButton(.zoomButton)?.isHidden = true
+            // No traffic lights on the onboarding screens (the window closes from the Dock).
+            for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = true }
             w.isMovableByWindowBackground = true
             w.hasShadow = true
             w.invalidateShadow()   // the shadow follows the drawn card, whose shape changes with the screen
         } else {
+            // A standard window: the system's corners, traffic lights, colors and light/dark appearance.
+            w.appearance = nil
             w.isOpaque = true
             w.backgroundColor = .windowBackgroundColor
+            w.styleMask.insert(.fullSizeContentView)
             w.titlebarAppearsTransparent = false
             w.titlebarSeparatorStyle = .automatic
             w.titleVisibility = .visible
-            w.styleMask.insert(.resizable)
+            w.styleMask.remove(.resizable)
             for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = false }
             w.isMovableByWindowBackground = false
         }
     }
+
+    /// Settings' fixed size (the error and fixture notices use it too).
+    private static let settingsSize = CGSize(width: 820, height: 580)
 
     /// The phrase is stored: on to the Accessibility step when the permission is off, else straight to the import.
     private func phraseStored() {
@@ -130,8 +135,8 @@ struct MainWindowView: View {
         }
     }
 
-    /// The unlocked box: the settings card.
-    private var isSettings: Bool { cardSize == SettingsLayout.window }
+    /// Settings, locked or not: native colors, fonts and title, so the Bisel theme is left out.
+    private var isSettings: Bool { service.startupError == nil && !usesFixture && screenKey == "settings" }
 
     /// The old screen fades out; the new one is simply there and fades in on its own cascade, after `cascadeLead`.
     private static let swap = AnyTransition.asymmetric(insertion: .identity, removal: .opacity)
@@ -143,7 +148,7 @@ struct MainWindowView: View {
         if service.pendingPhrase != nil { return "phrase" }
         if showAccess { return "access" }
         if showImport { return "import" }
-        return service.phase == .locked ? "locked" : "unlocked"
+        return "settings"   // locking or unlocking the box changes nothing on screen
     }
 
     private var usesFixture: Bool {
@@ -160,8 +165,32 @@ struct MainWindowView: View {
     }
 
     private var unlocked: some View {
-        SettingsShell(service: service)
+        SettingsView(service: service)
     }
 }
 
 
+
+/// Which window was last styled, and for what screen kind. A plain class: changing it must not update the view.
+private final class StyledWindow {
+    weak var window: NSWindow?
+    var mode = ""
+}
+
+/// The Bisel theme (colors, tint, light/dark) and window title for every screen but Settings, which stays native.
+private struct ThemedScreens: ViewModifier {
+    let theme: Theme
+    let active: Bool
+    let opaque: Bool
+    private let service = AppModel.shared.service
+
+    func body(content: Content) -> some View {
+        if active {
+            content.themedPage(theme, opaque: opaque)
+                // Onboarding screens have no window title at all (it would be drawn in the titlebar, over the progress bar).
+                .navigationTitle(!opaque ? "" : (service.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel"))
+        } else {
+            content
+        }
+    }
+}

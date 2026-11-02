@@ -70,7 +70,7 @@ struct CommandPanelView: View {
                     DetailPane(model: model)
                 }
             } else {
-                lockedState
+                BoxLockedState { model.activate(.plain) }
             }
         }
     }
@@ -261,20 +261,6 @@ struct CommandPanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("panel.noMatches")
-    }
-
-    private var lockedState: some View {
-        VStack(spacing: theme.spacing.s) {
-            Image(systemName: "touchid").font(.system(size: 28)).foregroundStyle(theme.colors.accent.color)
-            Text("Box locked").font(theme.font(theme.fonts.detailTitle / 1.5, weight: .semibold))
-            Text("Press Return to unlock with Touch ID")
-                .font(theme.font(theme.fonts.detail)).foregroundStyle(theme.colors.secondaryText.color)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { model.activate(.plain) }
-        .accessibilityIdentifier("panel.locked")
     }
 }
 

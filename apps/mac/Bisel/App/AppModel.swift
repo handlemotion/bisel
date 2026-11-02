@@ -68,9 +68,10 @@ final class AppModel {
         #endif
     }
 
-    /// The settings window on one page (the page is the window's own `settings.page` setting, so it follows live).
+    /// The settings window on one page (an open window switches to it).
     func showSettings(_ page: SettingsPage) {
         UserDefaults.standard.set(page.rawValue, forKey: SettingsPage.defaultsKey)
+        NotificationCenter.default.post(name: SettingsPage.showNotification, object: page)
         showMainWindow()
     }
 
@@ -81,6 +82,12 @@ final class AppModel {
             openMainWindow?()
             NSApp.activate()
         }
+    }
+
+    /// Settings works on a locked box: an action that needs the box (export, a new phrase, import, devices) asks for Touch ID
+    /// with the unlock prompt right then. Throws `KeyStoreError.userCancelled` when the person cancels.
+    func unlockIfLocked(_ reason: String) async throws {
+        if service.phase == .locked { try await service.unlock(reason: reason) }
     }
 
     private var isScriptedFlow: Bool {

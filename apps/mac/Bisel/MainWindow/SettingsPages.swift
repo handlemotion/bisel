@@ -3,78 +3,74 @@ import ServiceManagement
 import SwiftUI
 import BiselCore
 
-/// The four settings pages. One rule for where a setting goes:
-///  - General: how Bisel starts and looks (login item, command panel, theme, site icons, about).
-///  - Fill: getting values out (Accessibility permission, copying).
-///  - Sync: where the box lives (iCloud status, devices, the optional self-hosted server).
-///  - Account: keeping the box safe (this Mac, locking, recovery phrase, backup, import).
+/// The settings pages, each a run of form sections. One rule for where a setting goes:
+///  - Account: this Mac and the recovery phrase.
+///  - General: how Bisel starts and the command panel.  Appearance: theme and site icons.
+///  - Fill: getting values out (Accessibility permission, copying).  Security: locking.
+///  - Sync: where the box lives (iCloud status, adding a device, devices).  Backup & Import: the backup file, imports.
+///  - Advanced: the optional self-hosted server.  About: version and source.
 
-struct GeneralSettings: View {
-    @State private var themes = ThemeStore.shared
-    @State private var icons = IconStore.shared
-    @State private var position = PanelPosition.current
-    @State private var material = PanelMaterial.current
-    @State private var login = LoginItem()
-    @Environment(\.theme) private var theme
+struct AccountSettings: View {
+    let service: VaultService
+    @State private var phraseSheet: RecoveryPhrase?
+    @State private var recoveryMessage: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.s) {
-            SettingsCard(title: "Startup") {
-                SettingsRow(label: "Open Bisel at login") { Toggle("", isOn: $login.enabled).settingsSwitch() }
-                if let note = login.note { Caption(note) }
+        SettingsSection(title: "This Mac") {
+            SettingsRow(label: "Name") { Text(DisplayText.clean(service.deviceName)).lineLimit(1) }
+            SettingsRow(label: "Keys") { Text(BiselEnvironment.usesSoftwareKeys ? "Software (debug build)" : "Secure Enclave") }
+        }
+        SettingsSection(title: "Recovery phrase", footer: recoveryMessage) {
+            SettingsRow(label: "Replace the 24 words",
+                        detail: "The phrase is the only way back in if you lose every device. The old one stops working.") {
+                Button("New phrase…") { newPhrase() }.accessibilityIdentifier("settings-new-phrase")
             }
-            SettingsCard(title: "Command panel") {
-                SettingsRow(label: "Shortcut") { KeyboardShortcuts.Recorder(for: .commandPanel) }
-                SettingsRow(label: "Position") {
-                    Picker("", selection: $position) { ForEach(PanelPosition.allCases) { Text($0.label).tag($0) } }
-                        .labelsHidden().fixedSize()
-                        .onChange(of: position) { _, new in
-                            UserDefaults.standard.set(new.rawValue, forKey: PanelPosition.defaultsKey)
-                            UserDefaults.standard.removeObject(forKey: CommandPanelController.dragKey)
-                        }
-                }
-                SettingsRow(label: "Material") {
-                    Picker("", selection: $material) { ForEach(PanelMaterial.allCases) { Text($0.label).tag($0) } }
-                        .labelsHidden().fixedSize()
-                        .onChange(of: material) { _, new in UserDefaults.standard.set(new.rawValue, forKey: PanelMaterial.defaultsKey) }
-                }
-            }
-            SettingsCard(title: "Appearance") {
-                SettingsRow(label: "Theme") {
-                    Picker("", selection: $themes.selectedFamily) { ForEach(themes.families, id: \.id) { Text($0.name).tag($0.id) } }
-                        .labelsHidden().fixedSize()
-                }
-                Caption("Follows the system light/dark appearance. Custom themes are JSON files in the themes folder.")
-                HStack {
-                    Button("Themes folder") {
-                        themes.reload()
-                        NSWorkspace.shared.activateFileViewerSelecting([ThemeStore.themesDirectory])
-                    }
-                    Button("Write examples") { themes.exportTemplates() }
-                    Button("Reload") { themes.reload() }
-                }
-                .controlSize(.small)
-                ForEach(themes.loadErrors, id: \.self) { Text($0).font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.warning.color) }
-            }
-            SettingsCard(title: "Site icons") {
-                SettingsRow(label: "Load site icons") { Toggle("", isOn: $icons.enabled).settingsSwitch() }
-                Caption("When on, Bisel fetches each site's icon straight from the site (HTTPS, no cookies, no third-party service), so your network can see which sites you use. Cached on this Mac only.")
-                SettingsRow(label: icons.cacheSizeDescription) { Button("Clear cache") { icons.clearCache() }.controlSize(.small) }
-            }
-            SettingsCard(title: "About") {
-                SettingsRow(label: "Version") { Text(Self.version).textSelection(.enabled) }
-                SettingsRow(label: "Source code, AGPL-3.0") {
-                    Link("GitHub", destination: URL(string: "https://github.com/handlemotion/bisel")!).controlSize(.small)
-                }
-            }
+        }
+        .sheet(item: Binding(get: { phraseSheet.map { PhraseBox(phrase: $0) } }, set: { if $0 == nil { phraseSheet = nil } })) { box in
+            PhraseGateView(service: service, phrase: box.phrase, title: "Your new recovery phrase") { phraseSheet = nil; service.confirmPhraseStored() }
+                .frame(width: 640, height: 520).themedPage(ThemeStore.shared.current)
         }
     }
 
-    private static var version: String {
-        let info = Bundle.main.infoDictionary
-        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info?["CFBundleVersion"] as? String
-        return build.map { "\(short) (\($0))" } ?? short
+    private struct PhraseBox: Identifiable { let phrase: RecoveryPhrase; var id: String { phrase.text } }
+
+    private func newPhrase() {
+        Task {
+            do {
+                try await AppModel.shared.unlockIfLocked("Unlock your box to replace the recovery phrase")
+                phraseSheet = try await service.rotateRecovery(); recoveryMessage = "The old phrase no longer works."
+            }
+            catch KeyStoreError.userCancelled { recoveryMessage = "Cancelled" }
+            catch { recoveryMessage = describe(error) }
+        }
+    }
+}
+
+struct GeneralSettings: View {
+    @State private var position = PanelPosition.current
+    @State private var material = PanelMaterial.current
+    @State private var login = LoginItem()
+
+    var body: some View {
+        SettingsSection(title: "Startup", footer: login.note) {
+            SettingsRow(label: "Open Bisel at login") { Toggle("", isOn: $login.enabled).settingsSwitch() }
+        }
+        SettingsSection(title: "Command panel") {
+            SettingsRow(label: "Shortcut") { KeyboardShortcuts.Recorder(for: .commandPanel) }
+            SettingsRow(label: "Position") {
+                Picker("", selection: $position) { ForEach(PanelPosition.allCases) { Text($0.label).tag($0) } }
+                    .labelsHidden().fixedSize()
+                    .onChange(of: position) { _, new in
+                        UserDefaults.standard.set(new.rawValue, forKey: PanelPosition.defaultsKey)
+                        UserDefaults.standard.removeObject(forKey: CommandPanelController.dragKey)
+                    }
+            }
+            SettingsRow(label: "Material") {
+                Picker("", selection: $material) { ForEach(PanelMaterial.allCases) { Text($0.label).tag($0) } }
+                    .labelsHidden().fixedSize()
+                    .onChange(of: material) { _, new in UserDefaults.standard.set(new.rawValue, forKey: PanelMaterial.defaultsKey) }
+            }
+        }
     }
 }
 
@@ -95,75 +91,124 @@ private final class LoginItem {
     private var status = SMAppService.mainApp.status
 }
 
+struct AppearanceSettings: View {
+    @State private var themes = ThemeStore.shared
+    @State private var icons = IconStore.shared
+
+    var body: some View {
+        SettingsSection {
+            SettingsRow(label: "Theme", detail: "Follows the system light/dark appearance.") {
+                Picker("", selection: $themes.selectedFamily) { ForEach(themes.families, id: \.id) { Text($0.name).tag($0.id) } }
+                    .labelsHidden().fixedSize()
+            }
+            SettingsRow(label: "Custom themes", detail: "JSON files in the themes folder.") {
+                HStack {
+                    Button("Themes folder") {
+                        themes.reload()
+                        NSWorkspace.shared.activateFileViewerSelecting([ThemeStore.themesDirectory])
+                    }
+                    Button("Write examples") { themes.exportTemplates() }
+                    Button("Reload") { themes.reload() }
+                }
+            }
+            ForEach(themes.loadErrors, id: \.self) { Text($0).font(.callout).foregroundStyle(.orange) }
+        }
+        SettingsSection(title: "Site icons", footer: "Bisel fetches each site's icon straight from the site (HTTPS, no cookies, no third-party service), so your network can see which sites you use. Cached on this Mac only.") {
+            SettingsRow(label: "Load site icons") { Toggle("", isOn: $icons.enabled).settingsSwitch() }
+            SettingsRow(label: "Cache", detail: icons.cacheSizeDescription) { Button("Clear cache") { icons.clearCache() } }
+        }
+    }
+}
+
 struct FillSettings: View {
     @State private var accessibility = AppModel.shared.accessibility
     @State private var clearAfter = SecureClipboard.clearSeconds
     @State private var closeAfterCopy = CommandPanelModel.closeAfterCopy
-    @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.s) {
-            SettingsCard(title: "Permission") {
-                SettingsRow(label: accessibility.trusted ? "Accessibility: allowed" : "Accessibility: not allowed") {
-                    if !accessibility.trusted {
-                        Button("Allow…") { AccessibilityInspector.requestAccess() }.controlSize(.small)
-                    }
+        SettingsSection(title: "Permission") {
+            SettingsRow(label: "Accessibility",
+                        detail: "Bisel types usernames, passwords and codes into the field you are in through the Accessibility permission.") {
+                if accessibility.trusted {
+                    Text("Allowed").foregroundStyle(.secondary)
+                } else {
+                    Button("Allow…") { AccessibilityInspector.requestAccess() }
                 }
-                Caption("Bisel types usernames, passwords and codes into the field you are in through the Accessibility permission.")
-            }
-            SettingsCard(title: "Copying") {
-                SettingsRow(label: "Clear clipboard after") {
-                    NumberPicker(value: $clearAfter, choices: SecureClipboard.clearSecondsChoices, unit: "s", key: SecureClipboard.clearSecondsKey)
-                }
-                SettingsRow(label: "Close the panel after copying with a shortcut") {
-                    Toggle("", isOn: $closeAfterCopy).settingsSwitch()
-                        .onChange(of: closeAfterCopy) { _, new in UserDefaults.standard.set(new, forKey: CommandPanelModel.closeAfterCopyKey) }
-                }
-                Caption("Copied values are hidden from clipboard managers and never sent to your other devices.")
             }
         }
         .onAppear { accessibility.start() }
         .onDisappear { accessibility.stop() }
+        SettingsSection(title: "Copying", footer: "Copied values are hidden from clipboard managers and never sent to your other devices.") {
+            SettingsRow(label: "Clear clipboard after") {
+                NumberPicker(value: $clearAfter, choices: SecureClipboard.clearSecondsChoices, unit: "s", key: SecureClipboard.clearSecondsKey)
+            }
+            SettingsRow(label: "Close the panel after copying with a shortcut") {
+                Toggle("", isOn: $closeAfterCopy).settingsSwitch()
+                    .onChange(of: closeAfterCopy) { _, new in UserDefaults.standard.set(new, forKey: CommandPanelModel.closeAfterCopyKey) }
+            }
+        }
+    }
+}
+
+struct SecurityPage: View {
+    let service: VaultService
+    @State private var strict = SecuritySettings.requireTouchID
+    @State private var idleLock = VaultService.idleLockMinutes
+    @State private var unlockedFor = VaultService.fillWindowMinutes
+
+    /// A change here asks for Touch ID first (the native prompt); cancelled, the setting stays as it was.
+    private func guarded<T>(_ value: Binding<T>) -> Binding<T> {
+        Binding(get: { value.wrappedValue }, set: { new in
+            Task {
+                do { try await BiometricGate.authenticate(reason: "change Bisel's security settings", grantsCredit: false) }
+                catch { return }
+                value.wrappedValue = new
+            }
+        })
+    }
+
+    var body: some View {
+        SettingsSection(title: "Locking", footer: "The box also locks on sleep, screen lock and fast user switching.") {
+            SettingsRow(label: "Lock now") {
+                Button("Lock", systemImage: "lock") { service.lock(reason: "manual") }
+                    .disabled(service.phase != .unlocked).accessibilityIdentifier("lock-button")
+            }
+            SettingsRow(label: "Lock after idle") { NumberPicker(value: guarded($idleLock), key: VaultService.idleLockKey) }
+            SettingsRow(label: "Lock after unlocking, at most") { NumberPicker(value: guarded($unlockedFor), key: VaultService.fillWindowKey) }
+        }
+        SettingsSection(title: "Touch ID") {
+            SettingsRow(label: "Touch ID for every reveal and copy",
+                        detail: "Off: passwords and codes show and copy freely while the box is unlocked. On: each one asks for Touch ID.") {
+                Toggle("", isOn: guarded($strict)).settingsSwitch()
+                    .onChange(of: strict) { _, new in UserDefaults.standard.set(new, forKey: SecuritySettings.requireTouchIDKey) }
+            }
+        }
     }
 }
 
 struct SyncSettings: View {
     let service: VaultService
-    @State private var connectServer = BiselEnvironment.defaultServer
-    @State private var connectToken = ""
-    @State private var connectError: String?
-    @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.s) {
-            SettingsCard(title: "iCloud") {
-                SettingsRow(label: "Storage") { Text(laneText).multilineTextAlignment(.trailing) }
-                SyncStatusView(service: service)
-                Caption("Your box is end-to-end encrypted before it reaches iCloud. Apple can't read it.")
-            }
-            if service.isOnICloud { JoinRequestsCard(service: service) }
-            SettingsCard { DevicesView(service: service) }
-            SettingsCard(title: "Self-hosted server") {
-                if service.isLocalOnly {
-                    DisclosureGroup("Connect a server you run…") {
-                        VStack(alignment: .leading, spacing: theme.spacing.s) {
-                            TextField("Server URL", text: $connectServer, prompt: Text("https://your-server.example")).accessibilityIdentifier("connect-server")
-                            SecureField("Bootstrap token", text: $connectToken, prompt: Text("Set with wrangler secret BOOTSTRAP_TOKEN")).accessibilityIdentifier("connect-token")
-                            ErrorLine(text: connectError)
-                            Button("Connect and upload") { connect() }
-                                .disabled(service.isBusy || connectServer.isEmpty || connectToken.isEmpty).accessibilityIdentifier("connect-go")
-                            Caption("Optional. Registers this Mac with your own Bisel server and uploads your items, encrypted.")
-                        }
-                        .textFieldStyle(.roundedBorder)
-                        .padding(.top, theme.spacing.s)
+        SettingsSection(title: "iCloud", footer: "Your box is end-to-end encrypted before it reaches iCloud. Apple can't read it.") {
+            LabeledContent {
+                HStack {
+                    Text(laneText).multilineTextAlignment(.trailing)
+                    if service.isUnlocked && !service.isLocalOnly {
+                        Button { Task { await service.sync(reason: "manual") } } label: { Image(systemName: "arrow.clockwise") }
+                            .buttonStyle(.borderless).help("Sync now").accessibilityLabel("Sync now").accessibilityIdentifier("sync-now")
+                            .disabled(service.syncState == .syncing)
                     }
-                } else if let url = service.serverURL {
-                    SettingsRow(label: "Server") { Text(url.absoluteString).textSelection(.enabled).lineLimit(1) }
-                } else {
-                    Caption("Not used. iCloud keeps your devices in sync.")
+                }
+            } label: {
+                Text("Storage")
+                if !service.isLocalOnly || !service.securityAlerts.isEmpty || service.recoveryKeyChanged {
+                    SyncStatusView(service: service, compact: true)   // "On this Mac only" would repeat the value
                 }
             }
         }
+        if service.isOnICloud { JoinRequestsCard(service: service) }
+        DevicesView(service: service)
     }
 
     private var laneText: String {
@@ -176,6 +221,75 @@ struct SyncSettings: View {
         case .moved(let url): String(localized: "Moved to \(url.host() ?? url.absoluteString)")
         }
     }
+}
+
+struct BackupSettings: View {
+    let service: VaultService
+    @State private var backupMessage: String?
+
+    var body: some View {
+        SettingsSection(title: "Backup", footer: backupMessage) {
+            SettingsRow(label: "Export a backup",
+                        detail: "An encrypted .bisel-backup file that only your recovery phrase opens. Keep one off this Mac and off iCloud.") {
+                Button("Export…") { exportBackup() }.accessibilityIdentifier("settings-export")
+            }
+            SettingsRow(label: "Last backup") { Text(backupText).foregroundStyle(.secondary) }
+        }
+        SettingsSection(title: "Import") { ImportView(service: service) }
+    }
+
+    private var backupText: String {
+        guard let status = service.backupStatus, let at = status.lastBackupAt else { return String(localized: "None yet") }
+        let changes = status.changesSinceBackup
+        return at.formatted(.relative(presentation: .named))
+            + (changes > 0 ? String(localized: ", \(changes) changes since") : "")
+    }
+
+    private func exportBackup() {
+        Task {
+            do { try await AppModel.shared.unlockIfLocked("Unlock your box to export a backup") }
+            catch KeyStoreError.userCancelled { return }
+            catch { backupMessage = describe(error); return }
+            #if DEBUG
+            if let path = ProcessInfo.processInfo.environment["BISEL_DEV_EXPORT_PATH"] {   // flow tests: no out-of-process save panel
+                do { try await service.exportBackup(to: URL(fileURLWithPath: path)); backupMessage = "Backup written to \(URL(fileURLWithPath: path).lastPathComponent)" }
+                catch { backupMessage = describe(error) }
+                return
+            }
+            #endif
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "bisel-\(Date().formatted(.iso8601.year().month().day())).bisel-backup"
+            panel.title = "Export backup"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do { try await service.exportBackup(to: url); backupMessage = "Backup written to \(url.lastPathComponent)" }
+            catch { backupMessage = describe(error) }
+        }
+    }
+}
+
+struct AdvancedSettings: View {
+    let service: VaultService
+    @State private var connectServer = BiselEnvironment.defaultServer
+    @State private var connectToken = ""
+    @State private var connectError: String?
+
+    var body: some View {
+        SettingsSection(title: "Self-hosted server", footer: service.isLocalOnly ? "Optional. Registers this Mac with your own Bisel server and uploads your items, encrypted." : nil) {
+            if service.isLocalOnly {
+                DisclosureGroup("Connect a server you run…") {
+                    TextField("Server URL", text: $connectServer, prompt: Text("https://your-server.example")).accessibilityIdentifier("connect-server")
+                    SecureField("Bootstrap token", text: $connectToken, prompt: Text("Set with wrangler secret BOOTSTRAP_TOKEN")).accessibilityIdentifier("connect-token")
+                    ErrorLine(text: connectError)
+                    Button("Connect and upload") { connect() }
+                        .disabled(service.isBusy || connectServer.isEmpty || connectToken.isEmpty).accessibilityIdentifier("connect-go")
+                }
+            } else if let url = service.serverURL {
+                SettingsRow(label: "Server") { Text(url.absoluteString).textSelection(.enabled).lineLimit(1) }
+            } else {
+                SettingsRow(label: "Server") { Text("Not used. iCloud keeps your devices in sync.").foregroundStyle(.secondary) }
+            }
+        }
+    }
 
     private func connect() {
         connectError = nil
@@ -183,97 +297,29 @@ struct SyncSettings: View {
         guard let url else { connectError = bad; return }
         let token = connectToken.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
-            do { try await service.connectServer(server: url, token: token); connectToken = "" }
+            do {
+                try await AppModel.shared.unlockIfLocked("Unlock your box to connect a server")
+                try await service.connectServer(server: url, token: token); connectToken = ""
+            }
             catch { connectError = describe(error) }
         }
     }
 }
 
-struct AccountSettings: View {
-    let service: VaultService
-    @State private var strict = SecuritySettings.requireTouchID
-    @State private var idleLock = VaultService.idleLockMinutes
-    @State private var unlockedFor = VaultService.fillWindowMinutes
-    @State private var phraseSheet: RecoveryPhrase?
-    @State private var recoveryMessage: String?
-    @State private var backupMessage: String?
-    @Environment(\.theme) private var theme
-
+struct AboutSettings: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: theme.spacing.s) {
-            SettingsCard(title: "This Mac") {
-                SettingsRow(label: "Name") { Text(DisplayText.clean(service.deviceName)).lineLimit(1) }
-                SettingsRow(label: "Keys") { Text(BiselEnvironment.usesSoftwareKeys ? "Software (debug build)" : "Secure Enclave") }
+        SettingsSection {
+            SettingsRow(label: "Version") { Text(Self.version).textSelection(.enabled) }
+            SettingsRow(label: "Source code, AGPL-3.0") {
+                Link("GitHub", destination: URL(string: "https://github.com/handlemotion/bisel")!)
             }
-            SettingsCard(title: "Locking") {
-                SettingsRow(label: "Lock now") {
-                    Button("Lock", systemImage: "lock") { service.lock(reason: "manual") }.controlSize(.small).accessibilityIdentifier("lock-button")
-                }
-                SettingsRow(label: "Lock after idle") { NumberPicker(value: $idleLock, key: VaultService.idleLockKey) }
-                SettingsRow(label: "Lock after unlocking, at most") { NumberPicker(value: $unlockedFor, key: VaultService.fillWindowKey) }
-                Caption("The box also locks on sleep, screen lock and fast user switching.")
-                SettingsRow(label: "Touch ID for every reveal and copy") {
-                    Toggle("", isOn: $strict).settingsSwitch()
-                        .onChange(of: strict) { _, new in UserDefaults.standard.set(new, forKey: SecuritySettings.requireTouchIDKey) }
-                }
-                Caption("Off: passwords and codes show and copy freely while the box is unlocked. On: each one asks for Touch ID.")
-            }
-            SettingsCard(title: "Recovery phrase") {
-                SettingsRow(label: "Replace the 24 words") {
-                    Button("New phrase…") { newPhrase() }.controlSize(.small).accessibilityIdentifier("settings-new-phrase")
-                }
-                if let recoveryMessage { Caption(recoveryMessage) }
-                Caption("The phrase is the only way back in if you lose every device. The old one stops working.")
-            }
-            SettingsCard(title: "Backup") {
-                SettingsRow(label: backupText) {
-                    Button("Export…") { exportBackup() }.controlSize(.small).accessibilityIdentifier("settings-export")
-                }
-                if let backupMessage { Caption(backupMessage) }
-                Caption("An encrypted .bisel-backup file that only your recovery phrase opens. Keep one off this Mac and off iCloud.")
-            }
-            SettingsCard(title: "Import") { ImportView(service: service) }
-        }
-        .sheet(item: Binding(get: { phraseSheet.map { PhraseBox(phrase: $0) } }, set: { if $0 == nil { phraseSheet = nil } })) { box in
-            PhraseGateView(service: service, phrase: box.phrase, title: "Your new recovery phrase") { phraseSheet = nil; service.confirmPhraseStored() }
-                .frame(width: 640, height: 520).themedPage(ThemeStore.shared.current)
         }
     }
 
-    private struct PhraseBox: Identifiable { let phrase: RecoveryPhrase; var id: String { phrase.text } }
-
-    private var backupText: String {
-        guard let status = service.backupStatus, let at = status.lastBackupAt else { return String(localized: "No backup yet") }
-        let changes = status.changesSinceBackup
-        return String(localized: "Last backup \(at.formatted(.relative(presentation: .named)))")
-            + (changes > 0 ? String(localized: ", \(changes) changes since") : "")
-    }
-
-    private func exportBackup() {
-        #if DEBUG
-        if let path = ProcessInfo.processInfo.environment["BISEL_DEV_EXPORT_PATH"] {   // flow tests: no out-of-process save panel
-            Task {
-                do { try await service.exportBackup(to: URL(fileURLWithPath: path)); backupMessage = "Backup written to \(URL(fileURLWithPath: path).lastPathComponent)" }
-                catch { backupMessage = describe(error) }
-            }
-            return
-        }
-        #endif
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "bisel-\(Date().formatted(.iso8601.year().month().day())).bisel-backup"
-        panel.title = "Export backup"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task {
-            do { try await service.exportBackup(to: url); backupMessage = "Backup written to \(url.lastPathComponent)" }
-            catch { backupMessage = describe(error) }
-        }
-    }
-
-    private func newPhrase() {
-        Task {
-            do { phraseSheet = try await service.rotateRecovery(); recoveryMessage = "The old phrase no longer works." }
-            catch KeyStoreError.userCancelled { recoveryMessage = "Cancelled" }
-            catch { recoveryMessage = describe(error) }
-        }
+    private static var version: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String
+        return build.map { "\(short) (\($0))" } ?? short
     }
 }

@@ -8,7 +8,7 @@ import BiselCore
 ///   phases: create (bootstrap → items → search → copy → lock/unlock → import → export)
 ///           recover (fresh store: recover from the phrase file → items present → devices → revoke the other device)
 ///           revoked (original store after being revoked: unlock → sync must be refused)
-///           settings (with BISEL_DATA_DIR: a throwaway box, the settings window open; `-settings.page sync` picks the page)
+///           settings (with BISEL_DATA_DIR: a throwaway box, the settings window open; `-settings.page sync` scrolls to that section)
 @MainActor
 enum DebugFlow {
     private static var log = ""

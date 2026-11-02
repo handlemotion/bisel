@@ -29,8 +29,7 @@ struct BiselApp: App {
                 .modifier(OpenWindowBridge())
         }
         .defaultLaunchBehavior(.suppressed)
-        .defaultSize(width: 920, height: 600)
-        .windowResizability(.contentSize)
+        .windowResizability(.contentSize)   // every screen has a fixed frame
     }
 }
 
@@ -64,6 +63,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         CloudKitLane.handleRemoteNotification(userInfo)   // the vault service syncs on the signal
     }
     #endif
+
+    /// ⌘Q while a Bisel window is in front closes the windows instead of quitting: Bisel lives in the menu bar and the
+    /// command panel must keep working. Quit Bisel in the menu bar, updates, logout and shutdown still quit.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let e = NSApp.currentEvent, e.type == .keyDown, e.modifierFlags.contains(.command),
+              e.charactersIgnoringModifiers?.lowercased() == "q" else { return .terminateNow }
+        MainActor.assumeIsolated {
+            for w in NSApp.windows where w.isVisible && !(w is NSPanel) && w.styleMask.contains(.titled) { w.close() }
+        }
+        return .terminateCancel
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { AppModel.shared.terminate() }
