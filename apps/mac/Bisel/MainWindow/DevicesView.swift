@@ -85,7 +85,7 @@ struct DevicesView: View {
             }
         } header: {
             HStack {
-                Text("Devices")
+                Text("Devices").font(.headline).foregroundStyle(.primary)
                 Spacer()
                 if !service.isLocalOnly {
                     Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }

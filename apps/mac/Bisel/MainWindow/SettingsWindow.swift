@@ -58,6 +58,21 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The line under the page's title.
+    var summary: String {
+        switch self {
+        case .account: String(localized: "This Mac and your recovery phrase.")
+        case .general: String(localized: "How Bisel starts, and the command panel.")
+        case .appearance: String(localized: "Theme and site icons.")
+        case .fill: String(localized: "Filling and copying usernames, passwords and codes.")
+        case .security: String(localized: "When your box locks, and when it asks for Touch ID.")
+        case .sync: String(localized: "Where your box lives, and the devices that share it.")
+        case .backup: String(localized: "An encrypted backup, and passwords from other apps.")
+        case .advanced: String(localized: "A self-hosted server, if you run one.")
+        case .about: String(localized: "A zero-knowledge password manager for your Mac.")
+        }
+    }
+
     /// Sidebar groups below the account row.
     static let main: [SettingsPage] = [.general, .appearance, .fill, .security, .sync, .backup]
     static let more: [SettingsPage] = [.advanced, .about]
@@ -82,9 +97,13 @@ struct SettingsView: View {
             }
             .toolbar(removing: .sidebarToggle)
         } detail: {
-            Form { content }
+            Form {
+                Section { } header: { PageHeader(page: page) }
+                content
+            }
                 .formStyle(.grouped)
                 .navigationTitle(page.title)
+                .toolbar(removing: .title)   // the page header says it; the toolbar keeps back and forward
                 .id(page)
                 .toolbar {
                     ToolbarItemGroup(placement: .navigation) {
@@ -143,15 +162,46 @@ private struct SidebarRow: View {
     let page: SettingsPage
 
     var body: some View {
-        Label {
-            Text(page.title)
-        } icon: {
-            Image(systemName: page.symbol)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 22, height: 22)
-                .background(page.tint.gradient, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        Label { Text(page.title) } icon: { PageIcon(page: page, size: 22) }
+    }
+}
+
+/// The page's symbol in white on its color, a rounded square like System Settings' icons.
+private struct PageIcon: View {
+    let page: SettingsPage
+    let size: CGFloat
+
+    var body: some View {
+        Image(systemName: page.symbol)
+            .font(.system(size: size * 0.55, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(page.tint.gradient, in: RoundedRectangle(cornerRadius: size * 0.27, style: .continuous))
+    }
+}
+
+/// The top of a page: its icon (the Mac user's picture on Account), its title and a line about it.
+private struct PageHeader: View {
+    let page: SettingsPage
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if page == .account {
+                UserPictureView().frame(width: 64, height: 64)
+            } else {
+                PageIcon(page: page, size: 64)
+            }
+            Text(page == .account ? NSFullUserName() : page.title)
+                .font(.system(size: 26, weight: .bold)).foregroundStyle(.primary)
+                .padding(.top, 6)
+            Text(page.summary).font(.body).foregroundStyle(.secondary)
         }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .padding(.top, -12)
+        .padding(.bottom, 28)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -222,7 +272,8 @@ struct SettingsSection<Content: View>: View {
         Section {
             content
         } header: {
-            if let title { Text(title) }
+            // Styled explicitly: after the page header the form would draw the first section's title small and gray.
+            if let title { Text(title).font(.headline).foregroundStyle(.primary) }
         } footer: {
             if let footer { SettingsNote(footer) }
         }

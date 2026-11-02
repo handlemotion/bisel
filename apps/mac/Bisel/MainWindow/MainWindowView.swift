@@ -50,10 +50,10 @@ struct MainWindowView: View {
         .background(cardSize == nil ? Color.clear : Theme.biselDark.colors.background.color)
         .animation(.easeInOut(duration: 0.3), value: screenKey)
         .environment(\.cascadeLead, 0.3)   // a new screen waits for the old one to fade out
-        // SwiftUI owns the window size (the scene is .contentSize): the island is exactly its fixed frame, the settings window
-        // grows from a 720x480 minimum. No AppKit resizing, so the hosting view can never lag behind the window.
-        .frame(minWidth: cardSize?.width ?? 720, maxWidth: cardSize?.width ?? .infinity,
-               minHeight: cardSize.map { $0.height - titlebarInset } ?? 480, maxHeight: cardSize.map { $0.height - titlebarInset } ?? .infinity)
+        // SwiftUI owns the window size (the scene is .contentSize): the island and Settings are each exactly their fixed frame.
+        // No AppKit resizing, so the hosting view can never lag behind the window.
+        .frame(width: cardSize?.width ?? Self.settingsSize.width,
+               height: cardSize.map { $0.height - titlebarInset } ?? Self.settingsSize.height)
         .modifier(ThemedScreens(theme: theme, active: !isSettings, opaque: cardSize == nil))
         .panelMaterial()
         .background(WindowAccessor { w in
@@ -102,11 +102,6 @@ struct MainWindowView: View {
             w.isMovableByWindowBackground = true
             w.hasShadow = true
             w.invalidateShadow()   // the shadow follows the drawn card, whose shape changes with the screen
-            // Coming from Settings (resizable, larger): back to the island's size, keeping the top-left corner.
-            let island = OnboardingLayout.island
-            if w.frame.size != island {
-                w.setFrame(NSRect(x: w.frame.minX, y: w.frame.maxY - island.height, width: island.width, height: island.height), display: true)
-            }
         } else {
             // A standard window: the system's corners, traffic lights, colors and light/dark appearance.
             w.appearance = nil
@@ -116,11 +111,14 @@ struct MainWindowView: View {
             w.titlebarAppearsTransparent = false
             w.titlebarSeparatorStyle = .automatic
             w.titleVisibility = .visible
-            w.styleMask.insert(.resizable)
+            w.styleMask.remove(.resizable)
             for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = false }
             w.isMovableByWindowBackground = false
         }
     }
+
+    /// Settings' fixed size (the error and fixture notices use it too).
+    private static let settingsSize = CGSize(width: 820, height: 580)
 
     /// The phrase is stored: on to the Accessibility step when the permission is off, else straight to the import.
     private func phraseStored() {

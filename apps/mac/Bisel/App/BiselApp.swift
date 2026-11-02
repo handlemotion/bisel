@@ -29,10 +29,7 @@ struct BiselApp: App {
                 .modifier(OpenWindowBridge())
         }
         .defaultLaunchBehavior(.suppressed)
-        .defaultSize(width: 920, height: 600)
-        // The content sets only the minimum: the onboarding island is fixed by its frame and a non-resizable window, and
-        // SwiftUI does not re-derive a maximum while the settings sidebar animates.
-        .windowResizability(.contentMinSize)
+        .windowResizability(.contentSize)   // every screen has a fixed frame
     }
 }
 
