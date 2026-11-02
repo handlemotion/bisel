@@ -53,18 +53,17 @@ struct GeneralSettings: View {
                     Button("Write examples") { themes.exportTemplates() }
                     Button("Reload") { themes.reload() }
                 }
-                .controlSize(.small)
                 ForEach(themes.loadErrors, id: \.self) { Text($0).font(theme.font(theme.fonts.caption)).foregroundStyle(theme.colors.warning.color) }
             }
             SettingsCard(title: "Site icons") {
                 SettingsRow(label: "Load site icons") { Toggle("", isOn: $icons.enabled).settingsSwitch() }
                 Caption("When on, Bisel fetches each site's icon straight from the site (HTTPS, no cookies, no third-party service), so your network can see which sites you use. Cached on this Mac only.")
-                SettingsRow(label: icons.cacheSizeDescription) { Button("Clear cache") { icons.clearCache() }.controlSize(.small) }
+                SettingsRow(label: icons.cacheSizeDescription) { Button("Clear cache") { icons.clearCache() } }
             }
             SettingsCard(title: "About") {
                 SettingsRow(label: "Version") { Text(Self.version).textSelection(.enabled) }
                 SettingsRow(label: "Source code, AGPL-3.0") {
-                    Link("GitHub", destination: URL(string: "https://github.com/handlemotion/bisel")!).controlSize(.small)
+                    Link("GitHub", destination: URL(string: "https://github.com/handlemotion/bisel")!)
                 }
             }
         }
@@ -106,7 +105,7 @@ struct FillSettings: View {
             SettingsCard(title: "Permission") {
                 SettingsRow(label: accessibility.trusted ? "Accessibility: allowed" : "Accessibility: not allowed") {
                     if !accessibility.trusted {
-                        Button("Allow…") { AccessibilityInspector.requestAccess() }.controlSize(.small)
+                        Button("Allow…") { AccessibilityInspector.requestAccess() }
                     }
                 }
                 Caption("Bisel types usernames, passwords and codes into the field you are in through the Accessibility permission.")
@@ -207,7 +206,7 @@ struct AccountSettings: View {
             }
             SettingsCard(title: "Locking") {
                 SettingsRow(label: "Lock now") {
-                    Button("Lock", systemImage: "lock") { service.lock(reason: "manual") }.controlSize(.small).accessibilityIdentifier("lock-button")
+                    Button("Lock", systemImage: "lock") { service.lock(reason: "manual") }.accessibilityIdentifier("lock-button")
                 }
                 SettingsRow(label: "Lock after idle") { NumberPicker(value: $idleLock, key: VaultService.idleLockKey) }
                 SettingsRow(label: "Lock after unlocking, at most") { NumberPicker(value: $unlockedFor, key: VaultService.fillWindowKey) }
@@ -220,14 +219,14 @@ struct AccountSettings: View {
             }
             SettingsCard(title: "Recovery phrase") {
                 SettingsRow(label: "Replace the 24 words") {
-                    Button("New phrase…") { newPhrase() }.controlSize(.small).accessibilityIdentifier("settings-new-phrase")
+                    Button("New phrase…") { newPhrase() }.accessibilityIdentifier("settings-new-phrase")
                 }
                 if let recoveryMessage { Caption(recoveryMessage) }
                 Caption("The phrase is the only way back in if you lose every device. The old one stops working.")
             }
             SettingsCard(title: "Backup") {
                 SettingsRow(label: backupText) {
-                    Button("Export…") { exportBackup() }.controlSize(.small).accessibilityIdentifier("settings-export")
+                    Button("Export…") { exportBackup() }.accessibilityIdentifier("settings-export")
                 }
                 if let backupMessage { Caption(backupMessage) }
                 Caption("An encrypted .bisel-backup file that only your recovery phrase opens. Keep one off this Mac and off iCloud.")

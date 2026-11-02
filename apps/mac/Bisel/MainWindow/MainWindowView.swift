@@ -45,7 +45,7 @@ struct MainWindowView: View {
                 unlocked
             }
         }
-        .background(cardSize == nil || isSettings ? Color.clear : Theme.biselDark.colors.background.color)   // settings draws its own card
+        .background(cardSize == nil || isSettings ? Color.clear : Theme.biselDark.colors.background.color)   // settings: the window's container background
         .animation(.easeInOut(duration: 0.3), value: screenKey)
         .environment(\.cascadeLead, 0.3)   // a new screen waits for the old one to fade out
         // SwiftUI owns the window size (the scene is .contentSize): the island is exactly its fixed frame, the settings window
@@ -85,7 +85,20 @@ struct MainWindowView: View {
     }
 
     private func style(_ w: NSWindow) {
-        if cardSize != nil {
+        if isSettings {
+            // A standard titled window: the system's corners, shadow and traffic lights. The panel's fill comes from
+            // `containerBackground(for: .window)` under a hidden toolbar background.
+            w.isOpaque = false
+            w.backgroundColor = .clear
+            w.titleVisibility = .hidden
+            w.titlebarAppearsTransparent = true
+            w.titlebarSeparatorStyle = .none
+            w.styleMask.insert(.fullSizeContentView)
+            w.styleMask.remove(.resizable)
+            for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = false }
+            w.isMovableByWindowBackground = false
+            w.hasShadow = true
+        } else if cardSize != nil {
             w.isOpaque = false
             w.backgroundColor = .clear
             w.titlebarAppearsTransparent = true
@@ -94,10 +107,8 @@ struct MainWindowView: View {
             w.title = ""
             w.styleMask.insert(.fullSizeContentView)
             w.styleMask.remove(.resizable)
-            // No traffic lights on the onboarding screens (the window closes from the Dock); settings keeps close and minimise.
-            w.standardWindowButton(.closeButton)?.isHidden = !isSettings
-            w.standardWindowButton(.miniaturizeButton)?.isHidden = !isSettings
-            w.standardWindowButton(.zoomButton)?.isHidden = true
+            // No traffic lights on the onboarding screens (the window closes from the Dock).
+            for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = true }
             w.isMovableByWindowBackground = true
             w.hasShadow = true
             w.invalidateShadow()   // the shadow follows the drawn card, whose shape changes with the screen

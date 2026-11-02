@@ -35,7 +35,7 @@ struct DevicesView: View {
                         Button("Dismiss") { service.dismissAlert(alert.id) }.buttonStyle(.borderless).accessibilityIdentifier("dismiss-alert")
                         if alert.recoveredDeviceID != nil {
                             Button("New phrase and revoke") { Task { await answer(alert) } }
-                                .controlSize(.small).disabled(working).accessibilityIdentifier("alert-new-phrase-revoke")
+                                .disabled(working).accessibilityIdentifier("alert-new-phrase-revoke")
                         }
                     }
                 }
@@ -236,7 +236,7 @@ private struct AppleAccountNote: View {
             Caption("“\(name)” is still signed in to your Apple Account, so it can still reach the box in iCloud. Remove it from your Apple Account too.")
                 .fixedSize(horizontal: false, vertical: true)
             Button("Open Apple Account Settings") { AppleAccountSettings.openDevices() }
-                .controlSize(.small).accessibilityIdentifier("open-apple-account")
+                .accessibilityIdentifier("open-apple-account")
         }
     }
 }

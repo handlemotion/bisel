@@ -18,7 +18,7 @@ struct ImportView: View {
         VStack(alignment: .leading, spacing: theme.spacing.m) {
             Caption("1Password (.1pux) or a CSV with logins, notes and one-time codes. Everything is encrypted on this Mac before it syncs. Delete the export file afterwards: it contains your passwords in the clear.")
             HStack {
-                Button("Choose file…", systemImage: "doc") { picking = true }.controlSize(.small).accessibilityIdentifier("import-choose")
+                Button("Choose file…", systemImage: "doc") { picking = true }.accessibilityIdentifier("import-choose")
                 if let fileName { Text(DisplayText.clean(fileName)).foregroundStyle(theme.colors.secondaryText.color) }
             }
             #if DEBUG

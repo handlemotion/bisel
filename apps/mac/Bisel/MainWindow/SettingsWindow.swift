@@ -3,9 +3,9 @@ import OpenDirectory
 import SwiftUI
 import BiselCore
 
-/// The settings window (Figma "Bisel", node 16:2): the command panel's card (glass or solid), a rail of round page buttons
-/// on the left (the selected one lighter), the page centred in a 380 pt column. Keeps the traffic lights; the rail and the
-/// page start below them.
+/// The settings window (Figma "Bisel", node 16:2): a standard titled window (system corners and traffic lights) whose
+/// background is the command panel's fill, a rail of round page buttons on the left (the selected one lighter), the page
+/// centred in a 460 pt column. Text is a size up from the panel's.
 enum SettingsPage: String, CaseIterable, Identifiable {
     case general, fill, sync, account
     var id: String { rawValue }
@@ -32,16 +32,18 @@ enum SettingsPage: String, CaseIterable, Identifiable {
 }
 
 enum SettingsLayout {
-    /// Figma frame 646×404, widened for a roomier column.
-    static let window = NSSize(width: 720, height: 460)
-    static let column: CGFloat = 380
-    /// Frame padding: 16 pt on the sides, 44 pt on top (clear of the traffic lights).
-    static let top: CGFloat = 44
-    static let rail: CGFloat = 24
-    static let railGlyph: CGFloat = 15
-    static let railGap: CGFloat = 6
-    static let avatar: CGFloat = 20
-    static let cardRadius: CGFloat = 12
+    /// The whole window, title bar included.
+    static let window = NSSize(width: 820, height: 600)
+    static let column: CGFloat = 460
+    /// Space between the title bar and the rail and page.
+    static let top: CGFloat = 16
+    static let rail: CGFloat = 32
+    static let railGlyph: CGFloat = 18
+    static let railGap: CGFloat = 8
+    static let avatar: CGFloat = 28
+    static let cardRadius: CGFloat = 14
+    /// Settings text is this much larger than the command panel's (13 pt body → 15 pt).
+    static let textScale = 15.0 / 13.0
     /// Rail fills are the text color over the background: 11% is Figma's #1d1d1d, 37% its #5e5e5e on black.
     static let railOpacity = 0.114
     static let railHoverOpacity = 0.2
@@ -51,14 +53,15 @@ enum SettingsLayout {
 struct SettingsShell: View {
     let service: VaultService
     @AppStorage(SettingsPage.defaultsKey) private var page = SettingsPage.general
-    @Environment(\.theme) private var theme
+    @Environment(\.theme) private var panelTheme
+    private var theme: Theme { panelTheme.scaledText(SettingsLayout.textScale) }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
             ScrollView {
                 VStack(alignment: .leading, spacing: theme.spacing.l) {
                     Text(page.title)
-                        .font(theme.font(theme.fonts.detailTitle - 6))   // 18 pt
+                        .font(theme.font(theme.fonts.detailTitle - 6, weight: .semibold))   // 22 pt
                         .accessibilityAddTraits(.isHeader)
                     content
                 }
@@ -71,13 +74,13 @@ struct SettingsShell: View {
             }
             .scrollIndicators(.never)
             SettingsRail(page: $page)
-                .padding(.leading, theme.spacing.l - SettingsLayout.railGap + theme.card.hairline)
-                .padding(.top, SettingsLayout.top - SettingsLayout.railGap + theme.card.hairline)
+                .padding(.leading, theme.spacing.l - SettingsLayout.railGap)
+                .padding(.top, SettingsLayout.top - SettingsLayout.railGap)
         }
         .animation(.easeInOut(duration: 0.2), value: page)
         .font(theme.font(theme.fonts.detail))
-        .ignoresSafeArea()
-        .background { SettingsCardBackground() }
+        .environment(\.theme, theme)
+        .containerBackground(for: .window) { CardFill() }
     }
 
     @ViewBuilder private var content: some View {
@@ -90,21 +93,8 @@ struct SettingsShell: View {
     }
 }
 
-/// The command panel's card behind the settings window: its fill (glass or solid), radius and 1 pt border.
-struct SettingsCardBackground: View {
-    @Environment(\.theme) private var theme
-    @Environment(\.glassMode) private var glass
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: theme.radii.card, style: .continuous)
-        CardFill().clipShape(shape)
-            .overlay(shape.strokeBorder(theme.borderColor(glass: glass), lineWidth: theme.card.hairline))
-            .ignoresSafeArea()
-    }
-}
-
-/// The locked box in the settings window: the command panel's locked state on the settings card. Return unlocks, like
-/// in the panel (opening Settings while locked asks for Touch ID right away, see `AppModel.showMainWindow`).
+/// The locked box in the settings window: the command panel's locked state on its fill. Return unlocks, like in the panel
+/// (opening Settings while locked asks for Touch ID right away, see `AppModel.showMainWindow`).
 struct SettingsLockedView: View {
     var body: some View {
         BoxLockedState { AppModel.shared.unlockFromSettings() }
@@ -112,8 +102,7 @@ struct SettingsLockedView: View {
                 Button("") { AppModel.shared.unlockFromSettings() }
                     .keyboardShortcut(.defaultAction).opacity(0).accessibilityHidden(true)
             }
-            .ignoresSafeArea()
-            .background { SettingsCardBackground() }
+            .containerBackground(for: .window) { CardFill() }
     }
 }
 
@@ -198,7 +187,7 @@ enum UserPicture {
 
 // MARK: - Building blocks
 
-/// Figma card: #282828 (the selection color; over glass a translucent fill), 12 pt radius and padding, a 13 pt label, then its rows.
+/// Figma card: #282828 (the selection color; over glass a translucent fill), 14 pt radius, 16 pt padding, a label, then its rows.
 struct SettingsCard<Content: View>: View {
     var title: String?
     @ViewBuilder var content: Content
@@ -210,7 +199,7 @@ struct SettingsCard<Content: View>: View {
             if let title { Text(title).font(theme.font(theme.fonts.detail, weight: .medium)) }
             content
         }
-        .padding(theme.spacing.m)
+        .padding(theme.spacing.l)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: SettingsLayout.cardRadius, style: .continuous).fill(theme.selectionFill(glass: glass)))
     }
@@ -246,5 +235,5 @@ struct NumberPicker: View {
 }
 
 extension Toggle {
-    func settingsSwitch() -> some View { self.labelsHidden().toggleStyle(.switch).controlSize(.mini) }
+    func settingsSwitch() -> some View { self.labelsHidden().toggleStyle(.switch).controlSize(.small) }
 }

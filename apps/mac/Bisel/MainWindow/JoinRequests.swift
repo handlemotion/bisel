@@ -22,9 +22,9 @@ struct JoinRequestsCard: View {
             ForEach(shown) { r in
                 SettingsRow(label: DisplayText.clean(r.request.name)) {
                     if r.isExpired {
-                        Button("Dismiss") { hidden.insert(r.id) }.controlSize(.small)
+                        Button("Dismiss") { hidden.insert(r.id) }
                     } else {
-                        Button("Approve…") { approving = r }.controlSize(.small).accessibilityIdentifier("join-approve")
+                        Button("Approve…") { approving = r }.accessibilityIdentifier("join-approve")
                     }
                 }
                 Caption(r.isExpired ? "Expired. Start again on the new device." : "Asked \(r.receivedAt.formatted(.relative(presentation: .named))).")
