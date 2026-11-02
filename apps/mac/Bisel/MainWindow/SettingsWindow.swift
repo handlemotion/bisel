@@ -75,7 +75,6 @@ struct SettingsView: View {
                 Section { ForEach(SettingsPage.main) { SidebarRow(page: $0).tag($0) } }
                 Section { ForEach(SettingsPage.more) { SidebarRow(page: $0).tag($0) } }
             }
-            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 300)
         } detail: {
             Form { content }
                 .formStyle(.grouped)

@@ -102,6 +102,11 @@ struct MainWindowView: View {
             w.isMovableByWindowBackground = true
             w.hasShadow = true
             w.invalidateShadow()   // the shadow follows the drawn card, whose shape changes with the screen
+            // Coming from Settings (resizable, larger): back to the island's size, keeping the top-left corner.
+            let island = OnboardingLayout.island
+            if w.frame.size != island {
+                w.setFrame(NSRect(x: w.frame.minX, y: w.frame.maxY - island.height, width: island.width, height: island.height), display: true)
+            }
         } else {
             // A standard window: the system's corners, traffic lights, colors and light/dark appearance.
             w.appearance = nil
