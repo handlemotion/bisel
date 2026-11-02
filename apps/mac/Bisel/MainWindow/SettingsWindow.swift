@@ -68,25 +68,58 @@ struct SettingsView: View {
     /// The window's own selection: a launch argument (`-settings.page`) shadows the default and must not pin the sidebar.
     @State private var page = SettingsPage.current
 
+    /// Pages visited before and after this one, for the toolbar's back and forward (like Raycast's settings).
+    @State private var back: [SettingsPage] = []
+    @State private var forward: [SettingsPage] = []
+
     var body: some View {
-        NavigationSplitView {
-            List(selection: Binding<SettingsPage?>(get: { page }, set: { if let p = $0 { select(p) } })) {
+        // The sidebar is always shown: no toggle in the toolbar, and the divider cannot collapse it.
+        NavigationSplitView(columnVisibility: .constant(.all)) {
+            List(selection: Binding<SettingsPage?>(get: { page }, set: { if let p = $0 { go(to: p) } })) {
                 AccountRow().tag(SettingsPage.account)
                 Section { ForEach(SettingsPage.main) { SidebarRow(page: $0).tag($0) } }
                 Section { ForEach(SettingsPage.more) { SidebarRow(page: $0).tag($0) } }
             }
+            .toolbar(removing: .sidebarToggle)
         } detail: {
             Form { content }
                 .formStyle(.grouped)
                 .navigationTitle(page.title)
                 .id(page)
+                .toolbar {
+                    ToolbarItemGroup(placement: .navigation) {
+                        Button { goBack() } label: { Label("Back", systemImage: "chevron.left") }
+                            .help("Back").disabled(back.isEmpty).keyboardShortcut("[", modifiers: .command)
+                        Button { goForward() } label: { Label("Forward", systemImage: "chevron.right") }
+                            .help("Forward").disabled(forward.isEmpty).keyboardShortcut("]", modifiers: .command)
+                    }
+                }
         }
         .onReceive(NotificationCenter.default.publisher(for: SettingsPage.showNotification)) { n in
-            if let p = n.object as? SettingsPage { page = p }
+            if let p = n.object as? SettingsPage { go(to: p) }
         }
     }
 
-    private func select(_ p: SettingsPage) {
+    private func go(to p: SettingsPage) {
+        guard p != page else { return }
+        back.append(page)
+        forward.removeAll()
+        show(p)
+    }
+
+    private func goBack() {
+        guard let p = back.popLast() else { return }
+        forward.append(page)
+        show(p)
+    }
+
+    private func goForward() {
+        guard let p = forward.popLast() else { return }
+        back.append(page)
+        show(p)
+    }
+
+    private func show(_ p: SettingsPage) {
         page = p
         UserDefaults.standard.set(p.rawValue, forKey: SettingsPage.defaultsKey)
     }
