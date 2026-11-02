@@ -12,9 +12,13 @@ packages:
     traits: [SoftwareKeys]
 targets:
   Bisel:
+    # Tell it apart from the installed app: "Bisel Dev" in the Dock, app menu and Finder, and an orange icon
+    # (Resources/AppIconDev.icon). Same bundle identifier, so it reads the same defaults domain.
     # No iCloud in the dev build: it runs unsigned / ad-hoc and the CloudKit entitlement needs a provisioning profile.
     settings:
       base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIconDev
+        BISEL_DISPLAY_NAME: Bisel Dev
         CODE_SIGN_ENTITLEMENTS: Bisel/BiselDev.entitlements
       # No BISEL_CLOUDKIT in any configuration: the dev build never talks to real CloudKit (docs/SYNC-LANES.md §3).
       configs:
