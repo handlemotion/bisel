@@ -68,9 +68,10 @@ final class AppModel {
         #endif
     }
 
-    /// The settings window on one page (the page is the window's own `settings.page` setting, so it follows live).
+    /// The settings window on one page (an open window switches to it).
     func showSettings(_ page: SettingsPage) {
         UserDefaults.standard.set(page.rawValue, forKey: SettingsPage.defaultsKey)
+        NotificationCenter.default.post(name: SettingsPage.showNotification, object: page)
         showMainWindow()
     }
 

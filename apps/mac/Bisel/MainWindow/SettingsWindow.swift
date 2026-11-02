@@ -7,8 +7,14 @@ import BiselCore
 enum SettingsPage: String, CaseIterable, Identifiable {
     case account, general, appearance, fill, security, sync, backup, advanced, about
     var id: String { rawValue }
-    /// The page Settings opens on (`AppModel.showSettings` sets it).
+    /// The page Settings opens on, and the last one shown.
     static let defaultsKey = "settings.page"
+    /// Posted by `AppModel.showSettings` with the page as the object: an open window switches to it.
+    static let showNotification = Notification.Name("app.bisel.settings.show")
+
+    static var current: SettingsPage {
+        UserDefaults.standard.string(forKey: defaultsKey).flatMap(SettingsPage.init(rawValue:)) ?? .general
+    }
 
     var title: String {
         switch self {
@@ -45,11 +51,12 @@ enum SettingsPage: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     let service: VaultService
-    @AppStorage(SettingsPage.defaultsKey) private var page = SettingsPage.general
+    /// The window's own selection: a launch argument (`-settings.page`) shadows the default and must not pin the sidebar.
+    @State private var page = SettingsPage.current
 
     var body: some View {
         NavigationSplitView {
-            List(selection: Binding<SettingsPage?>(get: { page }, set: { if let p = $0 { page = p } })) {
+            List(selection: Binding<SettingsPage?>(get: { page }, set: { if let p = $0 { select(p) } })) {
                 AccountRow().tag(SettingsPage.account)
                 Section { ForEach(SettingsPage.main) { Label($0.title, systemImage: $0.symbol).tag($0) } }
                 Section { ForEach(SettingsPage.more) { Label($0.title, systemImage: $0.symbol).tag($0) } }
@@ -61,6 +68,14 @@ struct SettingsView: View {
                 .navigationTitle(page.title)
                 .id(page)
         }
+        .onReceive(NotificationCenter.default.publisher(for: SettingsPage.showNotification)) { n in
+            if let p = n.object as? SettingsPage { page = p }
+        }
+    }
+
+    private func select(_ p: SettingsPage) {
+        page = p
+        UserDefaults.standard.set(p.rawValue, forKey: SettingsPage.defaultsKey)
     }
 
     @ViewBuilder private var content: some View {
