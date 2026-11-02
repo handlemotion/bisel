@@ -41,9 +41,8 @@ struct MainWindowView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { showImport = false }
                 }
                 .transition(Self.swap)
-            } else if service.phase == .locked {
-                SettingsLockedView().transition(Self.swap)
             } else {
+                // Locked or not: Settings never asks to unlock up front (see `AppModel.unlockIfLocked`).
                 unlocked
             }
         }
@@ -137,7 +136,7 @@ struct MainWindowView: View {
     }
 
     /// Settings, locked or not: native colors, fonts and title, so the Bisel theme is left out.
-    private var isSettings: Bool { service.startupError == nil && !usesFixture && (screenKey == "locked" || screenKey == "unlocked") }
+    private var isSettings: Bool { service.startupError == nil && !usesFixture && screenKey == "settings" }
 
     /// The old screen fades out; the new one is simply there and fades in on its own cascade, after `cascadeLead`.
     private static let swap = AnyTransition.asymmetric(insertion: .identity, removal: .opacity)
@@ -149,7 +148,7 @@ struct MainWindowView: View {
         if service.pendingPhrase != nil { return "phrase" }
         if showAccess { return "access" }
         if showImport { return "import" }
-        return service.phase == .locked ? "locked" : "unlocked"
+        return "settings"   // locking or unlocking the box changes nothing on screen
     }
 
     private var usesFixture: Bool {

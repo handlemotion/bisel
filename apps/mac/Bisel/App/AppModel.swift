@@ -81,23 +81,13 @@ final class AppModel {
             for _ in 0..<20 where openMainWindow == nil { try? await Task.sleep(for: .milliseconds(150)) }
             openMainWindow?()
             NSApp.activate()
-            // Settings while the box is locked: ask for Touch ID right away, like the command panel. Return is the retry.
-            if service.phase == .locked, !isScriptedFlow { unlockFromSettings() }
         }
     }
 
-    private var unlockingFromSettings = false
-
-    func unlockFromSettings() {
-        guard service.phase == .locked, !unlockingFromSettings else { return }
-        unlockingFromSettings = true
-        Task {
-            defer { unlockingFromSettings = false }
-            do { try await service.unlock(reason: "Unlock your box to change its settings") }
-            catch KeyStoreError.userCancelled {}
-            catch BiometricGate.Failure.denied {}
-            catch { Toast.shared.show(describe(error), isError: true) }
-        }
+    /// Settings works on a locked box: an action that needs the box (export, a new phrase, import, devices) asks for Touch ID
+    /// with the unlock prompt right then. Throws `KeyStoreError.userCancelled` when the person cancels.
+    func unlockIfLocked(_ reason: String) async throws {
+        if service.phase == .locked { try await service.unlock(reason: reason) }
     }
 
     private var isScriptedFlow: Bool {

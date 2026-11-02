@@ -220,19 +220,6 @@ private struct AccountRow: View {
     }
 }
 
-/// The locked box in the settings window: the command panel's locked state. Return unlocks, like in the panel (opening
-/// Settings while locked asks for Touch ID right away, see `AppModel.showMainWindow`).
-struct SettingsLockedView: View {
-    var body: some View {
-        BoxLockedState { AppModel.shared.unlockFromSettings() }
-            .background {
-                Button("") { AppModel.shared.unlockFromSettings() }
-                    .keyboardShortcut(.defaultAction).opacity(0).accessibilityHidden(true)
-            }
-            .navigationTitle("Settings")
-    }
-}
-
 /// The Mac user's account picture (Users & Groups), or a generic person.
 private struct UserPictureView: View {
     var body: some View {

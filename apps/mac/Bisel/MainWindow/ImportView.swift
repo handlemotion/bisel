@@ -72,6 +72,7 @@ struct ImportView: View {
         Task {
             defer { working = false }
             do {
+                try await AppModel.shared.unlockIfLocked("Unlock your box to import passwords")
                 try await service.saveMany(o.items) { progress = $0 }
                 done = "Imported \(Self.items(o.items.count))."
                 outcome = nil

@@ -48,6 +48,10 @@ struct DevicesView: View {
                 } label: {
                     Label { Text(Self.clean(service.deviceName)); Text("Holds the only copy of your box") } icon: { Image(systemName: "laptopcomputer") }
                 }
+            } else if !service.isUnlocked {
+                SettingsRow(label: "Your devices", detail: "Shown once the box is unlocked.") {
+                    Button("Unlock…") { Task { try? await AppModel.shared.unlockIfLocked("Unlock your box to see your devices") } }
+                }
             } else if devices.isEmpty && !loading {
                 Text("No devices yet.").foregroundStyle(.secondary)
             }
@@ -96,7 +100,7 @@ struct DevicesView: View {
         } footer: {
             if !service.isLocalOnly { SettingsNote("A revoked device can no longer sync, and the box key is replaced.") }
         }
-        .task { await load() }
+        .task(id: service.isUnlocked) { await load() }
         .sheet(item: $sheet, onDismiss: showNext) { shown in
             switch shown {
             case .confirm(let d):
@@ -149,7 +153,7 @@ struct DevicesView: View {
     }
 
     private func load() async {
-        guard !service.isLocalOnly else { devices = []; error = nil; return }
+        guard !service.isLocalOnly, service.isUnlocked else { devices = []; error = nil; return }
         loading = true; defer { loading = false }
         do { devices = try await service.devices(); error = nil }
         catch { self.error = describe(error) }
@@ -159,6 +163,7 @@ struct DevicesView: View {
     private func revoke(_ d: DeviceInfo, newPhrase: Bool) async {
         working = true; defer { working = false }
         do {
+            try await AppModel.shared.unlockIfLocked("Unlock your box to revoke the device")
             let report = try await service.revoke(deviceID: d.id)
             let outcome = newPhrase ? await service.replacePhrase(after: report) : RevokeOutcome(report: report, phrase: nil)
             await finished(outcome)
@@ -170,7 +175,10 @@ struct DevicesView: View {
     /// The alert's one action: revoke the device that recovered with the phrase, then replace the phrase.
     private func answer(_ alert: SecurityAlert) async {
         working = true; defer { working = false }
-        do { await finished(try await service.answerRecovery(alert)) }
+        do {
+            try await AppModel.shared.unlockIfLocked("Unlock your box to revoke the device")
+            await finished(try await service.answerRecovery(alert))
+        }
         catch KeyStoreError.userCancelled { error = "Touch ID cancelled, nothing was revoked" }
         catch { self.error = describe(error) }
     }

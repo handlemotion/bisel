@@ -36,7 +36,10 @@ struct AccountSettings: View {
 
     private func newPhrase() {
         Task {
-            do { phraseSheet = try await service.rotateRecovery(); recoveryMessage = "The old phrase no longer works." }
+            do {
+                try await AppModel.shared.unlockIfLocked("Unlock your box to replace the recovery phrase")
+                phraseSheet = try await service.rotateRecovery(); recoveryMessage = "The old phrase no longer works."
+            }
             catch KeyStoreError.userCancelled { recoveryMessage = "Cancelled" }
             catch { recoveryMessage = describe(error) }
         }
@@ -153,18 +156,30 @@ struct SecurityPage: View {
     @State private var idleLock = VaultService.idleLockMinutes
     @State private var unlockedFor = VaultService.fillWindowMinutes
 
+    /// A change here asks for Touch ID first (the native prompt); cancelled, the setting stays as it was.
+    private func guarded<T>(_ value: Binding<T>) -> Binding<T> {
+        Binding(get: { value.wrappedValue }, set: { new in
+            Task {
+                do { try await BiometricGate.authenticate(reason: "change Bisel's security settings", grantsCredit: false) }
+                catch { return }
+                value.wrappedValue = new
+            }
+        })
+    }
+
     var body: some View {
         SettingsSection(title: "Locking", footer: "The box also locks on sleep, screen lock and fast user switching.") {
             SettingsRow(label: "Lock now") {
-                Button("Lock", systemImage: "lock") { service.lock(reason: "manual") }.accessibilityIdentifier("lock-button")
+                Button("Lock", systemImage: "lock") { service.lock(reason: "manual") }
+                    .disabled(service.phase != .unlocked).accessibilityIdentifier("lock-button")
             }
-            SettingsRow(label: "Lock after idle") { NumberPicker(value: $idleLock, key: VaultService.idleLockKey) }
-            SettingsRow(label: "Lock after unlocking, at most") { NumberPicker(value: $unlockedFor, key: VaultService.fillWindowKey) }
+            SettingsRow(label: "Lock after idle") { NumberPicker(value: guarded($idleLock), key: VaultService.idleLockKey) }
+            SettingsRow(label: "Lock after unlocking, at most") { NumberPicker(value: guarded($unlockedFor), key: VaultService.fillWindowKey) }
         }
         SettingsSection(title: "Touch ID") {
             SettingsRow(label: "Touch ID for every reveal and copy",
                         detail: "Off: passwords and codes show and copy freely while the box is unlocked. On: each one asks for Touch ID.") {
-                Toggle("", isOn: $strict).settingsSwitch()
+                Toggle("", isOn: guarded($strict)).settingsSwitch()
                     .onChange(of: strict) { _, new in UserDefaults.standard.set(new, forKey: SecuritySettings.requireTouchIDKey) }
             }
         }
@@ -231,20 +246,21 @@ struct BackupSettings: View {
     }
 
     private func exportBackup() {
-        #if DEBUG
-        if let path = ProcessInfo.processInfo.environment["BISEL_DEV_EXPORT_PATH"] {   // flow tests: no out-of-process save panel
-            Task {
+        Task {
+            do { try await AppModel.shared.unlockIfLocked("Unlock your box to export a backup") }
+            catch KeyStoreError.userCancelled { return }
+            catch { backupMessage = describe(error); return }
+            #if DEBUG
+            if let path = ProcessInfo.processInfo.environment["BISEL_DEV_EXPORT_PATH"] {   // flow tests: no out-of-process save panel
                 do { try await service.exportBackup(to: URL(fileURLWithPath: path)); backupMessage = "Backup written to \(URL(fileURLWithPath: path).lastPathComponent)" }
                 catch { backupMessage = describe(error) }
+                return
             }
-            return
-        }
-        #endif
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "bisel-\(Date().formatted(.iso8601.year().month().day())).bisel-backup"
-        panel.title = "Export backup"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task {
+            #endif
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "bisel-\(Date().formatted(.iso8601.year().month().day())).bisel-backup"
+            panel.title = "Export backup"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
             do { try await service.exportBackup(to: url); backupMessage = "Backup written to \(url.lastPathComponent)" }
             catch { backupMessage = describe(error) }
         }
@@ -281,7 +297,10 @@ struct AdvancedSettings: View {
         guard let url else { connectError = bad; return }
         let token = connectToken.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
-            do { try await service.connectServer(server: url, token: token); connectToken = "" }
+            do {
+                try await AppModel.shared.unlockIfLocked("Unlock your box to connect a server")
+                try await service.connectServer(server: url, token: token); connectToken = ""
+            }
             catch { connectError = describe(error) }
         }
     }

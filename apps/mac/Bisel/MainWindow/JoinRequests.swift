@@ -107,6 +107,7 @@ private struct ApproveJoinSheet: View {
         Task {
             defer { working = false }
             do {
+                try await AppModel.shared.unlockIfLocked("Unlock your box to approve the device")
                 try await service.approve(pending, words: typed)
                 code = try await service.verificationCode()
             } catch BiselCryptoError.invalidPairingSecret {
