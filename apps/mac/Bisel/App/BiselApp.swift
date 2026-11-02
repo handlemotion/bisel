@@ -78,7 +78,7 @@ private struct MenuBarContent: View {
         // Before a box exists the window is set-up, not settings.
         Button(AppModel.shared.service.phase == .needsSetup ? "Set Up Bisel…" : "Settings…") {
             AppModel.shared.openMainWindow = { openWindow(id: "main") }
-            AppModel.shared.showMainWindow()
+            AppModel.shared.showSettings()
         }
         .keyboardShortcut(",")
         Button("Check for Updates…") { Updater.shared.checkForUpdates() }

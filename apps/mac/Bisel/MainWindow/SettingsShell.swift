@@ -3,8 +3,8 @@ import OpenDirectory
 import SwiftUI
 import BiselCore
 
-/// The settings window (Figma "Bisel", node 16:2): pitch-black card, a rail of round page buttons on the left (the selected
-/// one lighter), the page centred in a 310 pt column. Keeps the traffic lights.
+/// Settings, a floating card like the command panel (same material, radius and border, no traffic lights): an icon rail
+/// on the left with a label under each page, the Mac user's picture (the Account page) at its foot, the page on the right.
 enum SettingsPage: String, CaseIterable, Identifiable {
     case general, fill, sync, account
     var id: String { rawValue }
@@ -31,20 +31,15 @@ enum SettingsPage: String, CaseIterable, Identifiable {
 }
 
 enum SettingsLayout {
-    /// Figma frame 646×404.
-    static let window = NSSize(width: 646, height: 404)
-    static let column: CGFloat = 310
-    /// Frame padding: 16 pt on the sides, 28 pt on top.
-    static let top: CGFloat = 28
-    static let rail: CGFloat = 24
-    static let railGlyph: CGFloat = 15
-    static let railGap: CGFloat = 6
-    static let avatar: CGFloat = 20
+    /// The card: as wide as the command panel, a little taller.
+    static let size = NSSize(width: 760, height: 520)
+    /// The page column's widest; the column centres in what is left of the card after the rail.
+    static let column: CGFloat = 520
+    static let rail: CGFloat = 84
+    static let railItem = CGSize(width: 64, height: 54)
+    static let railGlyph: CGFloat = 18
+    static let avatar: CGFloat = 30
     static let cardRadius: CGFloat = 12
-    /// Rail fills are the text color over the background: 11% is Figma's #1d1d1d, 37% its #5e5e5e on black.
-    static let railOpacity = 0.114
-    static let railHoverOpacity = 0.2
-    static let railSelectedOpacity = 0.37
 }
 
 struct SettingsShell: View {
@@ -53,35 +48,27 @@ struct SettingsShell: View {
     @Environment(\.theme) private var theme
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        HStack(spacing: 0) {
+            SettingsRail(page: $page).frame(width: SettingsLayout.rail)
+            Hairline(axis: .vertical)
             ScrollView {
                 VStack(alignment: .leading, spacing: theme.spacing.l) {
                     Text(page.title)
-                        .font(theme.font(theme.fonts.detailTitle - 6))   // 18 pt
+                        .font(theme.font(theme.fonts.detailTitle - 4, weight: .semibold))   // 20 pt
                         .accessibilityAddTraits(.isHeader)
                     content
                 }
-                .frame(width: SettingsLayout.column, alignment: .leading)
-                .padding(.top, SettingsLayout.top)
-                .padding(.bottom, theme.spacing.l)
+                .frame(maxWidth: SettingsLayout.column, alignment: .leading)
+                .padding(.horizontal, theme.spacing.l * 2)
+                .padding(.vertical, theme.spacing.l * 1.75)
                 .frame(maxWidth: .infinity)
                 .id(page)
                 .transition(.opacity)
             }
             .scrollIndicators(.never)
-            SettingsRail(page: $page)
-                .padding(.leading, theme.spacing.l - SettingsLayout.railGap + theme.card.hairline)
-                .padding(.top, SettingsLayout.top - SettingsLayout.railGap + theme.card.hairline)
         }
         .animation(.easeInOut(duration: 0.2), value: page)
         .font(theme.font(theme.fonts.detail))
-        .ignoresSafeArea()
-        .background {
-            let shape = RoundedRectangle(cornerRadius: theme.radii.card, style: .continuous)
-            shape.fill(theme.colors.background.color)
-                .overlay(shape.strokeBorder(theme.colors.border.color, lineWidth: theme.card.hairline))
-                .ignoresSafeArea()
-        }
     }
 
     @ViewBuilder private var content: some View {
@@ -96,36 +83,52 @@ struct SettingsShell: View {
 
 private struct SettingsRail: View {
     @Binding var page: SettingsPage
+    @Environment(\.theme) private var theme
 
     var body: some View {
-        VStack(spacing: SettingsLayout.railGap) {
-            ForEach(SettingsPage.allCases) { p in RailButton(page: p, selected: page == p) { page = p } }
+        VStack(spacing: theme.spacing.xs) {
+            ForEach(SettingsPage.allCases.filter { $0.icon != nil }) { p in
+                RailButton(page: p, selected: page == p) { page = p }
+            }
+            Spacer(minLength: 0)
+            RailButton(page: .account, selected: page == .account) { page = .account }
         }
-        .padding(SettingsLayout.railGap)
+        .padding(.vertical, theme.spacing.m)
+        .frame(maxHeight: .infinity)
     }
 }
 
+/// A page glyph over its name, in a rounded tile that fills when hovered or selected. The account page is the Mac user's
+/// picture alone, ringed when selected.
 private struct RailButton: View {
     let page: SettingsPage
     let selected: Bool
     let action: () -> Void
     @Environment(\.theme) private var theme
+    @Environment(\.glassMode) private var glass
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            ZStack {
-                Circle().fill(theme.colors.text.color.opacity(fill))
+            Group {
                 if let icon = page.icon {
-                    Image(icon).renderingMode(.template).resizable().scaledToFit()
-                        .frame(width: SettingsLayout.railGlyph, height: SettingsLayout.railGlyph)
+                    VStack(spacing: theme.spacing.xs + 1) {
+                        Image(icon).renderingMode(.template).resizable().scaledToFit()
+                            .frame(width: SettingsLayout.railGlyph, height: SettingsLayout.railGlyph)
+                        Text(page.title).font(theme.font(theme.fonts.caption, weight: .medium))
+                    }
+                    .foregroundStyle(selected ? theme.colors.text.color : theme.dimColor(theme.colors.secondaryText, glass: glass))
+                    .frame(width: SettingsLayout.railItem.width, height: SettingsLayout.railItem.height)
+                    .background(RoundedRectangle(cornerRadius: theme.radii.field + 2, style: .continuous).fill(fill))
                 } else {
-                    UserPictureView().frame(width: SettingsLayout.avatar, height: SettingsLayout.avatar)
+                    UserPictureView()
+                        .frame(width: SettingsLayout.avatar, height: SettingsLayout.avatar)
+                        .padding(3)
+                        .overlay(Circle().strokeBorder(theme.colors.text.color.opacity(selected ? 0.9 : hovering ? 0.35 : 0), lineWidth: 1.5))
+                        .frame(width: SettingsLayout.railItem.width, height: SettingsLayout.railItem.height)
                 }
             }
-            .frame(width: SettingsLayout.rail, height: SettingsLayout.rail)
-            .foregroundStyle(theme.colors.text.color)
-            .contentShape(Circle())
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -137,11 +140,10 @@ private struct RailButton: View {
         .accessibilityIdentifier("nav-\(page.rawValue)")
     }
 
-    /// The account button has no fill of its own (the picture is the button) until it is hovered or selected.
-    private var fill: Double {
-        if selected { return SettingsLayout.railSelectedOpacity }
-        if hovering { return SettingsLayout.railHoverOpacity }
-        return page.icon == nil ? 0 : SettingsLayout.railOpacity
+    private var fill: Color {
+        if selected { return theme.selectionFill(glass: glass) }
+        if hovering { return theme.hoverFill(glass: glass) }
+        return .clear
     }
 }
 
@@ -175,20 +177,21 @@ enum UserPicture {
 
 // MARK: - Building blocks
 
-/// Figma card: #282828 (the selection color), 12 pt radius and padding, a 13 pt label, then its rows.
+/// A group of settings: the selection fill (translucent over glass), 12 pt radius, 16 pt padding, a 13 pt label, then its rows.
 struct SettingsCard<Content: View>: View {
     var title: String?
     @ViewBuilder var content: Content
     @Environment(\.theme) private var theme
+    @Environment(\.glassMode) private var glass
 
     var body: some View {
         VStack(alignment: .leading, spacing: theme.spacing.m) {
             if let title { Text(title).font(theme.font(theme.fonts.detail, weight: .medium)) }
             content
         }
-        .padding(theme.spacing.m)
+        .padding(theme.spacing.l)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: SettingsLayout.cardRadius, style: .continuous).fill(theme.colors.selection.color))
+        .background(RoundedRectangle(cornerRadius: SettingsLayout.cardRadius, style: .continuous).fill(theme.selectionFill(glass: glass)))
     }
 }
 

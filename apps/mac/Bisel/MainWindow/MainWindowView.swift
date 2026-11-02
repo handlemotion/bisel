@@ -3,7 +3,8 @@ import SwiftUI
 import BiselCore
 
 struct MainWindowView: View {
-    /// The window is for settings only; the command panel (⌘⇧Space) is the way into the box.
+    /// The window is for set-up and the recovery phrase only: Settings is a card of its own (`SettingsPanelController`) and
+    /// the command panel (⌘⇧Space) is the way into the box.
     private let service = AppModel.shared.service
     /// After the recovery phrase of a new box: one last onboarding step to import passwords.
     @State private var showImport = false
@@ -12,6 +13,7 @@ struct MainWindowView: View {
     /// The titlebar's height, measured from the window: the scene sizes the content area, the titlebar comes on top of it,
     /// so the island's frame is its height minus this.
     @State private var titlebarInset: CGFloat = 32
+    @State private var window = WindowRef()
     @Environment(\.dismissWindow) private var dismissWindow
     @Environment(\.theme) private var theme
 
@@ -39,13 +41,12 @@ struct MainWindowView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { showImport = false }
                 }
                 .transition(Self.swap)
-            } else if service.phase == .locked {
-                LockedView(service: service).transition(Self.swap)
             } else {
-                unlocked
+                // Nothing to set up: Settings (or its locked state) is the card, so the window gives way to it.
+                Color.clear.onAppear { handOffToSettings() }
             }
         }
-        .background(cardSize == nil || isSettings ? Color.clear : Theme.biselDark.colors.background.color)   // settings draws its own card
+        .background(cardSize == nil ? Color.clear : Theme.biselDark.colors.background.color)
         .animation(.easeInOut(duration: 0.3), value: screenKey)
         .environment(\.cascadeLead, 0.3)   // a new screen waits for the old one to fade out
         // SwiftUI owns the window size (the scene is .contentSize): the island is exactly its fixed frame, the settings window
@@ -57,6 +58,7 @@ struct MainWindowView: View {
         .background(WindowAccessor { w in
             w.sharingType = .readOnly   // nothing is hidden from screenshots; sensitive values are masked in the UI instead
             w.isRestorable = false
+            window.window = w
             DockPresence.windowAppeared(w)
             style(w)
             let inset = w.frame.height - w.contentLayoutRect.height
@@ -72,17 +74,11 @@ struct MainWindowView: View {
         .navigationTitle(cardSize != nil ? "" : (service.provenanceLabel.map { "Bisel  ·  \($0)" } ?? "Bisel"))
     }
 
-    /// Set-up, the recovery phrase and the lock screen are the glass island itself: the window is small, borderless-looking
-    /// and shows the command panel's material. Settings is a card of its own (with traffic lights). Only the error and
-    /// fixture notices use the normal window.
+    /// Set-up and the recovery phrase are the glass island itself: the window is small, borderless-looking and shows the
+    /// command panel's material. Only the error and fixture notices use the normal window.
     private var cardSize: NSSize? {
         guard service.startupError == nil, !usesFixture else { return nil }
-        if service.pendingPhrase != nil || showAccess || showImport || inSetup { return OnboardingLayout.island }
-        switch service.phase {
-        case .needsSetup: return OnboardingLayout.island
-        case .locked: return OnboardingLayout.island
-        default: return SettingsLayout.window
-        }
+        return OnboardingLayout.island
     }
 
     private func style(_ w: NSWindow) {
@@ -95,10 +91,8 @@ struct MainWindowView: View {
             w.title = ""
             w.styleMask.insert(.fullSizeContentView)
             w.styleMask.remove(.resizable)
-            // No traffic lights on the onboarding screens (the window closes from the Dock); settings keeps close and minimise.
-            w.standardWindowButton(.closeButton)?.isHidden = !isSettings
-            w.standardWindowButton(.miniaturizeButton)?.isHidden = !isSettings
-            w.standardWindowButton(.zoomButton)?.isHidden = true
+            // No traffic lights on the onboarding screens (the window closes from the Dock).
+            for b in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { w.standardWindowButton(b)?.isHidden = true }
             w.isMovableByWindowBackground = true
             w.hasShadow = true
             w.invalidateShadow()   // the shadow follows the drawn card, whose shape changes with the screen
@@ -130,8 +124,13 @@ struct MainWindowView: View {
         }
     }
 
-    /// The unlocked box: the settings card.
-    private var isSettings: Bool { cardSize == SettingsLayout.window }
+    /// Only while the window is on screen: a closed `Window` keeps its view, and the import step's reset lands here after
+    /// the window has gone.
+    private func handOffToSettings() {
+        guard window.window?.isVisible == true else { return }
+        dismissWindow(id: "main")
+        AppModel.shared.showSettings()
+    }
 
     /// The old screen fades out; the new one is simply there and fades in on its own cascade, after `cascadeLead`.
     private static let swap = AnyTransition.asymmetric(insertion: .identity, removal: .opacity)
@@ -158,10 +157,9 @@ struct MainWindowView: View {
         ContentUnavailableView("Dev fixture is active", systemImage: "testtube.2",
                                description: Text("This run uses the fake panel fixture. Start without it to use the real box."))
     }
-
-    private var unlocked: some View {
-        SettingsShell(service: service)
-    }
 }
+
+/// The hosting window, held without making the view depend on it.
+private final class WindowRef { weak var window: NSWindow? }
 
 

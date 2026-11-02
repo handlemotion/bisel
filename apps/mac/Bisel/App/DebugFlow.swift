@@ -8,7 +8,8 @@ import BiselCore
 ///   phases: create (bootstrap → items → search → copy → lock/unlock → import → export)
 ///           recover (fresh store: recover from the phrase file → items present → devices → revoke the other device)
 ///           revoked (original store after being revoked: unlock → sync must be refused)
-///           settings (with BISEL_DATA_DIR: a throwaway box, the settings window open; `-settings.page sync` picks the page)
+///           settings (with BISEL_DATA_DIR: a throwaway box, Settings open; `-settings.page sync` picks the page,
+///                     BISEL_DEV_LOCKED=1 locks the box once Settings is up, BISEL_DEV_SHOT=<dir>/ captures every page)
 @MainActor
 enum DebugFlow {
     private static var log = ""
@@ -40,12 +41,30 @@ enum DebugFlow {
                 if env["BISEL_DEV_PANEL"] == "1" {
                     AppModel.shared.panelController.show()
                     if let q = env["BISEL_DEV_PANEL_QUERY"] { try? await Task.sleep(for: .milliseconds(300)); AppModel.shared.panelModel.query = q }
-                } else { AppModel.shared.showMainWindow() }
-                // BISEL_DEV_SHOT=<png>: an in-process picture of what is up, a moment later (works with the screen locked).
-                if let shot = env["BISEL_DEV_SHOT"] {
+                } else { AppModel.shared.showSettings() }
+                if env["BISEL_DEV_LOCKED"] == "1" { try? await Task.sleep(for: .milliseconds(300)); svc.lock(reason: "dev flow") }
+                // BISEL_DEV_SHOT=<dir>/ (a trailing slash): every Settings page, then the locked card, one PNG each, in one run.
+                if let dir = env["BISEL_DEV_SHOT"], dir.hasSuffix("/") {
+                    for page in SettingsPage.allCases {
+                        AppModel.shared.showSettings(page)
+                        try? await Task.sleep(for: .milliseconds(1200))
+                        AppModel.shared.settingsController.debugSnapshot(to: dir + "settings-\(page.rawValue).png")
+                    }
+                    svc.lock(reason: "dev flow")
+                    try? await Task.sleep(for: .milliseconds(800))
+                    AppModel.shared.settingsController.debugSnapshot(to: dir + "settings-locked.png")
+                    // The command panel's locked state next to it (showing it unlocks at once: Touch ID is skipped).
+                    AppModel.shared.settingsController.hide()
+                    AppModel.shared.panelController.show()
+                    try? await Task.sleep(for: .milliseconds(500))
+                    svc.lock(reason: "dev flow")
+                    try? await Task.sleep(for: .milliseconds(800))
+                    AppModel.shared.panelController.debugSnapshot(to: dir + "panel-locked.png")
+                } else if let shot = env["BISEL_DEV_SHOT"] {
+                    // BISEL_DEV_SHOT=<png>: an in-process picture of what is up, a moment later (works with the screen locked).
                     try? await Task.sleep(for: .milliseconds(1500))
                     if env["BISEL_DEV_PANEL"] == "1" { AppModel.shared.panelController.debugSnapshot(to: shot) }
-                    else { DebugTools.snapshotMainWindow(to: shot) }
+                    else { AppModel.shared.settingsController.debugSnapshot(to: shot) }
                 }
             }
             return
