@@ -8,7 +8,7 @@
 #   apps/mac/Tools/release.sh --zip            zip of the stapled app instead of a DMG
 #   apps/mac/Tools/release.sh --preflight      only check the certificate, the profile, the notary profile and the Sparkle key
 #   apps/mac/Tools/release.sh --allow-dirty    build from a working tree with uncommitted changes (never for a real release)
-#   apps/mac/Tools/release.sh --publish vX.Y.Z attach the last build (package, SHA-256, appcast.xml) to that GitHub release
+#   apps/mac/Tools/release.sh --publish vX.Y.Z attach the last build (package, SHA-256, appcast.xml) to that GitHub release, then publish it
 #
 # Environment: BISEL_NOTARY_PROFILE (default bisel-notary), the name given to `xcrun notarytool store-credentials`;
 # BISEL_SPARKLE_ACCOUNT (default bisel), the keychain account `generate_keys --account` stored the update-signing key under.
@@ -49,8 +49,8 @@ SPARKLE_BIN="$OUT/dd/SourcePackages/artifacts/sparkle/Sparkle/bin"
 
 # MARK: publish (the last build, no rebuild)
 
-# Attaches what the last full run left in build-dist/ to the GitHub release that release-please made for <tag>. Refuses a build
-# from another commit or version, an appcast whose signature does not verify, and a release that already has the assets.
+# Attaches what the last full run left in build-dist/ to the draft release that release-please made for <tag>, then publishes it.
+# Refuses a build from another commit or version, an appcast whose signature does not verify, and a release that already has the assets.
 if [[ -n "$PUBLISH" ]]; then
   say "publish $PUBLISH"
   command -v gh >/dev/null || die "gh not found."
@@ -70,8 +70,10 @@ if [[ -n "$PUBLISH" ]]; then
     grep -qx "$f" <<<"$existing" && die "release $PUBLISH already has $f. Delete that asset on GitHub first if it is really to be replaced."
   done
   gh release upload "$PUBLISH" -R "$REPO" "$ARTIFACT" "$ARTIFACT.sha256" "$OUT/appcast.xml"
-  gh release view "$PUBLISH" -R "$REPO" --json isDraft,isPrerelease --jq 'select(.isDraft or .isPrerelease)' | grep -q . \
-    && echo "warning: $PUBLISH is a draft or a pre-release, so releases/latest (the update feed) does not point at it."
+  # Last, so releases/latest (the update feed) only moves once this release has its appcast.xml. Changes nothing on a published release.
+  gh release edit "$PUBLISH" -R "$REPO" --draft=false >/dev/null
+  [[ "$(gh api "repos/$REPO/releases/latest" --jq .tag_name)" == "$PUBLISH" ]] \
+    || echo "warning: releases/latest (the update feed) does not point at $PUBLISH. Is it a pre-release, or is a newer release published?"
   echo "published: https://github.com/$REPO/releases/tag/$PUBLISH"
   exit 0
 fi
