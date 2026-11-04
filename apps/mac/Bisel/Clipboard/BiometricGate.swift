@@ -28,8 +28,9 @@ enum BiometricGate {
 
     /// `grantsCredit: false` for every caller that is not the command panel (unlock, edit/delete/revoke gates, main-window copy), so
     /// a prompt for something else can never pay for a later password read.
-    static func authenticate(reason: String, grantsCredit: Bool = true) async throws {
-        try await evaluate(reason: reason)
+    /// `timeout` dismisses an unanswered prompt, so an agent's request cannot sit on screen and be approved long after it gave up.
+    static func authenticate(reason: String, grantsCredit: Bool = true, timeout: Duration? = nil) async throws {
+        try await evaluate(reason: reason, timeout: timeout)
         if grantsCredit { credit = .now }
     }
 
@@ -38,7 +39,7 @@ enum BiometricGate {
     static var promptCount = 0
     #endif
 
-    private static func evaluate(reason: String) async throws {
+    private static func evaluate(reason: String, timeout: Duration?) async throws {
         #if DEBUG
         promptCount += 1
         // DEBUG-ONLY escape hatch so headless flow runs can exercise copy/fill without a fingerprint.
@@ -54,6 +55,13 @@ enum BiometricGate {
         guard ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &err) else {
             throw Failure.unavailable(err?.localizedDescription ?? "unknown")
         }
+        let expiry = timeout.map { limit in
+            Task {
+                try? await Task.sleep(for: limit)
+                if !Task.isCancelled { ctx.invalidate() }
+            }
+        }
+        defer { expiry?.cancel() }
         do {
             let ok = try await ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
             if !ok { throw Failure.denied }
