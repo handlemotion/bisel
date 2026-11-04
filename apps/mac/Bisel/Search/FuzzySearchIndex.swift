@@ -49,6 +49,8 @@ final class FuzzySearchIndex {
 
     private var entries: [Entry] = []
     private var indexByID: [String: Int] = [:]
+    /// Positions in `entries`, A to Z: what an empty query lists. Sorted once per build, not per panel open.
+    private var alphabetical: [Int] = []
 
     private static let literal = FuzzyMatcher(config: MatchConfig(minScore: 0.5, algorithm: .editDistance(EditDistanceConfig(
         maxEditDistance: 0, longQueryMaxEditDistance: 0, prefixWeight: 2.0, substringWeight: 0.8,
@@ -66,6 +68,7 @@ final class FuzzySearchIndex {
     struct Built: Sendable {
         fileprivate let entries: [Entry]
         fileprivate let indexByID: [String: Int]
+        fileprivate let alphabetical: [Int]
     }
 
     init(records: [SearchRecord] = []) { replace(records) }
@@ -93,12 +96,23 @@ final class FuzzySearchIndex {
             for t in r.tags { f.append(Self.field(Self.wTag, t)) }
             return Entry(record: r, fields: f)
         }
-        return Built(entries: entries, indexByID: Dictionary(uniqueKeysWithValues: entries.enumerated().map { ($1.record.id, $0) }))
+        return Built(entries: entries, indexByID: Dictionary(uniqueKeysWithValues: entries.enumerated().map { ($1.record.id, $0) }),
+                     alphabetical: entries.indices.sorted { comesFirst(entries[$0].record, entries[$1].record) })
+    }
+
+    /// Finder's order: case and accents ignored, "Site 2" before "Site 10". Same titles settle on username, then id.
+    private nonisolated static func comesFirst(_ a: SearchRecord, _ b: SearchRecord) -> Bool {
+        switch a.title.localizedStandardCompare(b.title) {
+        case .orderedAscending: true
+        case .orderedDescending: false
+        case .orderedSame: (a.username, a.id) < (b.username, b.id)
+        }
     }
 
     func install(_ built: Built) {
         entries = built.entries
         indexByID = built.indexByID
+        alphabetical = built.alphabetical
     }
 
     func recordUse(id: String) {
@@ -111,11 +125,7 @@ final class FuzzySearchIndex {
 
     func search(_ query: String, limit: Int) -> [SearchRecord] {
         let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
-        if terms.isEmpty {
-            return entries.map(\.record)
-                .sorted { ($0.lastUsed, $0.useCount) > ($1.lastUsed, $1.useCount) }
-                .prefix(limit).map { $0 }
-        }
+        if terms.isEmpty { return alphabetical.prefix(limit).map { entries[$0].record } }
         let prepared = terms.map {
             Term(text: $0, tolerant: $0.count >= 5, literalQ: Self.literal.prepare($0), tolerantQ: Self.tolerant.prepare($0))
         }

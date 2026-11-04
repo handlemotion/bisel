@@ -42,7 +42,7 @@ protocol VaultSearchSource: AnyObject, Sendable {
     var isEmpty: Bool { get }
     /// Footer label shown when the source is not the real vault (e.g. "DEV FIXTURE").
     var provenanceLabel: String? { get }
-    /// `query` empty returns recents/frequent. Results are best-first.
+    /// `query` empty returns the items A to Z. Otherwise results are best-first.
     func search(_ query: String, limit: Int) -> [VaultSearchResult]
     func recordUse(id: String)
 }
