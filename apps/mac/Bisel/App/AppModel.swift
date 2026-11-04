@@ -24,6 +24,10 @@ final class AppModel {
     /// Set by the SwiftUI scene so non-view code can open the main window.
     var openMainWindow: (() -> Void)?
 
+    /// Answers the `bisel` tool (docs/AGENT-CLI.md). Nil only when the box store could not open.
+    private(set) var agentBroker: AgentBroker?
+    private var agentListener: AgentListener?
+
     private init() {
         #if BISEL_DEV_FIXTURE
         vault = BiselEnvironment.useDevFixture ? DevFixtureVault() : service
@@ -41,8 +45,12 @@ final class AppModel {
 
     func start() {
         Log.app.notice("bisel started; accessibility trusted=\(AccessibilityInspector.isTrusted())")
-        service.onLockStateChange = { [weak self] in self?.panelModel.refresh() }
+        service.onLockStateChange = { [weak self] in
+            self?.panelModel.refresh()
+            if let broker = self?.agentBroker { Task { await broker.resetSearchWindow() } }
+        }
         service.onRowsChange = { [weak self] in self?.panelModel.refresh(keepingSelection: true) }
+        startAgentListener()
         Task {
             await service.start()
             #if DEBUG
@@ -66,6 +74,21 @@ final class AppModel {
         DebugFlow.runIfRequested()
         DebugTools.runAutopilotIfRequested()
         #endif
+    }
+
+    private func startAgentListener() {
+        guard let vault = service.vault else { return }
+        let broker = AgentBroker(vault: vault, host: AppAgentHost(service: service))
+        let listener = AgentListener(path: AgentAccess.socketPath, clientRequirement: AgentAccess.clientRequirement) { request in
+            await broker.handle(request)
+        }
+        do {
+            try listener.start()
+            agentBroker = broker
+            agentListener = listener
+        } catch {
+            Log.app.error("agent socket could not start")
+        }
     }
 
     /// The settings window on one page (an open window switches to it).

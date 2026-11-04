@@ -155,6 +155,7 @@ struct SecurityPage: View {
     @State private var strict = SecuritySettings.requireTouchID
     @State private var idleLock = VaultService.idleLockMinutes
     @State private var unlockedFor = VaultService.fillWindowMinutes
+    @State private var agents = AgentAccess.isAllowed
 
     /// A change here asks for Touch ID first (the native prompt); cancelled, the setting stays as it was.
     private func guarded<T>(_ value: Binding<T>) -> Binding<T> {
@@ -181,6 +182,17 @@ struct SecurityPage: View {
                         detail: "Off: passwords and codes show and copy freely while the box is unlocked. On: each one asks for Touch ID.") {
                 Toggle("", isOn: guarded($strict)).settingsSwitch()
                     .onChange(of: strict) { _, new in UserDefaults.standard.set(new, forKey: SecuritySettings.requireTouchIDKey) }
+            }
+        }
+        SettingsSection(title: "Agents") {
+            SettingsRow(label: "Allow agents",
+                        detail: "Lets agents ask to use your box with the bl command. Every use asks for Touch ID.") {
+                Toggle("", isOn: guarded($agents)).settingsSwitch()
+                    .onChange(of: agents) { _, new in
+                        try? AgentAccess.set(new)
+                        agents = AgentAccess.isAllowed
+                        if let broker = AppModel.shared.agentBroker { Task { await broker.resetSearchWindow() } }
+                    }
             }
         }
     }

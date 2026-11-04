@@ -14,6 +14,7 @@ What is in the repo:
 | Hardened runtime, secure timestamp      | `ENABLE_HARDENED_RUNTIME: YES`, `OTHER_CODE_SIGN_FLAGS: --options=runtime --timestamp`. No runtime exceptions: the app needs none            |
 | Entitlements                            | `Bisel/Bisel.entitlements`: iCloud container `iCloud.app.bisel` (CloudKit), key-value storage, container environment                        |
 | CloudKit environment                    | `BISEL_ICLOUD_ENVIRONMENT`: `Development` in Debug, `Production` in Release; `iCloudContainerEnvironment: Production` in the export options |
+| Agent CLI (`bisel`, `bl`)               | `project.yml`, target `BiselCLI`, embedded at `Contents/Helpers/bisel`; `Tools/release.sh` checks its identifier `app.bisel.cli`, Developer ID, hardened runtime and timestamp. `docs/AGENT-CLI.md` |
 | Export options                          | `Tools/ExportOptions.plist` (`developer-id`, manual, profile `Bisel Developer ID`)                                                          |
 | Release script                          | `Tools/release.sh`: preflight, archive, export, verify, notarize, staple, assess, DMG or zip, Sparkle appcast; `--publish <tag>` uploads     |
 | In-app updates (Sparkle 2)              | `project.yml`: the `Sparkle` package, `SUFeedURL`, `SUPublicEDKey` and the update keys in `info`; `Bisel/App/Updater.swift`; see "Updates"  |

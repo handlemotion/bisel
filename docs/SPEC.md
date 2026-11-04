@@ -18,7 +18,7 @@ Goals
 
 Non-goals (v1)
 
-- Sharing, multiple users, teams, Windows/Android/Linux, Chromium extension, passkey sign-in, agent CLI, cards/addresses, attachments, SSH keys.
+- Sharing, multiple users, teams, Windows/Android/Linux, Chromium extension, passkey sign-in, cards/addresses, attachments, SSH keys.
 
 ## 2. Milestones
 
@@ -30,7 +30,7 @@ Non-goals (v1)
 | M4  | Safari/system AutoFill credential provider on Mac (shares M2 core)                        | later     |
 | M5  | iPhone app + AutoFill provider, device enrollment by QR                                   | later     |
 | M6  | Apple Passwords credential-exchange import (with passkeys)                                | later     |
-| M7  | Passkey sign-in everywhere; optional Safari extension for URL context; agent CLI          | later     |
+| M7  | Passkey sign-in everywhere; optional Safari extension for URL context                     | later     |
 
 Design now for M4–M7 where it is cheap (shared storage location, key access groups, enrollment endpoints, reserved passkey item type) but do not build them.
 
@@ -44,6 +44,7 @@ bisel/
     project.yml           XcodeGen spec (generates Bisel.xcodeproj; never hand-edit pbxproj)
     Packages/BiselCore/   SwiftPM: crypto, vault, sync client, key store
     Bisel/                Mac app target sources
+    BiselCLI/             the agent CLI `bisel` / `bl`, shipped in the app (docs/AGENT-CLI.md)
     Tools/bisel-dev/      SwiftPM executable: dev CLI driving core flows against a server
 ```
 
@@ -411,6 +412,8 @@ A box lives on the devices that hold it. Each device keeps a full ciphertext rep
 | **Same Apple ID and the 24 words**                                                                                                         | Open the recovery envelope (VK), register a device and act as a full member at once. The server lane's 24 h hold-back does not exist on storage (D7). Rotate the box and revoke the owner's devices.                    | Stay hidden: the `recovery` log entry is shown on every device as the alarm. The owner's answer is a new phrase (`rotateRecovery`) and a revoke of the device.                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | **The network**                                                                                                                            | See TLS to Apple (and to the server when that lane is on): timing and volume.                                                                                                                                           | More than Apple can. CloudKit runs over Apple's TLS, and everything in it is already ciphertext or signed.                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | **A lost or stolen Mac**, locked or asleep                                                                                                 | Hold the local replica (ciphertext), the Secure Enclave device keys (unusable without the owner's biometrics; `biometryCurrentSet`) and an iCloud session.                                                              | Open the box: VK lives only in memory during the fill window and is zeroed on sleep, screen lock and idle. Once the owner revokes it from another device it is the row above.                                                                                                                                                                                                                                                                                                                                                                                                       |
+
+**An agent on this Mac** (a process of this user running the `bisel` tool, docs/AGENT-CLI.md) can ask, and can make a Touch ID prompt appear once the person has turned on Allow agents. It cannot read an item, or use one, without a fresh Touch ID for that use. Nothing prints a secret. What it can do with a secret after an approved `bl run`, or with a field it can read after `bl fill`, is stated in that document.
 
 **Residuals, stated.**
 

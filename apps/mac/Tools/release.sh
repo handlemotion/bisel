@@ -181,6 +181,14 @@ ent com.apple.developer.icloud-container-identifiers | grep -q "$CONTAINER" || d
 ent keychain-access-groups | grep -q "$TEAM.app.bisel" || die "keychain-access-groups does not pin $TEAM.app.bisel: device keys would land in another group."
 ent com.apple.security.get-task-allow | grep -q true && die "get-task-allow is in the signed entitlements."
 [[ -f "$APP/Contents/embedded.provisionprofile" ]] || die "no embedded provisioning profile: macOS would kill the app at launch."
+# The app trusts the agent tool by this signature (AgentPeer): a wrong identifier means every `bl` call is refused.
+TOOL="$APP/Contents/Helpers/bisel"
+[[ -x "$TOOL" ]] || die "no agent tool at $TOOL."
+tool_sig="$(codesign -dvv "$TOOL" 2>&1)"
+grep -q '^Identifier=app.bisel.cli$' <<<"$tool_sig" || die "the agent tool's identifier is not app.bisel.cli."
+grep -q "^Authority=Developer ID Application: .*($TEAM)$" <<<"$tool_sig" || die "the agent tool is not signed with Developer ID ($TEAM)."
+grep -qE '^CodeDirectory .*flags=0x[0-9a-f]*\(runtime\)' <<<"$tool_sig" || die "hardened runtime is not on for the agent tool."
+grep -q '^Timestamp=' <<<"$tool_sig" || die "the agent tool's signature has no secure timestamp."
 "$APPLE/Tools/check-release.sh" "$APP"   # get-task-allow, software keys, fixture and BISEL_DEV_ hooks
 # An app whose SUPublicEDKey is not the keychain key's could never be updated again: Sparkle would reject every later update.
 [[ -x "$SPARKLE_BIN/sign_update" ]] || die "Sparkle's tools are not in $SPARKLE_BIN (did the archive resolve the Sparkle package?)."

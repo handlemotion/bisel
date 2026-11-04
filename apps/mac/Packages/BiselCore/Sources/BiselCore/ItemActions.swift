@@ -96,9 +96,10 @@ extension Vault {
     /// another device in the meantime are kept, so a stale form cannot overwrite newer data. When both sides changed the same
     /// field differently (or the item was deleted elsewhere) nothing is written and `ItemConflict` is thrown; call again with
     /// `resolution`. A write needs a fresh biometric check (not for `unchanged` or `keepBoth`).
+    /// `gate` replaces the configured check for this call: an agent's edit shows its own prompt, it is never skipped.
     /// Throws `ItemValidationError`, `ItemConflict`, `ItemActionError.draftIsNew`, `VaultError.locked`.
     @discardableResult
-    public func updateItem(_ draft: ItemDraft, resolution: ConflictResolution? = nil) async throws -> UpdateOutcome {
+    public func updateItem(_ draft: ItemDraft, resolution: ConflictResolution? = nil, gate: (any BiometricGate)? = nil) async throws -> UpdateOutcome {
         guard let base = draft.base else { throw ItemActionError.draftIsNew }
         let content = try ItemValidator.validated(draft)
         var authenticated = false
@@ -115,7 +116,7 @@ extension Vault {
             case .write(var item, let remote, let keepPrevious):
                 // The check is a suspension point: the store may change meanwhile, so decide again afterwards and commit
                 // without another suspension.
-                if !authenticated { try await config.gate.authenticate(reason: "Edit \(base.title)"); authenticated = true; continue }
+                if !authenticated { try await (gate ?? config.gate).authenticate(reason: "Edit \(base.title)"); authenticated = true; continue }
                 item.updatedAt = Self.storedNow()
                 try writeItem(try checked(item), key: k, keepPrevious: keepPrevious || keepsLocalHistory())
                 return .saved(item, mergedRemoteChanges: remote)
@@ -126,13 +127,13 @@ extension Vault {
     // MARK: delete / undo
 
     /// Moves an item to the trash (kept 30 days, encrypted) after a fresh biometric check. Sync carries the delete to the
-    /// server. Offer `undoTrash(receipt)` for `TrashReceipt.undoWindow` seconds.
+    /// server. Offer `undoTrash(receipt)` for `TrashReceipt.undoWindow` seconds. `gate` replaces the configured check, as in `updateItem`.
     /// Throws `VaultError.notFound`, `VaultError.locked`, or the biometric gate's error (cancel).
-    public func trashItem(id: String) async throws -> TrashReceipt {
+    public func trashItem(id: String, gate: (any BiometricGate)? = nil) async throws -> TrashReceipt {
         let first = try requireKey()
         guard let rec = try store.record(id), !rec.deleted else { throw VaultError.notFound(id) }
         let title = (try? decrypt(rec, first))?.title ?? ""
-        try await config.gate.authenticate(reason: "Delete item")
+        try await (gate ?? config.gate).authenticate(reason: "Delete item")
         let k = try requireKey()
         guard let rec = try store.record(id), !rec.deleted else { throw VaultError.notFound(id) }
         let item = try? decrypt(rec, k)
