@@ -17,6 +17,7 @@ Flow tests: `Packages/BiselCore/Tests/BiselFlowTests/ItemActionFlowTests.swift`.
 | `await items.trash(result)` | `TrashResult`: `.trashed(receipt)`, `.cancelled`, `.locked`, `.failed(text)` |
 | `items.undoable` / `await items.undo()` | the undo offer for `TrashReceipt.undoWindow` (10 s), then it disappears |
 | `await items.recentlyDeleted()` / `try await items.restore(receipt)` | "Recently deleted" list (30 days) and its restore |
+| `model.perform(.moveToTrash, on: result)` | the "Move to Trash" action of the ··· and ⌘K menus: `items.trash`, then a toast, and the selection stays in place |
 
 `items.onChange` is wired to `CommandPanelModel.refresh()`, so the result list updates after every successful change.
 
@@ -95,7 +96,7 @@ If the item changed again while the conflict screen was open, `resolve` does not
 
 `items.trash(result)` asks for Touch ID ("Delete item") and moves the item to the local trash (30 days, encrypted); sync carries the delete to the server. On `.trashed(receipt)` show the toast with `receipt.title`; `items.undoable` stays set for `TrashReceipt.undoWindow` (10 s) and `items.undo()` brings the item back with the same id and contents, without Touch ID. After the window the item is still in `recentlyDeleted()`; `restore(receipt)` then asks for Touch ID. A cancelled Touch ID is `.cancelled` (nothing changed, show nothing). Undoing an item already restored elsewhere returns it unchanged. If the receipt's trash entry is gone (30 days) `undoTrash` throws `ItemActionError.undoUnavailable`.
 
-There is no "delete forever": a deleted item stays recoverable for 30 days on this Mac and in the server's history, which is what makes the undo safe. Say "Deleted" rather than "Erased".
+Settings → Trash (`TrashSettings`) lists `recentlyDeleted()` and offers restore and `Vault.eraseFromTrash(receipt)`, which asks for Touch ID and removes every version this Mac's trash keeps of the item, past edits included. It cannot reach backups already made or a self-hosted server's history, and the page says so. An item that never reached a lane leaves no tombstone, so merging an older backup can bring it back. Items not erased stay recoverable for 30 days, which is what makes the undo safe. Say "Deleted" rather than "Erased".
 
 ## Generator
 
@@ -113,4 +114,4 @@ Errors: `.lengthOutOfRange`, `.noCharacterClass` (all four off), `.wordCountOutO
 
 ## Not provided
 
-Tags/URL de-duplication across items, password-reuse or breach checks, bulk delete, permanent erase, and editing passkey credentials.
+Tags/URL de-duplication across items, password-reuse or breach checks, bulk delete, and editing passkey credentials.

@@ -313,6 +313,35 @@ struct ItemActionFlowTests {
         _ = receipt
     }
 
+    @Test("a permanently deleted item leaves no version on this Mac, and a refused Touch ID erases nothing")
+    func eraseFromTrashLeavesNothing() async throws {
+        let gate = RecordingGate()
+        let a = try Device("a", gate: gate)
+        _ = try await a.vault.bootstrapLocal(deviceName: "a")
+        let item = try await a.vault.createItem({ var d = ItemDraft(); d.title = "Gone"; d.password = "old"; return d }())
+        var edit = ItemDraft(editing: item)
+        edit.password = "new"
+        _ = try await a.vault.updateItem(edit)
+        let other = try await a.vault.createItem({ var d = ItemDraft(); d.title = "Stays"; d.password = "s"; return d }())
+        let receipt = try await a.vault.trashItem(id: item.id)
+        _ = try await a.vault.trashItem(id: other.id)
+        #expect(try await a.vault.trash().filter { $0.itemID == item.id }.count == 2, "the deleted version and the one its edit replaced")
+
+        gate.deny(true)
+        await #expect(throws: KeyStoreError.userCancelled) { try await a.vault.eraseFromTrash(receipt) }
+        gate.deny(false)
+        #expect(try await a.vault.recentlyDeleted().count == 2)
+
+        try await a.vault.eraseFromTrash(receipt)
+        #expect(gate.calls.last == "Permanently delete Gone")
+
+        let relaunched = try a.relaunched()
+        try await relaunched.unlock()
+        #expect(try await relaunched.trash().allSatisfy { $0.itemID == other.id }, "no version of the erased item survives")
+        #expect(try await relaunched.recentlyDeleted().map(\.itemID) == [other.id], "the rest of the trash is untouched")
+        await #expect(throws: ItemActionError.undoUnavailable) { _ = try await relaunched.undoTrash(receipt) }
+    }
+
     private func expectConflict(_ body: () async throws -> Void) async throws -> ItemConflict {
         do { try await body() } catch let c as ItemConflict { return c }
         Issue.record("expected a conflict"); throw ItemActionError.undoUnavailable

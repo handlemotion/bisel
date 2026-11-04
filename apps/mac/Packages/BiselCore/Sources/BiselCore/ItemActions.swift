@@ -169,6 +169,21 @@ extension Vault {
         return item
     }
 
+    /// Deletes a trashed item for good, after a fresh biometric check: every version this device keeps of it goes, past edits
+    /// included, so nothing here can bring it back. Backups already made and a server's history are out of reach.
+    /// If the item is already back (restored elsewhere) only this receipt's entry goes and the item stays.
+    /// Throws `VaultError.locked`, or the biometric gate's error (cancel).
+    public func eraseFromTrash(_ receipt: TrashReceipt) async throws {
+        _ = try requireKey()
+        try await config.gate.authenticate(reason: "Permanently delete \(receipt.title)")
+        _ = try requireKey()
+        if let live = try store.record(receipt.itemID), !live.deleted {
+            try store.removeFromTrash(key: receipt.trashKey)
+        } else {
+            try store.removeFromTrash(id: receipt.itemID)
+        }
+    }
+
     /// Items moved to the trash on this device in the last 30 days that are not back yet, newest first.
     /// Each receipt works with `undoTrash` (which asks for a biometric check once its undo window is over).
     public func recentlyDeleted() throws -> [TrashReceipt] {
