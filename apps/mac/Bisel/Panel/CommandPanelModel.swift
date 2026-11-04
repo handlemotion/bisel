@@ -2,7 +2,7 @@ import AppKit
 import Observation
 
 enum PanelAction: String, CaseIterable, Identifiable {
-    case copyPassword, copyUsername, copyTOTP, fill, fillUserTabPassword, fillUsername, fillPassword, fillTOTP, openURL
+    case copyPassword, copyUsername, copyTOTP, fill, fillUserTabPassword, fillUsername, fillPassword, fillTOTP, openURL, moveToTrash
 
     var id: String { rawValue }
 
@@ -18,6 +18,7 @@ enum PanelAction: String, CaseIterable, Identifiable {
         case .fillPassword: String(localized: "Fill password")
         case .fillTOTP: String(localized: "Fill one-time code")
         case .openURL: String(localized: "Open site")
+        case .moveToTrash: String(localized: "Move to Trash")
         }
     }
 
@@ -53,7 +54,7 @@ enum PanelAction: String, CaseIterable, Identifiable {
             case .copyPassword, .fillPassword, .fillUserTabPassword: item.hasPassword
             case .copyUsername, .fillUsername: !item.username.isEmpty
             case .openURL: !item.domain.isEmpty
-            case .fill: true
+            case .fill, .moveToTrash: true
             }
         }
     }
@@ -63,6 +64,7 @@ enum PanelAction: String, CaseIterable, Identifiable {
         case .copyPassword, .copyUsername, .copyTOTP: "doc.on.doc"
         case .fill, .fillUserTabPassword, .fillUsername, .fillPassword, .fillTOTP: "keyboard"
         case .openURL: "safari"
+        case .moveToTrash: "trash"
         }
     }
 }
@@ -134,8 +136,6 @@ final class CommandPanelModel {
     enum Mode: Equatable { case search, actions(VaultSearchResult) }
     struct Notice: Equatable { var text: String; var isError: Bool }
 
-    static let resultLimit = 50
-
     @ObservationIgnored let source: VaultSearchSource
     @ObservationIgnored let secrets: VaultSecretProvider
     /// Add / edit / delete / generate, see ACTIONS.md.
@@ -150,7 +150,7 @@ final class CommandPanelModel {
 
     var query = "" { didSet { if query != oldValue { refresh() } } }
     private(set) var results: [VaultSearchResult] = []
-    /// 0 = best match / most recent, at the top of the list.
+    /// 0 = best match (first A to Z with no query), at the top of the list.
     var selected = 0 { didSet { if selected != oldValue { prepareValues() } } }
     var mode: Mode = .search
     var actionIndex = 0
@@ -191,20 +191,23 @@ final class CommandPanelModel {
     @ObservationIgnored var pillFrames: [PillID: CGRect] = [:]
     @ObservationIgnored var valueFrames: [ValueRowID: CGRect] = [:]
     @ObservationIgnored var listFrame: CGRect = .zero
-    /// Scroll offset of the list (panel space), kept current by the view; rows are fixed-height so hit-testing is arithmetic.
+    /// Scroll offset of the list, kept current by the view.
     @ObservationIgnored var scrollOffset: CGFloat = 0
-    @ObservationIgnored var rowPitch: CGFloat = 49
-    /// Empty space above the first row inside the list's scroll content (kept in sync by the view).
-    @ObservationIgnored var listTopInset: CGFloat = 0
     @ObservationIgnored var lastKeyboardAt: ContinuousClock.Instant = .now
 
     var isUnlocked: Bool { source.isUnlocked }
     /// Unlocked, loaded, and nothing in it: the panel shows the import state instead of an empty list.
     var boxIsEmpty: Bool { source.isUnlocked && source.isEmpty }
     var actions: [PanelAction] {
-        if case .actions(let item) = mode { return PanelAction.available(for: item) }
+        if case .actions(let item) = mode { return availableActions(for: item) }
         return PanelAction.allCases
     }
+
+    /// `PanelAction.available`, less what this source cannot do (the dev fixture has no trash).
+    func availableActions(for item: VaultSearchResult) -> [PanelAction] {
+        PanelAction.available(for: item).filter { $0 != .moveToTrash || items.isAvailable }
+    }
+
     var selectedResult: VaultSearchResult? { results.indices.contains(selected) ? results[selected] : nil }
 
     init(source: VaultSearchSource, secrets: VaultSecretProvider) {
@@ -214,7 +217,7 @@ final class CommandPanelModel {
         items.onChange = { [weak self] in self?.refresh() }
     }
 
-    /// Full reset, run on every show AND every hide: opens as the recents list with the first item selected,
+    /// Full reset, run on every show AND every hide: opens as the full A to Z list with the first item selected,
     /// empty query, no stale state.
     func reset(targetName: String?) {
         self.targetName = targetName
@@ -235,7 +238,7 @@ final class CommandPanelModel {
     func refresh(keepingSelection: Bool = false) {
         let t0 = ContinuousClock.now
         let keep = keepingSelection ? selectedResult?.id : nil
-        results = source.search(query, limit: Self.resultLimit)
+        results = source.search(query, limit: .max)   // the list is lazy: rows are only built as they scroll in
         selected = keep.flatMap { id in results.firstIndex { $0.id == id } } ?? 0
         notice = nil
         prepareValues()
@@ -357,17 +360,12 @@ final class CommandPanelModel {
 
     // MARK: pointer (positions are in the view's top-left "panelRoot" space)
 
-    /// Row under `p`, by arithmetic on the fixed row pitch and the live scroll offset (no per-row geometry to go
-    /// stale after filtering, scrolling or lazy row reuse).
+    /// Row under `p`, from the frames the rows on screen report. Not arithmetic on the scroll offset: the lazy list only
+    /// estimates the rows it has not built, so on a long list an offset does not say which row is where.
     private func rowID(at p: CGPoint) -> String? {
         guard listFrame.contains(p) else { return nil }
-        let y = p.y - listFrame.minY + scrollOffset - listTopInset
-        guard y >= 0 else { return nil }
-        let idx = Int(y / rowPitch)
-        switch mode {
-        case .search: return results.indices.contains(idx) ? results[idx].id : nil
-        case .actions: return actions.indices.contains(idx) ? "action.\(idx)" : nil
-        }
+        let wantsAction = mode != .search
+        return rowFrames.first { $0.key.hasPrefix("action.") == wantsAction && $0.value.contains(p) }?.key
     }
 
     private func pill(at p: CGPoint) -> PillID? {
@@ -598,6 +596,22 @@ final class CommandPanelModel {
         case .copyPassword: runCopy?(.password, item)
         case .copyTOTP: runCopy?(.totp, item)
         case .openURL: runOpenURL?(item)
+        case .moveToTrash: moveToTrash(item)
+        }
+    }
+
+    /// Asks for Touch ID, then the selection stays where it was: on the next item, not back at the top of the list.
+    private func moveToTrash(_ item: VaultSearchResult) {
+        let position = selected
+        Task {
+            switch await items.trash(item) {
+            case .trashed:
+                mode = .search
+                selected = max(min(position, results.count - 1), 0)
+                Toast.shared.show(String(localized: "Moved \(item.title) to Trash"))
+            case .failed(let text): Toast.shared.show(text, isError: true)
+            case .cancelled, .locked: break   // a locked box already shows its unlock state
+            }
         }
     }
 
