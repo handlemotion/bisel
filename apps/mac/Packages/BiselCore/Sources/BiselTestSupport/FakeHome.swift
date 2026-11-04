@@ -54,9 +54,11 @@ public final class FakeHome: BoxHome, @unchecked Sendable {
     }
 
     public func boxes() async throws -> [URL] {
-        let (account, refusal, all) = lock.withLock { (account, refusal, stores[account] ?? [:]) }
-        if account == .signedOut { throw LaneError.accountUnavailable("no iCloud account") }
-        if let refusal { throw Self.error(for: refusal) }
+        let all = try lock.withLock {
+            if account == .signedOut { throw LaneError.accountUnavailable("no iCloud account") }
+            if let refusal { throw Self.error(for: refusal) }
+            return stores[account] ?? [:]
+        }
         return all.filter { !$0.value.records().isEmpty }.keys.sorted().map(Self.address(zone:))
     }
 
