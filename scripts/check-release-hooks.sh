@@ -74,6 +74,14 @@ if found="$(scan "$REL_APP")"; then
 fi
 echo "PASS: no BISEL_DEV_ strings or software key store in $REL_APP"
 
+# The agent CLI holds no keys (docs/AGENT-CLI.md): if it ever links the core, a same-user process has crypto and the store one step away.
+TOOL="$REL_APP/Contents/Helpers/bisel"
+[[ -x "$TOOL" ]] || { echo "FAIL: no agent tool at $TOOL" >&2; exit 1; }
+if strings -a "$TOOL" | grep -qE 'GRDB|ItemSealer|SecureEnclave|VaultKeys'; then
+  echo "FAIL: the agent tool links the core; it must link BiselAgent only" >&2; exit 1
+fi
+echo "PASS: the agent tool is in the bundle and links no core"
+
 # The updater's trust settings (apps/mac/RELEASE.md, "Updates"): without them a shipped build would take an unsigned feed, or could
 # never verify an update at all.
 plist="$REL_APP/Contents/Info.plist"

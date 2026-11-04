@@ -86,6 +86,14 @@ targets:
       # project.dev.yml leaves the condition out, so BiselDev links the module but runs none of it.
       - package: BiselCore
         product: BiselCloudKit
+      # The agent CLI (docs/AGENT-CLI.md), at Contents/Helpers: `bisel` next to `Bisel` in Contents/MacOS would collide on a
+      # case-insensitive disk. Signed on copy, so it ships signed, notarized and updated with the app.
+      - target: BiselCLI
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
     postBuildScripts:
       - name: "Release gate: no get-task-allow"
         basedOnDependencyAnalysis: false
@@ -165,6 +173,33 @@ targets:
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: "Developer ID Application"
           PROVISIONING_PROFILE_SPECIFIER: "Bisel Developer ID"
+          OTHER_CODE_SIGN_FLAGS: "--options=runtime --timestamp"
+
+  # The agent CLI. Links BiselAgent only: no keys, no crypto, no box access (docs/AGENT-CLI.md). The target is not called `bisel`
+  # because its build folder would collide with Bisel's on a case-insensitive disk.
+  BiselCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - path: BiselCLI
+    dependencies:
+      - package: BiselCore
+        product: BiselAgent
+    settings:
+      base:
+        PRODUCT_NAME: bisel
+        # The app checks this identifier and the team on every connection (AgentPeer). No Info.plist file: a tool's identifier
+        # comes from the section embedded in the binary.
+        PRODUCT_BUNDLE_IDENTIFIER: app.bisel.cli
+        GENERATE_INFOPLIST_FILE: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        SKIP_INSTALL: YES
+      configs:
+        Release:
+          # No entitlements, so no provisioning profile. Hardened runtime and no get-task-allow keep the secrets it holds for a
+          # moment away from other processes of this user.
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Developer ID Application"
           OTHER_CODE_SIGN_FLAGS: "--options=runtime --timestamp"
 
   # Tiny native SwiftUI app with username / password / code fields: the "native SwiftUI app"
