@@ -12,7 +12,8 @@ on:
 
 concurrency:
   group: codeql-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # On main a scan always finishes: merges closer together than one Swift scan would otherwise cancel every run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -77,10 +78,13 @@ jobs:
           languages: swift
           build-mode: manual
 
-      # BiselCore holds the crypto, key handling and sync code; the app target adds UI on top.
+      # The shipped code only: BiselCore holds the crypto, key handling and sync, BiselCloudKit the iCloud lane, and the app target
+      # adds UI on top. No SoftwareKeys trait and no test support, which never ship.
       - name: Build BiselCore
         working-directory: apps/mac/Packages/BiselCore
-        run: swift build --traits SoftwareKeys --disable-sandbox
+        run: |
+          swift build --target BiselCore --disable-sandbox
+          swift build --target BiselCloudKit --disable-sandbox
 
       - name: Analyze
         uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
