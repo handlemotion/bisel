@@ -296,6 +296,7 @@ final class CommandPanelController {
     /// moved, so keyboard scrolling under a resting pointer never steals the selection.
     private var pointerTimer: Timer?
     private var lastPointer = NSPoint(x: -1, y: -1)
+    private var lastScrollOffset: CGFloat = 0
 
     private func startPointerTracking() {
         stopPointerTracking()
@@ -314,7 +315,10 @@ final class CommandPanelController {
         if ProcessInfo.processInfo.environment["BISEL_DEV_NOHOVER"] == "1" { return }
         #endif
         let p = NSEvent.mouseLocation
-        guard p != lastPointer else { return }
+        // The list also moves under a still pointer (a flick's inertia). A keyboard scroll keeps the keyboard's selection.
+        let scrolled = model.scrollOffset != lastScrollOffset && ContinuousClock.now - model.lastKeyboardAt > .milliseconds(500)
+        lastScrollOffset = model.scrollOffset
+        guard p != lastPointer || scrolled else { return }
         lastPointer = p
         guard state == .shown, panel.frame.contains(p) else { return }
         model.hover(at: topLeftPoint(fromWindow: panel.convertPoint(fromScreen: p)))

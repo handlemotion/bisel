@@ -179,7 +179,7 @@ enum DebugTools {
             // BISEL_DEV_CLICKROW=n: click the center of list row n through model.click(at:) (must only select).
             if let n = env["BISEL_DEV_CLICKROW"].flatMap(Int.init) {
                 let before = NSPasteboard.general.changeCount
-                let y = m.listFrame.minY + 24.5 + Double(n) * m.rowPitch - m.scrollOffset
+                let y = m.rowFrames[m.results[n].id]?.midY ?? 0
                 let handled = m.click(at: CGPoint(x: m.listFrame.midX, y: y))
                 try? await Task.sleep(for: .milliseconds(400))
                 Log.panel.notice("autopilot click row \(n): handled=\(handled) selected=\(m.selected) panelVisible=\(c.isVisible) pasteboardChanged=\(NSPasteboard.general.changeCount != before)")

@@ -5,7 +5,7 @@ import BiselCore
 /// The settings window, all native: a split view with the Mac user's account row and the pages in the sidebar, each
 /// page a grouped form. System colors, fonts and controls throughout, so it follows the Mac's light/dark appearance.
 enum SettingsPage: String, CaseIterable, Identifiable {
-    case account, general, appearance, fill, security, sync, backup, advanced, about
+    case account, general, appearance, fill, security, sync, backup, trash, advanced, about
     var id: String { rawValue }
     /// The page Settings opens on, and the last one shown.
     static let defaultsKey = "settings.page"
@@ -25,6 +25,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .security: String(localized: "Security")
         case .sync: String(localized: "Sync")
         case .backup: String(localized: "Backup & Import")
+        case .trash: String(localized: "Trash")
         case .advanced: String(localized: "Advanced")
         case .about: String(localized: "About")
         }
@@ -40,6 +41,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .security: "touchid"
         case .sync: "icloud.fill"
         case .backup: "externaldrive.fill"
+        case .trash: "trash.fill"
         case .advanced: "wrench.and.screwdriver.fill"
         case .about: "info"
         }
@@ -54,6 +56,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .security: .red
         case .sync: .blue
         case .backup: .green
+        case .trash: .orange
         case .about: .cyan
         }
     }
@@ -68,13 +71,14 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .security: String(localized: "When your box locks, and when it asks for Touch ID.")
         case .sync: String(localized: "Where your box lives, and the devices that share it.")
         case .backup: String(localized: "An encrypted backup, and passwords from other apps.")
+        case .trash: String(localized: "Bring back what you deleted, or delete it for good.")
         case .advanced: String(localized: "A self-hosted server, if you run one.")
         case .about: String(localized: "A zero-knowledge password manager for your Mac.")
         }
     }
 
     /// Sidebar groups below the account row.
-    static let main: [SettingsPage] = [.general, .appearance, .fill, .security, .sync, .backup]
+    static let main: [SettingsPage] = [.general, .appearance, .fill, .security, .sync, .backup, .trash]
     static let more: [SettingsPage] = [.advanced, .about]
 }
 
@@ -154,6 +158,7 @@ struct SettingsView: View {
         case .security: SecurityPage(service: service)
         case .sync: SyncSettings(service: service)
         case .backup: BackupSettings(service: service)
+        case .trash: TrashSettings(service: service)
         case .advanced: AdvancedSettings(service: service)
         case .about: AboutSettings()
         }

@@ -8,6 +8,7 @@ protocol VaultItemActions: AnyObject {
     func trashItem(id: String) async throws -> TrashReceipt
     func undoTrash(_ receipt: TrashReceipt) async throws -> Item
     func recentlyDeleted() async throws -> [TrashReceipt]
+    func eraseFromTrash(_ receipt: TrashReceipt) async throws
     func draftForEditing(id: String) async throws -> ItemDraft
 }
 
@@ -43,6 +44,11 @@ extension VaultService: VaultItemActions {
 
     func recentlyDeleted() async throws -> [TrashReceipt] {
         try await perform(nil) { try await $0.recentlyDeleted() }
+    }
+
+    /// The trash is local, so nothing changes for rows or sync.
+    func eraseFromTrash(_ receipt: TrashReceipt) async throws {
+        try await perform(nil) { try await $0.eraseFromTrash(receipt) }
     }
 
     /// A draft for the edit form of the item with this id (it decrypts the item; no biometric check).

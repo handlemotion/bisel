@@ -14,6 +14,7 @@ struct CommandPanelView: View {
     @FocusState private var searchFocused: Bool
     /// Filling needs the Accessibility permission (copying does not): while it is off, a pill floats over the detail pane.
     @State private var access = AppModel.shared.accessibility
+    @State private var listAtEnd = false
 
     @Environment(\.accessibilityPreferences) private var a11y
     @AppStorage(PanelMaterial.defaultsKey) private var materialRaw = PanelMaterial.glass.rawValue
@@ -113,7 +114,11 @@ struct CommandPanelView: View {
     private var listColumn: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
-                LazyVStack(spacing: 0) { rows }
+                LazyVStack(spacing: 0) {
+                    rows
+                    // Same gap below the last island; a row, not padding, so the keyboard can scroll to it.
+                    Color.clear.frame(height: theme.spacing.s).id(Self.listEnd).accessibilityHidden(true)
+                }
                     .frame(width: theme.card.listWidth)  // exactly the column width: long titles truncate, never widen the content
                     .padding(.top, theme.spacing.s)  // same gap above the first island as at its sides
             }
@@ -123,38 +128,43 @@ struct CommandPanelView: View {
             .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y + $0.contentInsets.top } action: { _, new in
                 model.scrollOffset = new
             }
+            // State, not the model's offset: a keyboard scroll to the last row lands after the render its selection caused.
+            .onScrollGeometryChange(for: Bool.self) { $0.visibleRect.maxY >= $0.contentSize.height - 1 } action: { _, new in
+                listAtEnd = new
+            }
             .onChange(of: model.selected) { _, new in
                 defer { model.pointerDriven = false }
                 guard !model.pointerDriven, model.results.indices.contains(new) else { return }
-                proxy.scrollTo(model.results[new].id)
+                model.lastKeyboardAt = .now   // typing and reopening move the list too: the pointer must not take over
+                if new == model.results.count - 1 { proxy.scrollTo(Self.listEnd, anchor: .bottom) }
+                else { proxy.scrollTo(model.results[new].id) }
             }
             .onChange(of: model.actionIndex) { _, new in
                 defer { model.pointerDriven = false }
-                if !model.pointerDriven { proxy.scrollTo("action.\(new)") }
+                guard !model.pointerDriven else { return }
+                if new == model.actions.count - 1 { proxy.scrollTo(Self.listEnd, anchor: .bottom) }
+                else { proxy.scrollTo("action.\(new)") }
             }
         }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("panelRoot")) } action: {
             model.listFrame = $0
-            model.listTopInset = theme.spacing.s
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(model.mode == .search ? Text("Logins") : Text("Actions"))
         .accessibilityIdentifier("panel.list")
     }
 
+    private static let listEnd = "list.end"
+
     /// Soft fades where list content runs past the edges: top once scrolled, bottom while more rows remain below.
     private var overflowFade: some View {
-        let rowCount = model.mode == .search ? model.results.count : model.actions.count
-        let contentHeight = CGFloat(rowCount) * (theme.card.rowHeight + theme.card.hairline) + theme.spacing.s
-        let viewport = model.listFrame.height
         let fadeTop = model.scrollOffset > 1
-        let fadeBottom = viewport > 0 && model.scrollOffset + viewport < contentHeight - 1
         return VStack(spacing: 0) {
             LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
                 .frame(height: fadeTop ? theme.spacing.l * 2 : 0)
             Rectangle()
             LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: fadeBottom ? theme.spacing.l * 2 : 0)
+                .frame(height: listAtEnd ? 0 : theme.spacing.l * 2)
         }
     }
 
@@ -166,6 +176,7 @@ struct CommandPanelView: View {
                     SiteIcon(title: r.title, domain: r.domain)
                     Text(r.title).font(theme.font(theme.fonts.row)).lineLimit(1)
                 }
+                .trackFrame(id: r.id, model: model)
                 .id(r.id)
                 // One element per login: title, then "user, site, 3 of 12", selected state, press = select.
                 // Custom actions give VoiceOver / Voice Control the same routes as the keys.
@@ -192,6 +203,7 @@ struct CommandPanelView: View {
                     Spacer(minLength: 0)
                     if let k = a.shortcut { Keycap(k) }
                 }
+                .trackFrame(id: "action.\(i)", model: model)
                 .id("action.\(i)")
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(a.title)
@@ -276,7 +288,7 @@ private struct ListRow<Content: View>: View {
     var body: some View {
         VStack(spacing: 0) {
             // "Island" row: the hover/selection fill is an inset rounded shape, not a full-width bar. The row keeps its
-            // 48 pt + 1 pt pitch so the pointer hit-testing arithmetic is unchanged.
+            // 48 pt + 1 pt pitch, so reported row frames meet with no gap for the pointer to fall through.
             HStack(spacing: theme.spacing.m) { content; Spacer(minLength: 0) }
                 .padding(.horizontal, theme.spacing.s)
                 .frame(height: theme.card.rowHeight - theme.spacing.xs)
@@ -291,9 +303,10 @@ private struct ListRow<Content: View>: View {
 }
 
 private extension View {
-    /// Reports this view's frame (panel space) so the pointer logic can map positions to rows.
+    /// Reports this view's frame (panel space) so the pointer logic can map positions to rows, for as long as it exists.
     func trackFrame(id: String, model: CommandPanelModel) -> some View {
         onGeometryChange(for: CGRect.self) { $0.frame(in: .named("panelRoot")) } action: { model.rowFrames[id] = $0 }
+            .onDisappear { model.rowFrames[id] = nil }
     }
     func trackValue(_ id: ValueRowID, model: CommandPanelModel) -> some View {
         onGeometryChange(for: CGRect.self) { $0.frame(in: .named("panelRoot")) } action: { model.valueFrames[id] = $0 }
@@ -388,13 +401,19 @@ private struct MoreActionsMenu: View {
 
     var body: some View {
         Menu {
-            let available = PanelAction.available(for: item)
+            let available = model.availableActions(for: item)
             ForEach(available.filter { [.copyPassword, .copyUsername, .copyTOTP].contains($0) }) { actionButton($0) }
             Divider()
             ForEach(available.filter { [.fill, .fillUserTabPassword, .fillUsername, .fillPassword, .fillTOTP].contains($0) }) { actionButton($0) }
             if available.contains(.openURL) {
                 Divider()
                 actionButton(.openURL)
+            }
+            if available.contains(.moveToTrash) {
+                Divider()
+                Button(role: .destructive) { model.perform(.moveToTrash, on: item) } label: {
+                    Label(PanelAction.moveToTrash.title, systemImage: PanelAction.moveToTrash.symbol)
+                }
             }
         } label: {
             Image(systemName: "ellipsis")

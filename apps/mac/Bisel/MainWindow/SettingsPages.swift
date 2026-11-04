@@ -8,6 +8,7 @@ import BiselCore
 ///  - General: how Bisel starts and the command panel.  Appearance: theme and site icons.
 ///  - Fill: getting values out (Accessibility permission, copying).  Security: locking.
 ///  - Sync: where the box lives (iCloud status, adding a device, devices).  Backup & Import: the backup file, imports.
+///  - Trash: what was deleted on this Mac.
 ///  - Advanced: the optional self-hosted server.  About: version and source.
 
 struct AccountSettings: View {
@@ -275,6 +276,82 @@ struct BackupSettings: View {
             guard panel.runModal() == .OK, let url = panel.url else { return }
             do { try await service.exportBackup(to: url); backupMessage = "Backup written to \(url.lastPathComponent)" }
             catch { backupMessage = describe(error) }
+        }
+    }
+}
+
+/// Items deleted on this Mac in the last 30 days: restore or delete for good. Both ask for Touch ID (`Vault.undoTrash`,
+/// `Vault.eraseFromTrash`); titles only, nothing here decrypts a secret into the view.
+struct TrashSettings: View {
+    let service: VaultService
+    @State private var deleted: [TrashReceipt]?
+    @State private var message: String?
+    @State private var erasing: TrashReceipt?
+
+    var body: some View {
+        SettingsSection(title: "Deleted items",
+                        footer: message ?? String(localized: "Items stay here for 30 days after you delete them on this Mac, then they are gone.")) {
+            if !service.isUnlocked {
+                SettingsRow(label: String(localized: "Your box is locked"), detail: String(localized: "Unlock it to see what is in the Trash.")) {
+                    Button("Unlock…") { unlock() }
+                }
+            } else if let deleted {
+                if deleted.isEmpty { Text("The Trash is empty").foregroundStyle(.secondary) }
+                ForEach(deleted) { item in
+                    SettingsRow(label: DisplayText.clean(item.title), detail: age(of: item)) {
+                        HStack {
+                            Button("Restore") { restore(item) }
+                            Button("Delete…", role: .destructive) { erasing = item }
+                        }
+                    }
+                }
+            }
+        }
+        // Also when the panel moves something here while the page is open.
+        .task(id: "\(service.isUnlocked) \(service.rows.count)") { await load() }
+        .alert(String(localized: "Permanently delete \(DisplayText.clean(erasing?.title ?? ""))?"),
+               isPresented: Binding(get: { erasing != nil }, set: { if !$0 { erasing = nil } }), presenting: erasing) { item in
+            Button("Delete Permanently", role: .destructive) { erase(item) }
+            Button("Cancel", role: .cancel) { }
+        } message: { _ in
+            Text("This can't be undone. Backups you already made, and a self-hosted server's history, still hold it.")
+        }
+    }
+
+    private func age(of item: TrashReceipt) -> String {
+        let left = max(Int((item.deletedAt.addingTimeInterval(TrashReceipt.retention).timeIntervalSinceNow / 86_400).rounded(.up)), 1)
+        return String(localized: "Deleted \(item.deletedAt.formatted(.relative(presentation: .named))), \(left) days left")
+    }
+
+    private func load() async {
+        guard service.isUnlocked else { deleted = nil; return }
+        do { deleted = try await service.recentlyDeleted() }
+        catch { message = describe(error) }
+    }
+
+    private func unlock() {
+        Task {
+            do { try await AppModel.shared.unlockIfLocked("Unlock your box to open the Trash") }
+            catch KeyStoreError.userCancelled { }
+            catch { message = describe(error) }
+        }
+    }
+
+    private func restore(_ item: TrashReceipt) {
+        run { _ = try await service.undoTrash(item); message = String(localized: "\(DisplayText.clean(item.title)) is back in your box.") }
+    }
+
+    private func erase(_ item: TrashReceipt) {
+        run { try await service.eraseFromTrash(item); message = String(localized: "\(DisplayText.clean(item.title)) was permanently deleted.") }
+    }
+
+    /// A cancelled Touch ID changes nothing and says nothing.
+    private func run(_ body: @escaping () async throws -> Void) {
+        Task {
+            do { try await body() }
+            catch KeyStoreError.userCancelled { return }
+            catch { message = describe(error) }
+            await load()
         }
     }
 }

@@ -179,7 +179,7 @@ enum PanelDebugDriver {
         var typing: [String] = []
         for q in ["g", "gi", "git", "gith", "githu", "github", "github 12", "zzzzz", "", "cl", "clo", "cloud"] {
             let t = ContinuousClock.now
-            _ = vault.search(q, limit: CommandPanelModel.resultLimit)
+            _ = vault.search(q, limit: .max)
             let searchOnly = ContinuousClock.now - t
             let d = timed("type") { model.query = q }
             typing.append("'\(q)' search=\(ms(searchOnly)) total=\(ms(d))(\(model.results.count))")

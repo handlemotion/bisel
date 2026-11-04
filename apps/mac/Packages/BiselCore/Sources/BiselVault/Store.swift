@@ -613,6 +613,9 @@ public final class LocalStore: Sendable {
 
     public func removeFromTrash(key: Int) throws { try pool.write { try $0.execute(sql: "DELETE FROM trash WHERE key = ?", arguments: [key]) } }
 
+    /// Every version of an item the trash holds, the deleted one and its past edits alike.
+    public func removeFromTrash(id: String) throws { try pool.write { try $0.execute(sql: "DELETE FROM trash WHERE id = ?", arguments: [id]) } }
+
     /// Tombstones that came from the server and have not been checked against their sealed marker yet.
     public func unverifiedTombstones() throws -> [StoredRecord] {
         try pool.read { db in
