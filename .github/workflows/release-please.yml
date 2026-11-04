@@ -1,6 +1,7 @@
 # Versioned releases: on every push to main, release-please keeps one open release PR (version bump in apps/mac/project.yml
 # plus CHANGELOG.md) from the Conventional Commit titles merged since the last release. Merging that PR tags vX.Y.Z and
-# creates the GitHub release. The notarized DMG is built on a Mac (apps/mac/Tools/release.sh) and attached by hand.
+# creates the GitHub release as a draft. The notarized DMG is built on a Mac (apps/mac/Tools/release.sh), and --publish
+# attaches it and publishes the release, so the update feed (releases/latest) never lands on a release with no appcast.xml.
 # A PR opened with GITHUB_TOKEN does not start CI: close and reopen the release PR to run the required checks.
 name: Release Please
 

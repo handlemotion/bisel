@@ -16,7 +16,7 @@ What is in the repo:
 | CloudKit environment                    | `BISEL_ICLOUD_ENVIRONMENT`: `Development` in Debug, `Production` in Release; `iCloudContainerEnvironment: Production` in the export options |
 | Agent CLI (`bisel`, `bl`)               | `project.yml`, target `BiselCLI`, embedded at `Contents/Helpers/bisel`; `Tools/release.sh` checks its identifier `app.bisel.cli`, Developer ID, hardened runtime and timestamp. `docs/AGENT-CLI.md` |
 | Export options                          | `Tools/ExportOptions.plist` (`developer-id`, manual, profile `Bisel Developer ID`)                                                          |
-| Release script                          | `Tools/release.sh`: preflight, archive, export, verify, notarize, staple, assess, DMG or zip, Sparkle appcast; `--publish <tag>` uploads     |
+| Release script                          | `Tools/release.sh`: preflight, archive, export, verify, notarize, staple, assess, DMG or zip, Sparkle appcast; `--publish <tag>` uploads and publishes |
 | In-app updates (Sparkle 2)              | `project.yml`: the `Sparkle` package, `SUFeedURL`, `SUPublicEDKey` and the update keys in `info`; `Bisel/App/Updater.swift`; see "Updates"  |
 | CloudKit schema                         | `CloudKit/schema.ckdb` (created by step 5) and `Tools/cloudkit-schema.sh`                                                                   |
 
@@ -176,15 +176,18 @@ reset those throwaway boxes.
    rejection the script prints Apple's log.
 4. Smoke test on a Mac or user account that has never run a Debug build: open the DMG, drag Bisel to Applications, launch. There
    should be no Gatekeeper warning beyond the usual "downloaded from the internet" prompt. Create a box in iCloud and check it syncs.
-5. Publish: merge the release-please PR (it tags `vX.Y.Z` and creates the GitHub release), build from that tag's commit, then
+5. Publish: merge the release-please PR (it tags `vX.Y.Z` and creates the GitHub release as a draft, so the update feed stays on
+   the previous release), build from that tag's commit, then
 
    ```bash
    apps/mac/Tools/release.sh --publish vX.Y.Z
    ```
 
-   It uploads the DMG, its `.sha256` and `appcast.xml` to that release with `gh release upload`, after checking that the last build
+   It uploads the DMG, its `.sha256` and `appcast.xml` to that draft with `gh release upload`, after checking that the last build
    is this version from the tagged commit, that the appcast points at this tag and verifies, and that the release does not already
-   have the files. From then on every installed copy finds the update within a day, or at once from "Check for Updates…".
+   have the files. Then it publishes the release and checks that `latest` points at it. If it stops after the upload, finish with
+   `gh release edit vX.Y.Z --draft=false`. From then on every installed copy finds the update within a day, or at once from
+   "Check for Updates…".
 
 ## Updates
 
@@ -192,9 +195,12 @@ Sparkle 2 (`SPUStandardUpdaterController`, `Bisel/App/Updater.swift`), with Spar
 so Sparkle's XPC services are unused.
 
 - **Feed.** `SUFeedURL` is `https://github.com/handlemotion/bisel/releases/latest/download/appcast.xml`: GitHub redirects
-  `latest/download/<name>` to the asset of the newest release that is neither a draft nor a pre-release. Between merging the
-  release PR and `--publish` that release has no `appcast.xml`, so checks get a 404: background checks fail silently, and
-  "Check for Updates…" shows an error. Publish right after the release PR merges.
+  `latest/download/<name>` to the asset of the newest release that is neither a draft nor a pre-release. A published release
+  with no `appcast.xml` would make every check a 404, so release-please creates each release as a draft (`draft` in
+  `release-please-config.json`) and only `--publish` publishes it, after the assets are on it. Until then installed copies keep
+  reading the previous release's feed. Never publish a draft by hand before its assets are attached.
+  GitHub only creates a draft's tag when it is published, so `force-tag-creation` has release-please create it with the draft:
+  `--publish` needs it to check the build's commit, and release-please needs it to find the last release for the next release PR.
 - **Trust.** `SUPublicEDKey` (step 6). `SURequireSignedFeed` makes the app reject a feed whose signature does not verify, and
   `SUVerifyUpdateBeforeExtraction` checks the DMG's EdDSA signature before it is opened. The update is also a Developer ID
   build of the same team, which Sparkle checks against the running app's signature.

@@ -4,6 +4,8 @@
   "include-component-in-tag": false,
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": true,
+  "draft": true,
+  "force-tag-creation": true,
   "bootstrap-sha": "cb18a6d101fb2a52cb8b2814db89cf4e20968f64",
   "packages": {
     ".": {
