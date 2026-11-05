@@ -572,6 +572,31 @@ struct VaultFlowTests {
         #expect(throws: BackupError.tampered, "refused before the phrase is even asked for") { try Vault.inspectBackup(at: bad) }
     }
 
+    @Test("in a box big enough to decrypt on every core, a damaged record is reported as itself and no other item is lost or swapped")
+    func damagedRecordInALargeBox() async throws {
+        let a = try Device("a")
+        _ = try await a.vault.bootstrapLocal(deviceName: "a")
+        var saved: [Item] = []
+        for i in 0..<700 { saved.append(try await a.vault.save(login("Site \(i)", password: "pw-\(i)"))) }
+        let damaged = saved[350]
+        let store = try LocalStore(location: a.location, secrets: FileSecretStore(directory: a.location.directory))
+        var record = try #require(try store.record(damaged.id))
+        record.blob[record.blob.count - 1] ^= 0xff
+        try store.overwrite(with: record)
+
+        let listing = try await a.vault.items()
+        #expect(listing.undecryptable == [damaged.id])
+        let passwords = Dictionary(uniqueKeysWithValues: listing.items.map { ($0.id, $0.password) })
+        #expect(passwords.count == 699)
+        for item in saved where item.id != damaged.id { #expect(passwords[item.id] == item.password, "each id keeps its own contents") }
+    }
+
+    @Test("a device fingerprint does not change between app versions: two Macs on different versions are compared by eye")
+    func fingerprintIsStable() {
+        let keys = DevicePublicKeys(sig: Data(0..<65), enc: Data(100..<165))
+        #expect(keys.fingerprint == "ade9-0743-6fa0-3526-30db-096a")
+    }
+
     @Test("a box without a server keeps replaced and deleted versions in the local trash, and they can be restored")
     func localOnlyHistory() async throws {
         let a = try Device("a")

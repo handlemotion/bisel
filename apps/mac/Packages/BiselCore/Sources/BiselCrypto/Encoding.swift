@@ -17,7 +17,19 @@ public extension Data {
         self.init(base64Encoded: s)
     }
 
-    func hexEncoded() -> String { map { String(format: "%02x", $0) }.joined() }
+    /// Lowercase hex. By table: `String(format:)` per byte took 100 ms over the 5,000 version markers `backupStatus` builds.
+    func hexEncoded() -> String {
+        let digits = Array("0123456789abcdef".utf8)
+        return String(unsafeUninitializedCapacity: count * 2) { out in
+            var i = 0
+            for byte in self {
+                out[i] = digits[Int(byte >> 4)]
+                out[i + 1] = digits[Int(byte & 0x0f)]
+                i += 2
+            }
+            return i
+        }
+    }
 
     init?(hexEncoded string: String) {
         guard string.count % 2 == 0 else { return nil }

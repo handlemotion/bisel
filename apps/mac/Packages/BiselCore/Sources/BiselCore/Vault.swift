@@ -976,12 +976,35 @@ public actor Vault {
         return try ItemCodec.decode(payload, id: rec.id)
     }
 
+    /// Decrypts `records` on every core, in order; nil for a record that does not open. The key is held once for the whole pass:
+    /// taking it per item would put every thread behind the same lock.
+    private func decryptAll(_ records: [StoredRecord], _ k: LockedKey) throws -> [Item?] {
+        let slices = min(max(records.count / 64, 1), ProcessInfo.processInfo.activeProcessorCount)
+        let size = (records.count + slices - 1) / max(slices, 1)
+        var out = [Item?](repeating: nil, count: records.count)
+        try k.withKey { key in
+            out.withUnsafeMutableBufferPointer { buffer in
+                nonisolated(unsafe) let items = buffer   // each slice writes only its own range
+                DispatchQueue.concurrentPerform(iterations: slices) { slice in
+                    let decoder = ItemCodec.decoder()
+                    for i in min(slice * size, records.count)..<min((slice + 1) * size, records.count) {
+                        let rec = records[i]
+                        items[i] = (try? ItemSealer.open(blob: rec.blob, id: rec.id, rev: rec.rev, vaultKey: key))
+                            .flatMap { try? ItemCodec.decode($0, id: rec.id, using: decoder) }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
     /// All live items, decrypted in memory. Requires the vault to be unlocked.
     public func items() throws -> ItemListing {
         let k = try requireKey()
         var out = ItemListing(items: [], undecryptable: [])
-        for rec in try store.liveRecords() where !ReservedRecord.isReserved(rec.id) {
-            if let item = try? decrypt(rec, k) { out.items.append(item) } else { out.undecryptable.append(rec.id) }
+        let records = try store.liveRecords().filter { !ReservedRecord.isReserved($0.id) }
+        for (rec, item) in zip(records, try decryptAll(records, k)) {
+            if let item { out.items.append(item) } else { out.undecryptable.append(rec.id) }
         }
         // On a device that was just enrolled and not yet confirmed: records exist and not one opens means the key is wrong,
         // not the data. Say so loudly instead of showing an empty vault.

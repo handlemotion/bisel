@@ -119,7 +119,8 @@ public enum ItemCodec {
         return e
     }
 
-    private static func decoder() -> JSONDecoder {
+    /// For decoding many items: one decoder serves them all (not shared between threads).
+    public static func decoder() -> JSONDecoder {
         let d = JSONDecoder()
         d.dateDecodingStrategy = .custom { dec in
             let s = try dec.singleValueContainer().decode(String.self)
@@ -137,8 +138,8 @@ public enum ItemCodec {
                                          createdAt: item.createdAt, updatedAt: item.updatedAt, passkey: item.passkey))
     }
 
-    public static func decode(_ data: Data, id: String) throws -> Item {
-        let p = try decoder().decode(ItemPayload.self, from: data)
+    public static func decode(_ data: Data, id: String, using decoder: JSONDecoder = ItemCodec.decoder()) throws -> Item {
+        let p = try decoder.decode(ItemPayload.self, from: data)
         guard p.v == 1 else { throw VaultError.unsupportedPayloadVersion(p.v) }
         return Item(id: id, type: p.type, title: p.title, urls: p.urls, username: p.username, password: p.password,
                     totp: p.totp, notes: p.notes, fields: p.fields, tags: p.tags,
