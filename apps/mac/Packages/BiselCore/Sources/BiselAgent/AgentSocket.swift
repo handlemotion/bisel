@@ -14,9 +14,12 @@ public enum AgentSocket {
         directory + "/" + name + ".sock"
     }
 
-    static var directory: String {
+    static var directory: String { supportDirectory + "/agent" }
+
+    /// `bisel` in Application Support of the account's real home.
+    public static var supportDirectory: String {
         let home = getpwuid(getuid()).flatMap { $0.pointee.pw_dir.map { String(cString: $0) } } ?? NSHomeDirectory()
-        return home + "/Library/Application Support/bisel/agent"
+        return home + "/Library/Application Support/bisel"
     }
 
     /// Sends one request. `serverRequirement` nil skips the signature check (Debug only, the caller decides).
