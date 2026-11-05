@@ -9,10 +9,15 @@ struct BiselApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var themes = ThemeStore.shared
 
-    #if BISEL_LANE_CONTRACT
-    // The opt-in CloudKit contract run takes the process over before any scene, AppModel or vault exists.
-    init() { LaneContractRun.runIfRequested() }
-    #endif
+    init() {
+        #if DEBUG
+        PanelBoxPerf.mark("launch.app struct")
+        #endif
+        #if BISEL_LANE_CONTRACT
+        // The opt-in CloudKit contract run takes the process over before any scene, AppModel or vault exists.
+        LaneContractRun.runIfRequested()
+        #endif
+    }
 
     var body: some Scene {
         MenuBarExtra {
@@ -55,8 +60,14 @@ private struct OpenWindowBridge: ViewModifier {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
+            #if DEBUG
+            PanelBoxPerf.mark("launch.did finish launching")
+            #endif
             AppModel.shared.start()
             _ = Updater.shared   // starts Sparkle's scheduled checks
+            #if DEBUG
+            PanelBoxPerf.mark("launch.app model ready")
+            #endif
         }
         #if BISEL_CLOUDKIT
         // CloudKit's silent pushes for the box's zone. Without the push entitlement registration fails (logged) and the 60 s poll

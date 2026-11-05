@@ -12,6 +12,9 @@ import OSLog
 ///   BISEL_DEV_PANEL_CYCLES=<n>         n open/type/close cycles; logs memory, threads and monitor counts every n/10
 ///   BISEL_DEV_PANEL_PERF=<items>       build an index of <items> synthetic logins; time open, typing, ↓ moves and
 ///                                      full layout, with signposts (category "panel-perf")
+///   BISEL_DEV_PANEL_PERF=box           the same on the real box in BISEL_DATA_DIR (with BISEL_DEV_AUTOUNLOCK=1), plus launch marks,
+///                                      scrolling and the settings pages. Writes medians to BISEL_DEV_PERF_OUT and quits. One
+///                                      launch measures everything: Tools/bisel-bench/app-perf.sh.
 @MainActor
 enum PanelDebugDriver {
     static let signposter = OSSignposter(subsystem: "app.bisel.mac", category: "panel-perf")
@@ -31,6 +34,7 @@ enum PanelDebugDriver {
         }
         if let n = env["BISEL_DEV_PANEL_CYCLES"].flatMap(Int.init) { Task { await cycles(controller, count: n) } }
         if let n = env["BISEL_DEV_PANEL_PERF"].flatMap(Int.init) { Task { await perf(items: n) } }
+        if env["BISEL_DEV_PANEL_PERF"] == "box" { Task { await PanelBoxPerf.run(controller, out: env["BISEL_DEV_PERF_OUT"]) } }
     }
 
     // MARK: AX tree

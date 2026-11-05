@@ -50,12 +50,13 @@ struct AccountSettings: View {
 struct GeneralSettings: View {
     @State private var position = PanelPosition.current
     @State private var material = PanelMaterial.current
-    @State private var login = LoginItem()
+    @State private var login = LoginItem.shared
 
     var body: some View {
         SettingsSection(title: "Startup", footer: login.note) {
             SettingsRow(label: "Open Bisel at login") { Toggle("", isOn: $login.enabled).settingsSwitch() }
         }
+        .task { await login.pageOpened() }
         SettingsSection(title: "Command panel") {
             SettingsRow(label: "Shortcut") { KeyboardShortcuts.Recorder(for: .commandPanel) }
             SettingsRow(label: "Position") {
@@ -75,9 +76,11 @@ struct GeneralSettings: View {
     }
 }
 
-/// "Open Bisel at login": the app's own login item (`SMAppService.mainApp`).
+/// "Open Bisel at login": the app's own login item (`SMAppService.mainApp`). Asking for its status is a blocking call to a system
+/// service, so it happens away from the main thread (at launch and each time the page opens), never while the page is built.
 @MainActor @Observable
-private final class LoginItem {
+final class LoginItem {
+    static let shared = LoginItem()
     private(set) var note: String?
     var enabled: Bool {
         get { status == .enabled }
@@ -89,7 +92,18 @@ private final class LoginItem {
             else if status == .enabled || !newValue { note = nil }
         }
     }
-    private var status = SMAppService.mainApp.status
+    private var status = SMAppService.Status.notRegistered
+
+    /// The switch can change in System Settings while Bisel runs. What the last attempt said does not outlive the page.
+    func pageOpened() async {
+        note = nil
+        await refresh()
+    }
+
+    func refresh() async {
+        let current = await Task.detached(priority: .utility) { SMAppService.mainApp.status }.value
+        if current != status { status = current }
+    }
 }
 
 struct AppearanceSettings: View {

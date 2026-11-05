@@ -14,7 +14,6 @@ struct CommandPanelView: View {
     @FocusState private var searchFocused: Bool
     /// Filling needs the Accessibility permission (copying does not): while it is off, a pill floats over the detail pane.
     @State private var access = AppModel.shared.accessibility
-    @State private var listAtEnd = false
 
     @Environment(\.accessibilityPreferences) private var a11y
     @AppStorage(PanelMaterial.defaultsKey) private var materialRaw = PanelMaterial.glass.rawValue
@@ -66,7 +65,7 @@ struct CommandPanelView: View {
                 noMatchesState
             } else if model.isUnlocked {
                 HStack(spacing: 0) {
-                    listColumn.frame(width: theme.card.listWidth)
+                    PanelList(model: model).frame(width: theme.card.listWidth)
                     Hairline(axis: .vertical)
                     DetailPane(model: model)
                 }
@@ -106,111 +105,6 @@ struct CommandPanelView: View {
             Color.clear
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) { model.resetPosition?() }
-        }
-    }
-
-    // MARK: list column
-
-    private var listColumn: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.vertical) {
-                LazyVStack(spacing: 0) {
-                    rows
-                    // Same gap below the last island; a row, not padding, so the keyboard can scroll to it.
-                    Color.clear.frame(height: theme.spacing.s).id(Self.listEnd).accessibilityHidden(true)
-                }
-                    .frame(width: theme.card.listWidth)  // exactly the column width: long titles truncate, never widen the content
-                    .padding(.top, theme.spacing.s)  // same gap above the first island as at its sides
-            }
-            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-            .scrollIndicators(.never)
-            .mask { overflowFade }
-            .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y + $0.contentInsets.top } action: { _, new in
-                model.scrollOffset = new
-            }
-            // State, not the model's offset: a keyboard scroll to the last row lands after the render its selection caused.
-            .onScrollGeometryChange(for: Bool.self) { $0.visibleRect.maxY >= $0.contentSize.height - 1 } action: { _, new in
-                listAtEnd = new
-            }
-            .onChange(of: model.selected) { _, new in
-                defer { model.pointerDriven = false }
-                guard !model.pointerDriven, model.results.indices.contains(new) else { return }
-                model.lastKeyboardAt = .now   // typing and reopening move the list too: the pointer must not take over
-                if new == model.results.count - 1 { proxy.scrollTo(Self.listEnd, anchor: .bottom) }
-                else { proxy.scrollTo(model.results[new].id) }
-            }
-            .onChange(of: model.actionIndex) { _, new in
-                defer { model.pointerDriven = false }
-                guard !model.pointerDriven else { return }
-                if new == model.actions.count - 1 { proxy.scrollTo(Self.listEnd, anchor: .bottom) }
-                else { proxy.scrollTo("action.\(new)") }
-            }
-        }
-        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("panelRoot")) } action: {
-            model.listFrame = $0
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(model.mode == .search ? Text("Logins") : Text("Actions"))
-        .accessibilityIdentifier("panel.list")
-    }
-
-    private static let listEnd = "list.end"
-
-    /// Soft fades where list content runs past the edges: top once scrolled, bottom while more rows remain below.
-    private var overflowFade: some View {
-        let fadeTop = model.scrollOffset > 1
-        return VStack(spacing: 0) {
-            LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
-                .frame(height: fadeTop ? theme.spacing.l * 2 : 0)
-            Rectangle()
-            LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: listAtEnd ? 0 : theme.spacing.l * 2)
-        }
-    }
-
-    @ViewBuilder private var rows: some View {
-        switch model.mode {
-        case .search:
-            ForEach(Array(model.results.enumerated()), id: \.element.id) { i, r in
-                ListRow(selected: i == model.selected) {
-                    SiteIcon(title: r.title, domain: r.domain)
-                    Text(r.title).font(theme.font(theme.fonts.row)).lineLimit(1)
-                }
-                .trackFrame(id: r.id, model: model)
-                .id(r.id)
-                // One element per login: title, then "user, site, 3 of 12", selected state, press = select.
-                // Custom actions give VoiceOver / Voice Control the same routes as the keys.
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(r.title)
-                .accessibilityValue(model.spokenDescription(ofResultAt: i))
-                .accessibilityAddTraits(i == model.selected ? [.isButton, .isSelected] : .isButton)
-                .accessibilityInputLabels([r.title, r.domain].filter { !$0.isEmpty })
-                .accessibilityAction { model.selectResult(at: i) }
-                .accessibilityAction(named: Text("Copy password")) { model.activateResult(at: i, .plain) }
-                .accessibilityAction(named: Text("Copy username")) { model.activateResult(at: i, .shift) }
-                .accessibilityAction(named: Text("Copy one-time code")) { model.activateResult(at: i, .command) }
-                .accessibilityAction(named: Text("Fill focused field")) { model.activateResult(at: i, .option) }
-                .accessibilityIdentifier("panel.row.\(r.id)")
-            }
-        case .actions:
-            ForEach(Array(model.actions.enumerated()), id: \.element.id) { i, a in
-                ListRow(selected: i == model.actionIndex) {
-                    Image(systemName: a.symbol)
-                        .font(theme.font(theme.fonts.pillIcon))
-                        .foregroundStyle(theme.colors.secondaryText.color)
-                        .frame(width: theme.card.iconSize, height: theme.card.iconSize)
-                    Text(a.title).font(theme.font(theme.fonts.row)).lineLimit(1)
-                    Spacer(minLength: 0)
-                    if let k = a.shortcut { Keycap(k) }
-                }
-                .trackFrame(id: "action.\(i)", model: model)
-                .id("action.\(i)")
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(a.title)
-                .accessibilityValue(model.spokenDescription(ofActionAt: i))
-                .accessibilityAddTraits(i == model.actionIndex ? [.isButton, .isSelected] : .isButton)
-                .accessibilityAction { model.activateAction(at: i) }
-            }
         }
     }
 
@@ -276,6 +170,168 @@ struct CommandPanelView: View {
     }
 }
 
+// MARK: - list column
+
+/// The list column. Every row has the same height, so the list is plain arithmetic: the content is as tall as all its rows and
+/// only the rows around the visible part exist. A jump to any row costs the same, wherever it is, and a selection change touches
+/// a screenful of rows. (A `LazyVStack` lays out every row between here and there to reach a far one: 700 ms at 5,000 items.)
+private struct PanelList: View {
+    @Bindable var model: CommandPanelModel
+    @Environment(\.theme) private var theme
+    @State private var position = ScrollPosition()
+    /// First row that exists; moves in steps as the list scrolls, so most frames of a scroll change nothing.
+    @State private var firstRow = 0
+    @State private var listAtEnd = false
+    @State private var listScrolled = false
+
+    /// Rows kept beyond each edge of the visible part, and the step `firstRow` moves in.
+    private static let overscan = 6, step = 3
+
+    private var pitch: CGFloat { theme.card.rowHeight + theme.card.hairline }
+    private var gap: CGFloat { theme.spacing.s }
+    private var viewport: CGFloat { model.listFrame.height > 0 ? model.listFrame.height : theme.card.height }
+    private var rowCount: Int { model.mode == .search ? model.results.count : model.actions.count }
+    /// Same gap above the first island as at its sides, and below the last.
+    private func contentHeight(_ count: Int) -> CGFloat { gap * 2 + CGFloat(count) * pitch }
+
+    private func start(atOffset offset: CGFloat) -> Int {
+        max(Int(max(offset - gap, 0) / pitch) / Self.step * Self.step - Self.overscan, 0)
+    }
+
+    /// The rows that exist, given the number of rows in the list.
+    private func window(_ count: Int) -> Range<Int> {
+        let size = Int(viewport / pitch) + 2 * Self.overscan + Self.step + 2
+        let lower = min(firstRow, max(count - size, 0))
+        return lower..<min(lower + size, count)
+    }
+
+    var body: some View {
+        let count = rowCount
+        let window = window(count)
+        ScrollView(.vertical) {
+            rows(window)
+                .frame(width: theme.card.listWidth)  // exactly the column width: long titles truncate, never widen the content
+                .padding(.top, gap + CGFloat(window.lowerBound) * pitch)
+                .frame(height: contentHeight(count), alignment: .top)
+        }
+        .scrollPosition($position)
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        .scrollIndicators(.never)
+        .mask { overflowFade }
+        .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y + $0.contentInsets.top } action: { _, new in
+            model.scrollOffset = new
+            let first = start(atOffset: new)
+            if first != firstRow { firstRow = first }
+            let scrolled = new > 1
+            if scrolled != listScrolled { listScrolled = scrolled }
+        }
+        // State, not the model's offset: a keyboard scroll to the last row lands after the render its selection caused.
+        .onScrollGeometryChange(for: Bool.self) { $0.visibleRect.maxY >= $0.contentSize.height - 1 } action: { _, new in
+            listAtEnd = new
+        }
+        .onChange(of: model.selected) { _, new in
+            defer { model.pointerDriven = false }
+            guard !model.pointerDriven, model.results.indices.contains(new) else { return }
+            model.lastKeyboardAt = .now   // typing and reopening move the list too: the pointer must not take over
+            reveal(new, of: model.results.count)
+        }
+        .onChange(of: model.actionIndex) { _, new in
+            defer { model.pointerDriven = false }
+            guard !model.pointerDriven else { return }
+            reveal(new, of: model.actions.count)
+        }
+        // The short actions list took the offset with it: back in the list, the selected login is where the person left it.
+        .onChange(of: model.mode) { _, new in
+            if new == .search, model.results.indices.contains(model.selected) { reveal(model.selected, of: model.results.count) }
+        }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("panelRoot")) } action: {
+            model.listFrame = $0
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(model.mode == .search ? Text("Logins") : Text("Actions"))
+        .accessibilityIdentifier("panel.list")
+    }
+
+    /// Scrolls just far enough to show row `index`; the first and last rows take the gap beside them along.
+    private func reveal(_ index: Int, of count: Int) {
+        let top = gap + CGFloat(index) * pitch
+        let offset = model.scrollOffset
+        let target: CGFloat
+        if index == 0 { target = 0 }
+        else if index == count - 1 { target = contentHeight(count) - viewport }
+        else if top < offset { target = top }
+        else if top + pitch > offset + viewport { target = top + pitch - viewport }
+        else { return }
+        let y = max(target, 0)
+        guard abs(y - offset) > 0.5 else { return }
+        firstRow = start(atOffset: y)   // now, not when the scroll reports back: a far jump must not show an empty column
+        position.scrollTo(y: y)
+    }
+
+    /// Soft fades where list content runs past the edges: top once scrolled, bottom while more rows remain below.
+    private var overflowFade: some View {
+        VStack(spacing: 0) {
+            LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+                .frame(height: listScrolled ? theme.spacing.l * 2 : 0)
+            Rectangle()
+            LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                .frame(height: listAtEnd ? 0 : theme.spacing.l * 2)
+        }
+    }
+
+    @ViewBuilder private func rows(_ window: Range<Int>) -> some View {
+        VStack(spacing: 0) {
+            switch model.mode {
+            case .search:
+                // Identified by position: a new search rebinds the rows on screen instead of building them again.
+                ForEach(window, id: \.self) { i in resultRow(i, model.results[i]) }
+            case .actions:
+                let actions = model.actions
+                ForEach(window, id: \.self) { i in actionRow(i, actions[i]) }
+            }
+        }
+    }
+
+    private func resultRow(_ i: Int, _ r: VaultSearchResult) -> some View {
+        ListRow(selected: i == model.selected) {
+            SiteIcon(title: r.title, domain: r.domain)
+            Text(r.title).font(theme.font(theme.fonts.row)).lineLimit(1)
+        }
+        .trackFrame(id: "row.\(i)", model: model)
+        // One element per login: title, then "user, site, 3 of 12", selected state, press = select.
+        // Custom actions give VoiceOver / Voice Control the same routes as the keys.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(r.title)
+        .accessibilityValue(model.spokenDescription(ofResultAt: i))
+        .accessibilityAddTraits(i == model.selected ? [.isButton, .isSelected] : .isButton)
+        .accessibilityInputLabels([r.title, r.domain].filter { !$0.isEmpty })
+        .accessibilityAction { model.selectResult(at: i) }
+        .accessibilityAction(named: Text("Copy password")) { model.activateResult(at: i, .plain) }
+        .accessibilityAction(named: Text("Copy username")) { model.activateResult(at: i, .shift) }
+        .accessibilityAction(named: Text("Copy one-time code")) { model.activateResult(at: i, .command) }
+        .accessibilityAction(named: Text("Fill focused field")) { model.activateResult(at: i, .option) }
+        .accessibilityIdentifier("panel.row.\(r.id)")
+    }
+
+    private func actionRow(_ i: Int, _ a: PanelAction) -> some View {
+        ListRow(selected: i == model.actionIndex) {
+            Image(systemName: a.symbol)
+                .font(theme.font(theme.fonts.pillIcon))
+                .foregroundStyle(theme.colors.secondaryText.color)
+                .frame(width: theme.card.iconSize, height: theme.card.iconSize)
+            Text(a.title).font(theme.font(theme.fonts.row)).lineLimit(1)
+            Spacer(minLength: 0)
+            if let k = a.shortcut { Keycap(k) }
+        }
+        .trackFrame(id: "action.\(i)", model: model)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(a.title)
+        .accessibilityValue(model.spokenDescription(ofActionAt: i))
+        .accessibilityAddTraits(i == model.actionIndex ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction { model.activateAction(at: i) }
+    }
+}
+
 // MARK: - rows
 
 /// 48 pt row: padding 12, gap 12, full-width selection, 1 pt separator below.
@@ -324,14 +380,21 @@ struct SiteIcon: View {
     let domain: String
     var size: Double?
     @Environment(\.theme) private var theme
-    @State private var image: NSImage?
+    /// Tied to its domain: a list row is reused for another login, and must never show the last one's icon.
+    @State private var loaded: (domain: String, image: NSImage)?
     private let store = IconStore.shared
+
+    private var image: NSImage? {
+        guard store.enabled else { return nil }
+        if let loaded, loaded.domain == domain { return loaded.image }
+        return store.cached(domain)
+    }
 
     var body: some View {
         let side = size ?? theme.card.iconSize
         let shape = RoundedRectangle(cornerRadius: theme.radii.icon, style: .continuous)
         ZStack {
-            if store.enabled, let image {
+            if let image {
                 shape.fill(theme.colors.iconTile.color)
                 Image(nsImage: image).resizable().interpolation(.high).scaledToFill()
             } else {
@@ -344,11 +407,13 @@ struct SiteIcon: View {
         .frame(width: side, height: side)
         .clipShape(shape)
         .accessibilityHidden(true)  // decorative: the login's name is read next to it
-        .task(id: "\(domain)|\(store.generation)|\(store.enabled)|\(store.loadedCount)") {
-            guard store.enabled else { image = nil; return }
-            if let hit = store.cached(domain) { image = hit; return }
-            image = nil
-            image = await store.load(domain)
+        .task(id: "\(domain)|\(store.generation)|\(store.enabled)") {
+            guard store.enabled else { loaded = nil; return }
+            if store.cached(domain) != nil { return }
+            loaded = nil
+            let wanted = domain
+            let image = await store.load(wanted)
+            if !Task.isCancelled { loaded = image.map { (wanted, $0) } }
         }
     }
 }
