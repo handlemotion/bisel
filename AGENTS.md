@@ -38,6 +38,8 @@ Repo-wide rules only. App-level docs: `apps/server/README.md` and `DEPLOY.md` (t
 ## Working rules
 
 - The UI is Rodrigo's. Do not change SwiftUI views, layout, copy, colors or animation unless asked; logic and tests are fair game.
+- While Rodrigo is reviewing a running dev build, rebuild and relaunch it after every change without asking. Never end a turn on "restart it?": the change is not delivered until it is on screen.
+- That relaunch only starts the app, in the menu bar, for Rodrigo to open: `BISEL_DATA_DIR=<throwaway> BISEL_DEV_AUTOUNLOCK=1`, with no `BISEL_DEV_FLOW` or `BISEL_DEV_PANEL`, which open things on screen and turn the hotkey off. Nothing else goes on Rodrigo's screen: no scripted or driven runs, no `BISEL_DEV_STICKY`.
 - Use generators and CLIs to create things (`create-turbo`, `oxlint --init`, `xcodegen`, `pnpm add`), never hand-write boilerplate that a tool produces.
 - Never touch production (Cloudflare, Doppler, the prod D1) without an explicit ask each time, and never print secrets. `apps/server/DEPLOY.md` is the runbook.
 - No attribution lines in commits or PR descriptions.
