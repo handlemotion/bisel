@@ -144,17 +144,21 @@ enum OnboardingLayout {
 /// Figma pill: 36 pt high, hugs its label, 14 pt. Primary (white) or secondary (#282828). Lifts a little on hover.
 struct PillButtonStyle: ButtonStyle {
     var primary = true
+    /// Set by the command panel, which tracks the pointer itself: `.onHover` is unreliable there.
+    var hovered: Bool?
 
     func makeBody(configuration: Configuration) -> some View {
-        PillBody(configuration: configuration, primary: primary)
+        PillBody(configuration: configuration, primary: primary, hovered: hovered)
     }
 
     private struct PillBody: View {
         let configuration: ButtonStyleConfiguration
         let primary: Bool
+        let hovered: Bool?
         @Environment(\.theme) private var theme
         @Environment(\.isEnabled) private var enabled
-        @State private var hovering = false
+        @State private var pointerOver = false
+        private var hovering: Bool { hovered ?? pointerOver }
 
         var body: some View {
             let fill = (primary ? theme.colors.pillPrimary : theme.colors.pillSecondary).color
@@ -166,11 +170,12 @@ struct PillButtonStyle: ButtonStyle {
                 .padding(.horizontal, primary ? 12 : 14)
                 .frame(height: 36)
                 .background(Capsule().fill(fill))
-                .overlay(Capsule().fill((primary ? Color.black : Color.white).opacity(hovering && enabled ? (primary ? 0.10 : 0.12) : 0)))
+                // The label's color, so it shows on a light pill as well as a dark one.
+                .overlay(Capsule().fill(label.opacity(hovering && enabled ? (primary ? 0.10 : 0.12) : 0)))
                 .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.4)
                 .animation(.easeOut(duration: 0.15), value: enabled)
                 .contentShape(Capsule())
-                .onHover { hovering = $0 }
+                .onHover { pointerOver = $0 }
                 .animation(.easeOut(duration: 0.12), value: hovering)
         }
     }

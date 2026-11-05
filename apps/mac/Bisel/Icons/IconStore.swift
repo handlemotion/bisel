@@ -26,6 +26,8 @@ final class IconStore {
 
     static let enabledKey = "icons.enabled"
     nonisolated static let negativeTTL: TimeInterval = 7 * 24 * 3600
+    private static let layoutVersionKey = "icons.layoutVersion"
+    private static let layoutVersion = 3
 
     var enabled: Bool {
         didSet { UserDefaults.standard.set(enabled, forKey: Self.enabledKey); generation += 1 }
@@ -56,6 +58,11 @@ final class IconStore {
         }
         enabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
         memory.countLimit = 400
+        // Icons are stored as they are drawn: when `fittedToTile` changes, the cached ones have to be fetched again.
+        if UserDefaults.standard.integer(forKey: Self.layoutVersionKey) < Self.layoutVersion {
+            try? FileManager.default.removeItem(at: Self.directory)
+            UserDefaults.standard.set(Self.layoutVersion, forKey: Self.layoutVersionKey)
+        }
     }
 
     /// File/cache key: HMAC-SHA256 of the registrable domain under the per-install key, so a copy of the cache directory (backup,
@@ -309,7 +316,7 @@ enum IconFetcher {
                                      kCGImageSourceCreateThumbnailWithTransform: true,
                                      kCGImageSourceThumbnailMaxPixelSize: outputPixels]
         guard let decoded = CGImageSourceCreateThumbnailAtIndex(src, best, opts as CFDictionary), decoded.width >= 8 else { return nil }
-        let thumb = trimmedSquare(decoded) ?? decoded
+        let thumb = fittedToTile(decoded) ?? decoded
         let out = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(out, UTType.png.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(dest, thumb, nil)
@@ -317,9 +324,14 @@ enum IconFetcher {
     }
 }
 
-/// Removes a uniform margin (transparent, or one solid color such as the white matte of an app icon), then crops to a
-/// centered square so the icon can fill the 24 pt tile. Returns nil when there is nothing to trim.
-private func trimmedSquare(_ image: CGImage) -> CGImage? {
+/// Redraws an icon on a square canvas so every site reads the same size in the tile, whatever margin its file came with.
+/// A logo on nothing, on a solid color, or on a rounded tile of one color is centered with `logoInset` around it, and that
+/// color runs out to the canvas edges, so the file's own corners never show inside ours. A rounded tile that is not one color
+/// fills the canvas, a little over so its clear corners fall outside ours. Returns nil for anything else (a photo, a gradient,
+/// art that runs off the edge), which stays as it is.
+private let logoInset = 0.2
+
+private func fittedToTile(_ image: CGImage) -> CGImage? {
     let w = image.width, h = image.height
     guard w >= 16, h >= 16 else { return nil }
     var px = [UInt8](repeating: 0, count: w * h * 4)
@@ -347,21 +359,58 @@ private func trimmedSquare(_ image: CGImage) -> CGImage? {
         let c = p(x, y)
         return transparent ? c.a < 16 : close(c, ref, tol: 22)
     }
-    var minX = w, minY = h, maxX = -1, maxY = -1
+    // Same corners are not a solid background unless the whole edge agrees: a gradient or a logo touching the edge would
+    // show a seam against a flat fill.
+    if solid {
+        let ring = (1..<(w - 1)).allSatisfy { isBorder($0, 1) && isBorder($0, h - 2) }
+            && (1..<(h - 1)).allSatisfy { isBorder(1, $0) && isBorder(w - 2, $0) }
+        guard ring else { return nil }
+    }
+    var minX = w, minY = h, maxX = -1, maxY = -1, filled = 0
     for y in 0..<h { for x in 0..<w where !isBorder(x, y) {
         minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+        filled += 1
     } }
     guard maxX >= minX, maxY >= minY else { return nil }
     var bw = maxX - minX + 1, bh = maxY - minY + 1
     guard bw >= 8, bh >= 8 else { return nil }
-    guard bw < w || bh < h else { return nil }
-    // Opaque icons: also shave 1 px so anti-aliased edge pixels of the matte do not remain.
-    if solid { minX += 1; minY += 1; bw -= 2; bh -= 2 }
-    let side = max(bw, bh)
-    let cx = minX + bw / 2, cy = minY + bh / 2
-    let x0 = min(max(cx - side / 2, 0), max(w - side, 0)), y0 = min(max(cy - side / 2, 0), max(h - side, 0))
-    let s = min(side, min(w, h))
-    return image.cropping(to: CGRect(x: x0, y: y0, width: s, height: s))
+    var fill = solid ? ref : nil
+    var isTile = transparent && Double(filled) / Double(bw * bh) > 0.85 && abs(bw - bh) <= max(bw, bh) / 8
+    if isTile {
+        // The middle of each side, just inside it: past the rounded corners, and clear of a logo unless it touches the edge.
+        let across = (minX + bw / 4)...(maxX - bw / 4), down = (minY + bh / 4)...(maxY - bh / 4)
+        let edge = across.flatMap { [p($0, minY + 2), p($0, maxY - 2)] } + down.flatMap { [p(minX + 2, $0), p(maxX - 2, $0)] }
+        if let first = edge.first, edge.allSatisfy({ $0.a > 200 && close($0, first, tol: 22) }) {
+            // One color: the tile is really a background, so what counts is the logo on it. Soft pixels are the tile's own edge.
+            var lx = w, ly = h, hx = -1, hy = -1
+            for y in minY...maxY { for x in minX...maxX {
+                let c = p(x, y)
+                guard c.a > 240, !close(c, first, tol: 22) else { continue }
+                lx = min(lx, x); hx = max(hx, x); ly = min(ly, y); hy = max(hy, y)
+            } }
+            if hx - lx >= 7, hy - ly >= 7 {
+                minX = lx; minY = ly; bw = hx - lx + 1; bh = hy - ly + 1
+                fill = first
+                isTile = false
+            }
+        }
+    }
+    guard let content = image.cropping(to: CGRect(x: minX, y: minY, width: bw, height: bh)) else { return nil }
+
+    let side = IconFetcher.outputPixels
+    guard let canvas = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+                                 space: CGColorSpaceCreateDeviceRGB(),
+                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    canvas.interpolationQuality = .high
+    if let fill {
+        canvas.setFillColor(red: Double(fill.r) / 255, green: Double(fill.g) / 255, blue: Double(fill.b) / 255, alpha: 1)
+        canvas.fill(CGRect(x: 0, y: 0, width: side, height: side))
+    }
+    let box = Double(side) * (isTile ? 1.08 : 1 - 2 * logoInset)
+    let scale = box / Double(isTile ? min(bw, bh) : max(bw, bh))
+    let dw = Double(bw) * scale, dh = Double(bh) * scale
+    canvas.draw(content, in: CGRect(x: (Double(side) - dw) / 2, y: (Double(side) - dh) / 2, width: dw, height: dh))
+    return canvas.makeImage()
 }
 
 /// Redirects: at most 3, HTTPS only, and only within the original registrable domain.

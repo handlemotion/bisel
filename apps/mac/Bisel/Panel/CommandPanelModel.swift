@@ -1,5 +1,6 @@
 import AppKit
 import Observation
+import BiselCore
 
 enum PanelAction: String, CaseIterable, Identifiable {
     case copyPassword, copyUsername, copyTOTP, fill, fillUserTabPassword, fillUsername, fillPassword, fillTOTP, openURL, moveToTrash
@@ -148,14 +149,40 @@ final class CommandPanelModel {
     @ObservationIgnored var runOpenSettings: ((SettingsPage) -> Void)?
     @ObservationIgnored var runClose: (() -> Void)?
 
-    var query = "" { didSet { if query != oldValue { refresh() } } }
+    var query = "" {
+        didSet {
+            guard query != oldValue else { return }
+            leaveNewLogin()   // typing a search is looking for something else: Return and the arrows are the list's again
+            refresh()
+        }
+    }
     private(set) var results: [VaultSearchResult] = []
     /// 0 = best match (first A to Z with no query), at the top of the list.
     var selected = 0 { didSet { if selected != oldValue { prepareValues() } } }
     var mode: Mode = .search
+    /// The unsaved new login. Clicking away or searching leaves the form and takes its row out of the list, as nothing was
+    /// created, but what was typed waits here: + and ⌘N bring it back until Cancel or the panel closes.
+    private(set) var newLogin: ItemEditorModel?
+    /// The form is up: in place of the detail pane, with its row on top of the list, and it takes the keys.
+    private(set) var newLoginSelected = false
+    var isEditingNew: Bool { newLogin != nil && newLoginSelected }
+    @ObservationIgnored private var untouchedDraft: ItemDraft?
+    /// The login being made sits above the results, as the list's first row.
+    var leadingRows: Int { isEditingNew ? 1 : 0 }
+    /// A list row under the pointer while the form is up: there, hovering shows a row but does not select it.
+    var hoveredRow: String?
+    /// The form input a click landed on, for the form to focus: a whole Values row counts, not just its text.
+    var formFocus: String?
+    /// Leaving the form takes a row out of the list, so the rows move under a still pointer. Where the click was: hovering
+    /// does not select until the pointer really moves, or the row just clicked would lose to the one that slid under it.
+    @ObservationIgnored private var hoverHold: CGPoint?
+    private static let hoverHoldDistance: CGFloat = 12
     var actionIndex = 0
     var hoveredPill: PillID?
     var hoveredValue: ValueRowID?
+    var hoveredNewLogin = false
+    enum FormButton: Hashable { case cancel, save, reveal, generate }
+    var hoveredFormButton: FormButton?
     /// Brief replacement text for a value row ("Copied", or why it failed), cleared after ~1 s.
     struct Flash: Equatable { var text: String; var isError: Bool }
     private(set) var flashes: [ValueRowID: Flash] = [:]
@@ -190,6 +217,10 @@ final class CommandPanelModel {
     @ObservationIgnored var rowFrames: [String: CGRect] = [:]
     @ObservationIgnored var pillFrames: [PillID: CGRect] = [:]
     @ObservationIgnored var valueFrames: [ValueRowID: CGRect] = [:]
+    @ObservationIgnored var newLoginFrame: CGRect = .zero
+    @ObservationIgnored var formButtonFrames: [FormButton: CGRect] = [:]
+    /// Where the pointer is an I-beam: the search field and the form's inputs.
+    @ObservationIgnored var textFrames: [String: CGRect] = [:]
     @ObservationIgnored var listFrame: CGRect = .zero
     /// Scroll offset of the list, kept current by the view.
     @ObservationIgnored var scrollOffset: CGFloat = 0
@@ -198,6 +229,8 @@ final class CommandPanelModel {
     var isUnlocked: Bool { source.isUnlocked }
     /// Unlocked, loaded, and nothing in it: the panel shows the import state instead of an empty list.
     var boxIsEmpty: Bool { source.isUnlocked && source.isEmpty }
+    /// The + in the search bar and ⌘N. The dev fixture has no vault to write to.
+    var canCreate: Bool { source.isUnlocked && items.isAvailable }
     var actions: [PanelAction] {
         if case .actions(let item) = mode { return availableActions(for: item) }
         return PanelAction.allCases
@@ -222,10 +255,16 @@ final class CommandPanelModel {
     func reset(targetName: String?) {
         self.targetName = targetName
         mode = .search
+        newLogin = nil
+        newLoginSelected = false
+        hoveredRow = nil
+        hoverHold = nil
         notice = nil
         actionIndex = 0
         hoveredPill = nil
         hoveredValue = nil
+        hoveredNewLogin = false
+        hoveredFormButton = nil
         prepareValues()
         flashTasks.values.forEach { $0.cancel() }
         flashTasks = [:]
@@ -289,7 +328,8 @@ final class CommandPanelModel {
     /// VoiceOver / Voice Control activation of a list row: select it (the same as a click).
     func selectResult(at index: Int) {
         guard results.indices.contains(index) else { return }
-        pointerDriven = true
+        leaveNewLogin()
+        pointerDriven = selected != index
         selected = index
     }
 
@@ -339,8 +379,9 @@ final class CommandPanelModel {
         }
     }
 
-    /// Esc: leave actions, else clear the query, else tell the caller to close. True when the panel should close.
+    /// Esc: leave the New login form, else leave actions, else clear the query, else tell the caller to close. True when the panel should close.
     func escape() -> Bool {
+        if isEditingNew { closeNewLogin(); return false }
         if case .actions = mode { mode = .search; return false }
         if !query.isEmpty { query = ""; return false }
         return true
@@ -369,17 +410,32 @@ final class CommandPanelModel {
         return rowFrames.first { $0.key.hasPrefix("action.") == wantsAction && $0.value.contains(p) }?.key
     }
 
-    /// Position in `results` of a list row's frame id ("row.12").
+    /// Position in `results` of a list row's frame id ("row.12"), which counts rows from the top of the list.
     private func resultIndex(_ id: String) -> Int? {
-        id.hasPrefix("row.") ? Int(id.dropFirst(4)).flatMap { results.indices.contains($0) ? $0 : nil } : nil
+        id.hasPrefix("row.") ? Int(id.dropFirst(4)).map { $0 - leadingRows }.flatMap { results.indices.contains($0) ? $0 : nil } : nil
     }
 
     private func pill(at p: CGPoint) -> PillID? {
         selectedResult == nil ? nil : pillFrames.first(where: { $0.value.contains(p) })?.key
     }
 
+    func isOverText(_ p: CGPoint) -> Bool {
+        textFrames.values.contains { $0.contains(p) } && !formButtonFrames.values.contains { $0.contains(p) }
+    }
+
     func hover(at p: CGPoint) {
         guard isUnlocked else { return }
+        let button = isEditingNew ? formButtonFrames.first { $0.value.contains(p) }?.key : nil
+        if hoveredFormButton != button { hoveredFormButton = button }
+        let row = isEditingNew ? rowID(at: p) : nil
+        if hoveredRow != row { hoveredRow = row }
+        guard !isEditingNew else { return }
+        if let hold = hoverHold {
+            guard hypot(p.x - hold.x, p.y - hold.y) > Self.hoverHoldDistance else { return }
+            hoverHold = nil
+        }
+        let onNewLogin = newLoginFrame.contains(p)
+        if hoveredNewLogin != onNewLogin { hoveredNewLogin = onNewLogin }
         let valueHit = selectedResult == nil ? nil : valueFrames.first(where: { $0.value.contains(p) })?.key
         if hoveredValue != valueHit { hoveredValue = valueHit; if let v = valueHit { hoverStats["value.\(v.rawValue)", default: 0] += 1 } }
         let pillHit = pill(at: p)
@@ -398,6 +454,7 @@ final class CommandPanelModel {
     /// Returns true when the click was consumed.
     func click(at p: CGPoint) -> Bool {
         guard isUnlocked else { return false }
+        if isEditingNew { return clickInForm(at: p) }
         if selectedResult != nil, let v = valueFrames.first(where: { $0.value.contains(p) })?.key {
             Log.panel.debug("click value")
             activateValue(v)
@@ -426,6 +483,76 @@ final class CommandPanelModel {
         case .copy: pillTriggered = true; runCopy?(.password, r)
         case .fill: runFill?(.auto, r)
         case .userTabPassword: runFill?(.userTabPassword, r)
+        }
+    }
+
+    // MARK: new login
+
+    /// The title starts from what was searched, and the password from the generator: Return alone can save it.
+    /// With typing left from an earlier visit this goes back to it.
+    func openNewLogin() {
+        guard canCreate, !isEditingNew else { return }
+        if newLogin == nil {
+            guard let editor = items.newEditor() else { return }
+            editor.draft.title = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            editor.generatePassword()
+            untouchedDraft = editor.draft
+            newLogin = editor
+        }
+        mode = .search
+        hoveredPill = nil
+        hoveredValue = nil
+        hoveredNewLogin = false
+        hoveredRow = nil
+        newLoginSelected = true
+        PanelAnnouncer.announce(String(localized: "New login"), priority: .medium)
+    }
+
+    /// The form goes and so does its row. A draft nobody typed in goes too, so the next + starts fresh.
+    private func leaveNewLogin() {
+        guard newLoginSelected else { return }
+        newLoginSelected = false
+        if newLogin?.draft == untouchedDraft { newLogin = nil }
+        hoveredFormButton = nil
+        hoveredRow = nil
+        formFocus = nil
+        focusToken += 1
+    }
+
+    /// Cancel and Esc: the draft is dropped, typed or not.
+    func closeNewLogin() {
+        leaveNewLogin()
+        newLogin = nil
+    }
+
+    /// A list row selects, and leaves the form. In the form a click stays unconsumed, for the field or button under it;
+    /// `formFocus` also focuses the input when it landed beside the text, where the field itself would not take it.
+    private func clickInForm(at p: CGPoint) -> Bool {
+        if let id = rowID(at: p) {
+            guard let i = resultIndex(id) else { return false }
+            hoverHold = p
+            selectResult(at: i)
+            return true
+        }
+        guard !formButtonFrames.values.contains(where: { $0.contains(p) }),
+              let id = textFrames.first(where: { $0.value.contains(p) })?.key else { return false }
+        if id == Self.searchField { focusToken += 1 } else { formFocus = id }
+        return false
+    }
+
+    static let searchField = "search"
+
+    /// Saved: back to the full list with the new login selected, so ↩ copies its password and ⌥↩ fills it.
+    /// Anything else leaves the form up with `editor.state` saying why.
+    func saveNewLogin() {
+        guard let editor = newLogin else { return }
+        Task {
+            await editor.save()
+            guard editor === newLogin, case .done(.saved(let item, _)) = editor.state else { return }
+            closeNewLogin()
+            query = ""
+            selected = results.firstIndex { $0.id == item.id } ?? 0
+            Toast.shared.show(String(localized: "Saved \(item.title)"))
         }
     }
 
@@ -575,6 +702,7 @@ final class CommandPanelModel {
     /// In the actions menu, ↩ runs the highlighted action.
     func activate(_ key: ActivationKey) {
         if !source.isUnlocked { runUnlock?(); return }
+        if isEditingNew { if key == .plain { saveNewLogin() }; return }
         if boxIsEmpty { if key == .plain { runOpenSettings?(.backup) }; return }   // Import lives on the Backup & Import page
         switch mode {
         case .actions(let item):
