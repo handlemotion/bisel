@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.4](https://github.com/handlemotion/bisel/compare/v0.1.3...v0.1.4) (2026-11-04)
+
+
+### Features
+
+* agent CLI that uses box items without reading them ([#36](https://github.com/handlemotion/bisel/issues/36)) ([63dc672](https://github.com/handlemotion/bisel/commit/63dc672770e9f01b21dd5d4639cbde11a31b9f07))
+
+
+### Bug Fixes
+
+* build FakeHome on the Xcode 26.6 that CodeQL Swift uses ([#39](https://github.com/handlemotion/bisel/issues/39)) ([3a57920](https://github.com/handlemotion/bisel/commit/3a57920f92cd9166afb91d43580470521da6f21c))
+* keep the update feed on the last release until the new one has its assets ([#40](https://github.com/handlemotion/bisel/issues/40)) ([054b777](https://github.com/handlemotion/bisel/commit/054b777212027726bac71b25439dad1b4fa6a8c8))
+* panel lists every item A to Z, and items can be trashed and recovered ([#37](https://github.com/handlemotion/bisel/issues/37)) ([57c768b](https://github.com/handlemotion/bisel/commit/57c768beebbc1ff3ce88a20639c9383678de8378))
+
 ## [0.1.3](https://github.com/handlemotion/bisel/compare/v0.1.2...v0.1.3) (2026-11-02)
 
 
