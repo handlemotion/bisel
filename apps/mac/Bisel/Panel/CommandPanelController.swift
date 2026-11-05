@@ -317,13 +317,20 @@ final class CommandPanelController {
         if ProcessInfo.processInfo.environment["BISEL_DEV_NOHOVER"] == "1" { return }
         #endif
         let p = NSEvent.mouseLocation
+        // A panel that never activates gets no cursor rects: an unfocused field shows no I-beam, and a focused one's leaks
+        // over what is next to it. Every tick, not just on a move, or that I-beam comes back under a still pointer.
+        if state == .shown, panel.frame.contains(p), !menuTracking, !authenticating {
+            let over = model.isOverText(topLeftPoint(fromWindow: panel.convertPoint(fromScreen: p)))
+            (over ? NSCursor.iBeam : NSCursor.arrow).set()
+        }
         // The list also moves under a still pointer (a flick's inertia). A keyboard scroll keeps the keyboard's selection.
         let scrolled = model.scrollOffset != lastScrollOffset && ContinuousClock.now - model.lastKeyboardAt > .milliseconds(500)
         lastScrollOffset = model.scrollOffset
         guard p != lastPointer || scrolled else { return }
         lastPointer = p
-        guard state == .shown, panel.frame.contains(p) else { return }
-        model.hover(at: topLeftPoint(fromWindow: panel.convertPoint(fromScreen: p)))
+        guard state == .shown else { return }
+        // Off the card nothing is under the pointer: a hover must not stay lit after it left.
+        model.hover(at: panel.frame.contains(p) ? topLeftPoint(fromWindow: panel.convertPoint(fromScreen: p)) : CGPoint(x: -1, y: -1))
     }
 
     /// Window coordinates (bottom-left origin) → SwiftUI "panelRoot" space (top-left origin).
@@ -517,6 +524,8 @@ final class CommandPanelController {
     private func handle(_ event: NSEvent) -> Bool {
         if let tv = panel.firstResponder as? NSTextView, tv.hasMarkedText() { return false }  // IME composing
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function])
+        if event.keyCode == 45, mods == [.command] { model.openNewLogin(); return true }  // ⌘N
+        if model.isEditingNew, ![53, 36, 76].contains(event.keyCode) { return false }  // the form's fields keep their keys
         switch event.keyCode {
         case 53:  // esc: leave actions → clear query → close
             if model.escape() { hide("esc") }

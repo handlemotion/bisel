@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The command panel: ONE fixed-size opaque card (so the window never resizes and the input can never move).
 ///
-///  ┌ top bar: magnifier + query ───────────────────────────┐
+///  ┌ top bar: magnifier + query + new login ───────────────┐
 ///  ├ list column (206) ─────────┬ detail pane ─────────────┤
 ///  │ 48 pt rows, icon + title   │ icon, title, username,   │
 ///  │ 1 pt separators            │ domain, tags, pill row   │
@@ -59,15 +59,16 @@ struct CommandPanelView: View {
         VStack(spacing: 0) {
             topBar
             Hairline()
-            if model.boxIsEmpty {
+            if model.boxIsEmpty, !model.isEditingNew {
                 emptyBoxState
-            } else if model.isUnlocked, model.mode == .search, model.results.isEmpty {
+            } else if model.isUnlocked, model.mode == .search, model.results.isEmpty, !model.isEditingNew {
                 noMatchesState
             } else if model.isUnlocked {
                 HStack(spacing: 0) {
                     PanelList(model: model).frame(width: theme.card.listWidth)
                     Hairline(axis: .vertical)
-                    DetailPane(model: model)
+                    if model.isEditingNew, let editor = model.newLogin { NewLoginForm(model: model, editor: editor) }
+                    else { DetailPane(model: model) }
                 }
             } else {
                 BoxLockedState { model.activate(.plain) }
@@ -92,13 +93,16 @@ struct CommandPanelView: View {
                 .font(theme.font(theme.fonts.search))
                 .focused($searchFocused)
                 .autocorrectionDisabled()
+                .trackText(CommandPanelModel.searchField, model: model)
                 .accessibilityLabel(Text("Search logins"))
                 .accessibilityHint(Text("Type to filter. Up and Down choose a login, Return copies its password, Command K shows more actions."))
                 .accessibilityAddTraits(.isSearchField)
                 .accessibilityInputLabels([Text("Search logins"), Text("Search")])
                 .accessibilityIdentifier("panel.search")
+            if model.canCreate { newLoginButton }
         }
-        .padding(.horizontal, theme.spacing.l)
+        .padding(.leading, theme.spacing.l)
+        .padding(.trailing, model.canCreate ? theme.spacing.s + theme.spacing.xs : theme.spacing.l)   // clear of the card's rounded corner
         .frame(height: theme.card.topBarHeight)
         // The whole bar is the drag handle (handled in CommandPanel.sendEvent); double-click empty space re-centers.
         .background {
@@ -106,6 +110,29 @@ struct CommandPanelView: View {
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) { model.resetPosition?() }
         }
+    }
+
+    /// An island like the list rows', the height of the bar less a gap above and below. Hover comes from the pointer
+    /// polling (`CommandPanelModel.hover`), as `.onHover` is unreliable in this panel.
+    private var newLoginButton: some View {
+        let side = theme.card.topBarHeight - theme.spacing.s * 2
+        return Button { model.openNewLogin() } label: {
+            Image(systemName: "plus")
+                .font(theme.font(theme.fonts.pillIcon))
+                .foregroundStyle(theme.colors.secondaryText.color)
+                .frame(width: side, height: side)
+                .background(RoundedRectangle(cornerRadius: theme.radii.field, style: .continuous)
+                    .fill(model.hoveredNewLogin ? theme.hoverFill(glass: glass) : .clear))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("panelRoot")) } action: { model.newLoginFrame = $0 }
+        .onDisappear { model.newLoginFrame = .zero }
+        .disabled(model.isEditingNew)
+        .help(Text("New login (⌘N)"))
+        .accessibilityLabel(Text("New login"))
+        .accessibilityHint(Text("Command N does the same from the keyboard."))
+        .accessibilityIdentifier("panel.new")
     }
 
     /// Non-blocking: everything but Fill works, so a solid tab hanging off the card's bottom edge, not a screen of its own.
@@ -190,7 +217,7 @@ private struct PanelList: View {
     private var pitch: CGFloat { theme.card.rowHeight + theme.card.hairline }
     private var gap: CGFloat { theme.spacing.s }
     private var viewport: CGFloat { model.listFrame.height > 0 ? model.listFrame.height : theme.card.height }
-    private var rowCount: Int { model.mode == .search ? model.results.count : model.actions.count }
+    private var rowCount: Int { model.mode == .search ? model.results.count + model.leadingRows : model.actions.count }
     /// Same gap above the first island as at its sides, and below the last.
     private func contentHeight(_ count: Int) -> CGFloat { gap * 2 + CGFloat(count) * pitch }
 
@@ -233,7 +260,12 @@ private struct PanelList: View {
             defer { model.pointerDriven = false }
             guard !model.pointerDriven, model.results.indices.contains(new) else { return }
             model.lastKeyboardAt = .now   // typing and reopening move the list too: the pointer must not take over
-            reveal(new, of: model.results.count)
+            reveal(new + model.leadingRows, of: rowCount)
+        }
+        // In: its row is on top. Out: the row is gone and the selected login may be off screen.
+        .onChange(of: model.isEditingNew) { _, new in
+            if new { reveal(0, of: rowCount) }
+            else if model.results.indices.contains(model.selected) { reveal(model.selected, of: rowCount) }
         }
         .onChange(of: model.actionIndex) { _, new in
             defer { model.pointerDriven = false }
@@ -284,7 +316,14 @@ private struct PanelList: View {
             switch model.mode {
             case .search:
                 // Identified by position: a new search rebinds the rows on screen instead of building them again.
-                ForEach(window, id: \.self) { i in resultRow(i, model.results[i]) }
+                // The frame is tracked out here, by place in the list: the rows under it change when the new login comes and goes.
+                ForEach(window, id: \.self) { i in
+                    VStack(spacing: 0) {
+                        if i < model.leadingRows, let editor = model.newLogin { newLoginRow(editor) }
+                        else { resultRow(i - model.leadingRows, model.results[i - model.leadingRows]) }
+                    }
+                    .trackFrame(id: "row.\(i)", model: model)
+                }
             case .actions:
                 let actions = model.actions
                 ForEach(window, id: \.self) { i in actionRow(i, actions[i]) }
@@ -292,12 +331,25 @@ private struct PanelList: View {
         }
     }
 
+    /// The login being made, on top of the list while the form is up: its title as it is typed.
+    private func newLoginRow(_ editor: ItemEditorModel) -> some View {
+        let title = editor.draft.title.isEmpty ? String(localized: "New login") : editor.draft.title
+        return ListRow(selected: true) {
+            SiteIcon(title: editor.draft.title, domain: "")
+            Text(title).font(theme.font(theme.fonts.row)).lineLimit(1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(Text("Not saved yet"))
+        .accessibilityAddTraits(.isSelected)
+        .accessibilityIdentifier("panel.row.new")
+    }
+
     private func resultRow(_ i: Int, _ r: VaultSearchResult) -> some View {
-        ListRow(selected: i == model.selected) {
+        ListRow(selected: i == model.selected && !model.isEditingNew, hovered: model.hoveredRow == "row.\(i + model.leadingRows)") {
             SiteIcon(title: r.title, domain: r.domain)
             Text(r.title).font(theme.font(theme.fonts.row)).lineLimit(1)
         }
-        .trackFrame(id: "row.\(i)", model: model)
         // One element per login: title, then "user, site, 3 of 12", selected state, press = select.
         // Custom actions give VoiceOver / Voice Control the same routes as the keys.
         .accessibilityElement(children: .ignore)
@@ -332,11 +384,20 @@ private struct PanelList: View {
     }
 }
 
+extension View {
+    /// Reports a text input's frame (panel space), for the I-beam the pointer polling sets.
+    func trackText(_ id: String, model: CommandPanelModel) -> some View {
+        onGeometryChange(for: CGRect.self) { $0.frame(in: .named("panelRoot")) } action: { model.textFrames[id] = $0 }
+            .onDisappear { model.textFrames[id] = nil }
+    }
+}
+
 // MARK: - rows
 
 /// 48 pt row: padding 12, gap 12, full-width selection, 1 pt separator below.
 private struct ListRow<Content: View>: View {
     let selected: Bool
+    var hovered = false
     @ViewBuilder var content: Content
     @Environment(\.theme) private var theme
     @Environment(\.glassMode) private var glass
@@ -349,7 +410,7 @@ private struct ListRow<Content: View>: View {
                 .padding(.horizontal, theme.spacing.s)
                 .frame(height: theme.card.rowHeight - theme.spacing.xs)
                 .background(RoundedRectangle(cornerRadius: theme.radii.field, style: .continuous)
-                    .fill(selected ? theme.selectionFill(glass: glass) : .clear))
+                    .fill(selected ? theme.selectionFill(glass: glass) : hovered ? theme.hoverFill(glass: glass) : .clear))
                 .padding(.horizontal, theme.spacing.s)
                 .frame(height: theme.card.rowHeight)
                 .contentShape(Rectangle())
@@ -395,7 +456,7 @@ struct SiteIcon: View {
         let shape = RoundedRectangle(cornerRadius: theme.radii.icon, style: .continuous)
         ZStack {
             if let image {
-                shape.fill(theme.colors.iconTile.color)
+                Rectangle().fill(theme.colors.iconTile.color)
                 Image(nsImage: image).resizable().interpolation(.high).scaledToFill()
             } else {
                 shape.fill(theme.colors.accent.color.opacity(0.18))
@@ -405,6 +466,7 @@ struct SiteIcon: View {
             }
         }
         .frame(width: side, height: side)
+        .compositingGroup()   // flat before the clip: the tile would otherwise show as a light fringe around a dark icon
         .clipShape(shape)
         .accessibilityHidden(true)  // decorative: the login's name is read next to it
         .task(id: "\(domain)|\(store.generation)|\(store.enabled)") {
