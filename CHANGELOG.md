@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.5](https://github.com/handlemotion/bisel/compare/v0.1.4...v0.1.5) (2026-11-05)
+
+
+### Features
+
+* create logins from the command panel ([#45](https://github.com/handlemotion/bisel/issues/45)) ([f6b8a17](https://github.com/handlemotion/bisel/commit/f6b8a17b804c84ee0b56c97ccd97610d3b710659))
+
+
+### Bug Fixes
+
+* run only one production copy of Bisel ([#44](https://github.com/handlemotion/bisel/issues/44)) ([d4c4abb](https://github.com/handlemotion/bisel/commit/d4c4abb8bae846c64fa37ca0c39748dcbb9ba0df))
+
+
+### Performance Improvements
+
+* faster unlock, panel and far rows on large boxes ([#42](https://github.com/handlemotion/bisel/issues/42)) ([f367d8b](https://github.com/handlemotion/bisel/commit/f367d8bc12740af4c4e725a26aeea159cae105e4))
+
 ## [0.1.4](https://github.com/handlemotion/bisel/compare/v0.1.3...v0.1.4) (2026-11-04)
 
 
