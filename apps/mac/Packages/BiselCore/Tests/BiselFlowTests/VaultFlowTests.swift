@@ -1034,5 +1034,52 @@ struct VaultFlowTests {
             await #expect(throws: RotationError.deviceNotFound("nope")) { try await a.vault.revoke(deviceID: "nope") }
         }
     }
+
+    // MARK: one running copy
+
+    private func lockPath() -> String {
+        FileManager.default.temporaryDirectory.appendingPathComponent("bisel-lock-\(UUID().uuidString)/instance.lock").path
+    }
+
+    private func held(_ path: String) -> InstanceLock? {
+        if case .held(let lock) = InstanceLock.claim(path: path) { lock } else { nil }
+    }
+
+    @Test("a second copy cannot claim the store while another process holds it, and a crashed holder leaves no stale lock")
+    func crashedHolderLeavesNoStaleLock() throws {
+        let path = lockPath()
+        try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        let holder = Process()
+        let output = Pipe()
+        holder.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        holder.arguments = ["-e", "use Fcntl ':flock'; open(F, '>>', $ARGV[0]) or die; flock(F, LOCK_EX) or die; $| = 1; print \"held\\n\"; sleep 60", path]
+        holder.standardOutput = output
+        try holder.run()
+        defer { if holder.isRunning { holder.terminate() } }
+        _ = output.fileHandleForReading.availableData   // blocks until the holder says it has the lock
+
+        guard case .taken = InstanceLock.claim(path: path) else { Issue.record("a second copy got the lock"); return }
+
+        kill(holder.processIdentifier, SIGKILL)
+        holder.waitUntilExit()
+        #expect(held(path) != nil, "a crash left the lock taken")
+    }
+
+    @Test("a process the app started does not keep the lock after the app quits, or an update's relaunch would find it taken")
+    func installerDoesNotInheritTheLock() throws {
+        let path = lockPath()
+        var app = held(path)
+        #expect(app != nil)
+
+        // Raw `posix_spawn`, because Foundation's `Process` closes every descriptor for the child and would hide a leak.
+        var child: pid_t = 0
+        let arguments: [UnsafeMutablePointer<CChar>?] = [strdup("/bin/sleep"), strdup("60"), nil]
+        defer { arguments.forEach { free($0) } }
+        #expect(posix_spawn(&child, "/bin/sleep", nil, nil, arguments, [nil]) == 0)
+        defer { kill(child, SIGKILL); waitpid(child, nil, 0) }
+
+        app = nil
+        #expect(held(path) != nil, "the child kept the lock")
+    }
 }
 #endif

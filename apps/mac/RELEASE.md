@@ -224,6 +224,9 @@ The Developer ID app and the signed Debug app share the bundle id `app.bisel.mac
 `~/Library/Application Support/bisel`. A box created by a Debug build lives in the Development environment; the shipped app looks
 for it in Production and will not find it. Test a release where no Debug build has run.
 
+Only one Release copy runs per account: it holds `~/Library/Application Support/bisel/instance.lock` for as long as it lives, and
+a second copy brings the first forward and quits. Quit the installed app before opening a candidate. Debug builds take no lock.
+
 ## Rolling back
 
 **The app.** Remove the bad release's assets (or mark it as a pre-release) and point people at the previous DMG. Older notarized

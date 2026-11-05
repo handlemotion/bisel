@@ -17,6 +17,9 @@ struct BiselApp: App {
         // The opt-in CloudKit contract run takes the process over before any scene, AppModel or vault exists.
         LaneContractRun.runIfRequested()
         #endif
+        #if !DEBUG
+        SingleInstance.claimOrQuit()   // before anything can reach `AppModel.shared`, which opens the store
+        #endif
     }
 
     var body: some Scene {
@@ -67,6 +70,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             _ = Updater.shared   // starts Sparkle's scheduled checks
             #if DEBUG
             PanelBoxPerf.mark("launch.app model ready")
+            #else
+            SingleInstance.listen()
             #endif
         }
         #if BISEL_CLOUDKIT
