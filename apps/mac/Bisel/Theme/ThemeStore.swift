@@ -36,6 +36,9 @@ final class ThemeStore {
     }
 
     private init() {
+        #if DEBUG
+        PanelBoxPerf.mark("launch.theme store begins")
+        #endif
         selectedFamily = UserDefaults.standard.string(forKey: Self.defaultsKey) ?? "bisel"
         let app = NSApplication.shared
         systemIsDark = Self.isDark(app.effectiveAppearance)

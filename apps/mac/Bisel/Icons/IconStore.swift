@@ -25,21 +25,19 @@ final class IconStore {
     static let shared = IconStore()
 
     static let enabledKey = "icons.enabled"
-    static let negativeTTL: TimeInterval = 7 * 24 * 3600
+    nonisolated static let negativeTTL: TimeInterval = 7 * 24 * 3600
 
     var enabled: Bool {
         didSet { UserDefaults.standard.set(enabled, forKey: Self.enabledKey); generation += 1 }
     }
     /// Bumped by "Clear icon cache" and by toggling, so visible rows re-resolve.
     private(set) var generation = 0
-    /// Bumped whenever an icon finishes loading so every visible view of that domain (row and detail) refreshes.
-    private(set) var loadedCount = 0
 
     @ObservationIgnored private let memory = NSCache<NSString, NSImage>()
     @ObservationIgnored private var inflight: [String: Task<NSImage?, Never>] = [:]
     @ObservationIgnored private let gate = FetchGate(limit: 3)
 
-    static var directory: URL {
+    nonisolated static var directory: URL {
         #if DEBUG
         // A throwaway store (BISEL_DATA_DIR) must not read or fill the real icon cache.
         if let dir = ProcessInfo.processInfo.environment["BISEL_DATA_DIR"], !dir.isEmpty {
@@ -70,30 +68,44 @@ final class IconStore {
     /// Persist to disk only when the key itself survives restarts.
     nonisolated static var canPersist: Bool { IconKey.shared.persistent }
 
-    /// Instant lookup (memory, then disk). Never touches the network.
+    /// Instant lookup, memory only: rows ask for this while they scroll, so it never touches the disk, the Keychain or the network.
+    /// By domain, not by the file key: the key costs an HMAC. It lives only in this process, next to the rows that hold the domain.
     func cached(_ domain: String) -> NSImage? {
         guard enabled, !domain.isEmpty else { return nil }
-        let k = Self.key(for: domain)
-        if let img = memory.object(forKey: k as NSString) { return img }
-        let file = Self.directory.appending(path: "\(k).png")
-        if Self.canPersist, let data = try? Data(contentsOf: file), let img = NSImage(data: data) {
-            memory.setObject(img, forKey: k as NSString)
-            return img
-        }
-        return nil
+        return memory.object(forKey: domain as NSString)
+    }
+
+    /// What the disk holds for `domain`, away from the main thread: the file key, an icon decoded here (`NSImage(data:)` would
+    /// decode it on the main thread, in the frame that draws it), or a recent failure.
+    @concurrent
+    private static func lookOnDisk(_ domain: String) async -> (key: String, image: NSImage?, failedRecently: Bool) {
+        let k = key(for: domain)
+        guard canPersist else { return (k, nil, false) }
+        if let data = try? Data(contentsOf: directory.appending(path: "\(k).png")), let image = decoded(data) { return (k, image, false) }
+        let neg = directory.appending(path: "\(k).neg")
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: neg.path))?[.modificationDate] as? Date
+        return (k, nil, mtime.map { Date().timeIntervalSince($0) < negativeTTL } ?? false)
+    }
+
+    /// An icon this cache wrote (`IconFetcher.normalize`), with its pixels decoded now rather than at first draw.
+    nonisolated private static func decoded(_ png: Data) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(png as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
     /// Cached image, else a (deduplicated, gated, negatively-cached) fetch. Returns nil when disabled or not available.
     func load(_ domain: String) async -> NSImage? {
         guard enabled, !domain.isEmpty else { return nil }
         if let img = cached(domain) { return img }
-        let k = Self.key(for: domain)
-        let neg = Self.directory.appending(path: "\(k).neg")
-        if Self.canPersist, let attrs = try? FileManager.default.attributesOfItem(atPath: neg.path),
-           let mtime = attrs[.modificationDate] as? Date, Date().timeIntervalSince(mtime) < Self.negativeTTL {
-            return nil
+        let disk = await Self.lookOnDisk(domain)
+        guard enabled else { return nil }
+        if let image = disk.image {
+            memory.setObject(image, forKey: domain as NSString)
+            return image
         }
-        if let t = inflight[k] { return await t.value }
+        if disk.failedRecently { return nil }
+        let k = disk.key
         let gate = self.gate
         let t = Task<NSImage?, Never> { [weak self] in
             await gate.acquire()
@@ -113,13 +125,12 @@ final class IconStore {
         guard enabled else { return nil }
         let persist = Self.canPersist
         if persist { try? FileManager.default.createDirectory(at: Self.directory, withIntermediateDirectories: true) }
-        if let png, let img = NSImage(data: png) {
+        if let png, let img = Self.decoded(png) {
             if persist {
                 try? png.write(to: Self.directory.appending(path: "\(k).png"))
                 try? FileManager.default.removeItem(at: Self.directory.appending(path: "\(k).neg"))
             }
-            memory.setObject(img, forKey: k as NSString)
-            loadedCount += 1
+            memory.setObject(img, forKey: domain as NSString)
             return img
         }
         if !cancelled && persist {

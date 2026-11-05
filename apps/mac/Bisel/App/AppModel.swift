@@ -29,15 +29,22 @@ final class AppModel {
     private var agentListener: AgentListener?
 
     private init() {
+        #if DEBUG
+        PanelBoxPerf.mark("launch.app model begins")
+        #endif
         #if BISEL_DEV_FIXTURE
         vault = BiselEnvironment.useDevFixture ? DevFixtureVault() : service
         #else
         vault = service
         #endif
         panelModel = CommandPanelModel(source: vault, secrets: vault)
+        #if DEBUG
+        PanelBoxPerf.mark("launch.vault service built")
+        #endif
         panelController = CommandPanelController(model: panelModel)
         wirePanelActions()
         #if DEBUG
+        PanelBoxPerf.mark("launch.panel built")
         // Scripted flow runs (BISEL_DEV_FLOW) must not grab the global hotkey or open windows on someone's screen.
         if ProcessInfo.processInfo.environment["BISEL_DEV_FLOW"] != nil { KeyboardShortcuts.disable(.commandPanel) }
         #endif
@@ -51,9 +58,11 @@ final class AppModel {
         }
         service.onRowsChange = { [weak self] in self?.panelModel.refresh(keepingSelection: true) }
         startAgentListener()
+        Task { await LoginItem.shared.refresh() }
         Task {
             await service.start()
             #if DEBUG
+            PanelBoxPerf.mark("launch.phase known")
             if ProcessInfo.processInfo.environment["BISEL_DEV_AUTOUNLOCK"] == "1", service.phase == .locked {
                 Log.app.fault("BISEL_DEV_AUTOUNLOCK=1 (debug build only)")
                 try? await service.unlock(reason: "dev autounlock")

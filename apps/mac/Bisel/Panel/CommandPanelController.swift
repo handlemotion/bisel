@@ -161,6 +161,8 @@ final class CommandPanelController {
         guard state == .shown else { return }
         #if DEBUG
         if reason == "resignKey", ProcessInfo.processInfo.environment["BISEL_DEV_STICKY"] == "1" { return }
+        // A measured run keeps the panel open whatever the person does on this Mac meanwhile.
+        if reason != "perf", ProcessInfo.processInfo.environment["BISEL_DEV_PANEL_PERF"] == "box" { return }
         #endif
         Log.panel.notice("STATE hide reason=\(reason, privacy: .public) hoverStats=\(self.model.hoverStats.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ","), privacy: .public)")
         model.hoverStats = [:]

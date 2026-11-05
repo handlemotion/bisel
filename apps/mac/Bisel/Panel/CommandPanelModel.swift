@@ -267,14 +267,16 @@ final class CommandPanelModel {
         }
     }
 
-    /// What VoiceOver says for list row `index`: login, user and site, and the position (the list is lazy, so the
-    /// total would otherwise be unknown).
+    /// Looked up once: every row on screen builds this text on every render, whether or not anything reads it.
+    private static let positionFormat = String(localized: "%lld of %lld")
+
+    /// What VoiceOver says for list row `index`: login, user and site, and the position (the list only holds the rows on
+    /// screen, so the total would otherwise be unknown).
     func spokenDescription(ofResultAt index: Int) -> String {
         guard results.indices.contains(index) else { return "" }
         let r = results[index]
         let parts = [r.username, r.domain].filter { !$0.isEmpty }
-        let position = String(localized: "\(index + 1) of \(results.count)")
-        return (parts + [position]).joined(separator: ", ")
+        return (parts + [String(format: Self.positionFormat, index + 1, results.count)]).joined(separator: ", ")
     }
 
     func spokenDescription(ofActionAt index: Int) -> String {
@@ -360,12 +362,16 @@ final class CommandPanelModel {
 
     // MARK: pointer (positions are in the view's top-left "panelRoot" space)
 
-    /// Row under `p`, from the frames the rows on screen report. Not arithmetic on the scroll offset: the lazy list only
-    /// estimates the rows it has not built, so on a long list an offset does not say which row is where.
+    /// Row under `p`, from the frames the rows on screen report.
     private func rowID(at p: CGPoint) -> String? {
         guard listFrame.contains(p) else { return nil }
         let wantsAction = mode != .search
         return rowFrames.first { $0.key.hasPrefix("action.") == wantsAction && $0.value.contains(p) }?.key
+    }
+
+    /// Position in `results` of a list row's frame id ("row.12").
+    private func resultIndex(_ id: String) -> Int? {
+        id.hasPrefix("row.") ? Int(id.dropFirst(4)).flatMap { results.indices.contains($0) ? $0 : nil } : nil
     }
 
     private func pill(at p: CGPoint) -> PillID? {
@@ -381,7 +387,7 @@ final class CommandPanelModel {
         guard let id = rowID(at: p) else { return }
         if id.hasPrefix("action.") {
             if let i = Int(id.dropFirst(7)), i != actionIndex { pointerDriven = true; actionIndex = i }
-        } else if let i = results.firstIndex(where: { $0.id == id }), i != selected {
+        } else if let i = resultIndex(id), i != selected {
             pointerDriven = true
             selected = i
             hoverStats["row\(i)", default: 0] += 1
@@ -404,7 +410,7 @@ final class CommandPanelModel {
             // The ⌘K actions menu: a click runs the action.
             if let i = Int(id.dropFirst(7)) { actionIndex = i }
             activate(.plain)
-        } else if let i = results.firstIndex(where: { $0.id == id }) {
+        } else if let i = resultIndex(id) {
             // A list row only SELECTS (the detail pane shows it): no copy, no fill, no close.
             selected = i
             Log.panel.notice("click row selected=\(self.selected)")

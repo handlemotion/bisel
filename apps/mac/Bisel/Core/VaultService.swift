@@ -5,28 +5,6 @@ import BiselCore
 import BiselCloudKit
 #endif
 
-/// Non-secret view of an item: what the list, the search index and the panel need. Passwords, notes and TOTP
-/// secrets are never held here; they are decrypted on demand through the `Vault` actor.
-struct ItemRow: Identifiable, Hashable, Sendable {
-    let id: String
-    let type: ItemType
-    let title: String
-    let urls: [String]
-    let username: String
-    let tags: [String]
-    let updatedAt: Date
-    let hasPassword: Bool
-    let hasTOTP: Bool
-    let totpPeriod: Int
-
-    init(_ item: Item) {
-        id = item.id; type = item.type; title = item.title; urls = item.urls; username = item.username ?? ""
-        tags = item.tags; updatedAt = item.updatedAt; hasPassword = !(item.password ?? "").isEmpty; hasTOTP = item.totp != nil; totpPeriod = item.totp?.period ?? 30
-    }
-
-    var domain: String { SearchRecord.domain(of: urls.first) }
-}
-
 /// Something the owner must look at: a sync reported an event or an integrity result that could mean a stolen key, a stolen
 /// phrase or a hostile server. Kept until dismissed, across relaunches (the Devices window lists them; the sync indicator turns red).
 struct SecurityAlert: Identifiable, Equatable, Codable {
@@ -112,8 +90,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     @ObservationIgnored private(set) var setup: BoxSetup?
     @ObservationIgnored private let directory = BiselEnvironment.dataDirectory
     @ObservationIgnored private let usage: UsageStore
-    @ObservationIgnored private let index = FuzzySearchIndex()
-    @ObservationIgnored private var rowsByID: [String: ItemRow] = [:]
+    @ObservationIgnored private let index = BoxIndex()
     @ObservationIgnored private var reloadGeneration = 0
     @ObservationIgnored private var installedGeneration = 0
     @ObservationIgnored private var pollTimer: Timer?
@@ -141,6 +118,9 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     static var idleLockMinutes: Int { UserDefaults.standard.setting(idleLockKey, in: 1...30, default: 5) }
 
     init() {
+        #if DEBUG
+        PanelBoxPerf.mark("launch.vault service begins")
+        #endif
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         usage = UsageStore(directory: directory)
         loadAlerts()
@@ -159,7 +139,12 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
 
     func start() async {
         lockMonitor = LockMonitor(service: self)
+        #if DEBUG
+        // A measured run must not be locked halfway by an idle Mac: it would time an empty list.
+        if ProcessInfo.processInfo.environment["BISEL_DEV_PANEL_PERF"] != "box" { lockMonitor?.start() }
+        #else
         lockMonitor?.start()
+        #endif
         BiometricGate.enrollmentChanged = { [weak self] in
             // Only an open box is at stake; a locked one already refuses at the Secure Enclave, and re-adding this Mac must not stall.
             guard let self, self.isUnlocked, self.vault?.deviceKeyStatus() == .biometryChanged else { return false }
@@ -283,8 +268,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     }
 
     private func dropDecryptedState() {
-        rows = []; rowsByID = [:]; otpGatedAt = [:]; rowsLoaded = false
-        index.replace([])
+        rows = []; otpGatedAt = [:]; rowsLoaded = false
+        index.clear()
         undecryptable = 0
         // pendingPhrase is deliberately kept: losing the only copy of a just-created phrase to an idle lock would be worse.
     }
@@ -517,14 +502,13 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     /// swaps the results in (it used to do the sort and the tokenising itself: ~90 ms at 5,000 items).
     func reload() async {
         guard let vault, phase == .unlocked else { return }
-        await refreshBackupStatus()   // a box only on this Mac never syncs
         reloadGeneration += 1
         let generation = reloadGeneration
         do {
             let listing = try await vault.items()
             guard phase == .unlocked else { return }   // locked while decrypting: discard
             let usage = usage.entries
-            let built = await Task.detached(priority: .userInitiated) { Self.build(listing.items, usage: usage) }.value
+            let built = await Task.detached(priority: .userInitiated) { BoxIndex.build(listing.items, usage: usage) }.value
             // Locked meanwhile, or a reload that started later already installed a newer snapshot.
             guard phase == .unlocked, generation >= installedGeneration else { return }
             installedGeneration = generation
@@ -534,31 +518,14 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             Log.app.error("reload failed: \(describe(error))")
             if case BiselVault.VaultError.locked = error { setPhase(.locked) }
         }
+        await refreshBackupStatus()   // after the list: a box only on this Mac never syncs, so this is its only refresh
     }
 
-    private struct Built: Sendable {
-        let rows: [ItemRow]
-        let byID: [String: ItemRow]
-        let index: FuzzySearchIndex.Built
-    }
-
-    private nonisolated static func build(_ items: [Item], usage: [String: UsageStore.Entry]) -> Built {
-        let all = items.map(ItemRow.init)
-        let sorted = all.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        let records = all.filter { $0.type == .login || $0.type == .secret }.map { r in
-            let u = usage[r.id]
-            return SearchRecord(id: r.id, title: r.title, username: r.username, urls: r.urls, tags: r.tags,
-                                lastUsed: u?.last ?? r.updatedAt, useCount: u?.count ?? 0)
-        }
-        return Built(rows: sorted, byID: Dictionary(uniqueKeysWithValues: all.map { ($0.id, $0) }), index: FuzzySearchIndex.build(records))
-    }
-
-    private func apply(_ built: Built) {
+    private func apply(_ built: BoxIndex.Built) {
         rows = built.rows
         rowsLoaded = true
         defer { onRowsChange?() }
-        rowsByID = built.byID
-        index.install(built.index)
+        index.install(built)
     }
 
     func item(id: String) async throws -> Item {
@@ -862,10 +829,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
 
     func search(_ query: String, limit: Int) -> [VaultSearchResult] {
         guard isUnlocked else { return [] }
-        return index.search(query, limit: limit).map {
-            VaultSearchResult(id: $0.id, title: $0.title, username: $0.username, domain: $0.domain, tags: $0.tags,
-                              hasPassword: rowsByID[$0.id]?.hasPassword ?? true, hasTOTP: rowsByID[$0.id]?.hasTOTP ?? true)
-        }
+        return index.search(query, limit: limit)
     }
 
     func recordUse(id: String) {
@@ -906,11 +870,11 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     }
 
     func url(for id: String) -> URL? {
-        guard let first = rowsByID[id]?.urls.first else { return nil }
+        guard let first = index.row(id)?.urls.first else { return nil }
         return URLPolicy.allowed(first)
     }
 
-    func hosts(for id: String) -> [String] { FillOrigin.hosts(of: rowsByID[id]?.urls ?? []) }
+    func hosts(for id: String) -> [String] { FillOrigin.hosts(of: index.row(id)?.urls ?? []) }
 
-    func totpPeriod(for id: String) -> Int { rowsByID[id]?.totpPeriod ?? 30 }
+    func totpPeriod(for id: String) -> Int { index.row(id)?.totpPeriod ?? 30 }
 }

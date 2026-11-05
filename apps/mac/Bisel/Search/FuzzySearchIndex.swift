@@ -8,10 +8,16 @@ struct SearchRecord: Sendable {
     let username: String
     let urls: [String]
     let tags: [String]
+    /// The first address's host. Stored: parsing a URL per item is what opening the panel used to spend its time on.
+    let domain: String
     var lastUsed: Date
     var useCount: Int
 
-    var domain: String { Self.domain(of: urls.first) }
+    init(id: String, title: String, username: String, urls: [String], tags: [String], lastUsed: Date, useCount: Int) {
+        self.id = id; self.title = title; self.username = username; self.urls = urls; self.tags = tags
+        self.lastUsed = lastUsed; self.useCount = useCount
+        domain = Self.domain(of: urls.first)
+    }
 
     static func domain(of url: String?) -> String {
         guard let url, let host = URL(string: url)?.host() else { return "" }
@@ -68,7 +74,7 @@ final class FuzzySearchIndex {
     struct Built: Sendable {
         fileprivate let entries: [Entry]
         fileprivate let indexByID: [String: Int]
-        fileprivate let alphabetical: [Int]
+        let alphabetical: [Int]
     }
 
     init(records: [SearchRecord] = []) { replace(records) }
@@ -123,9 +129,15 @@ final class FuzzySearchIndex {
 
     func record(id: String) -> SearchRecord? { indexByID[id].map { entries[$0].record } }
 
-    func search(_ query: String, limit: Int) -> [SearchRecord] {
+    func search(_ query: String, limit: Int) -> [SearchRecord] { matches(query, limit: limit).map { entries[$0].record } }
+
+    /// True when `query` lists everything A to Z, which needs no scoring.
+    static func isEmptyQuery(_ query: String) -> Bool { query.allSatisfy(\.isWhitespace) }
+
+    /// Positions in the records given to `build`, best first (A to Z for an empty query).
+    func matches(_ query: String, limit: Int) -> [Int] {
         let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
-        if terms.isEmpty { return alphabetical.prefix(limit).map { entries[$0].record } }
+        if terms.isEmpty { return Array(alphabetical.prefix(limit)) }
         let prepared = terms.map {
             Term(text: $0, tolerant: $0.count >= 5, literalQ: Self.literal.prepare($0), tolerantQ: Self.tolerant.prepare($0))
         }
@@ -134,8 +146,8 @@ final class FuzzySearchIndex {
             let j = terms.joined()
             return Term(text: j, tolerant: j.count >= 5, literalQ: Self.literal.prepare(j), tolerantQ: Self.tolerant.prepare(j))
         }() : nil
-        var scored: [(score: Double, record: SearchRecord)] = []
-        for e in entries {
+        var scored: [(score: Double, position: Int)] = []
+        for (position, e) in entries.enumerated() {
             var total = 0.0
             var ok = true
             for t in prepared {
@@ -153,14 +165,15 @@ final class FuzzySearchIndex {
                 for f in e.fields { best = max(best, score(f.whole, j, weight: f.weight, isWord: false)) }
                 itemScore = max(itemScore, best * 0.95)
             }
-            if itemScore > 0 { scored.append((itemScore, e.record)) }
+            if itemScore > 0 { scored.append((itemScore, position)) }
         }
         scored.sort { a, b in
             if abs(a.score - b.score) > 0.0001 { return a.score > b.score }
-            if a.record.lastUsed != b.record.lastUsed { return a.record.lastUsed > b.record.lastUsed }
-            return a.record.useCount > b.record.useCount
+            let x = entries[a.position].record, y = entries[b.position].record
+            if x.lastUsed != y.lastUsed { return x.lastUsed > y.lastUsed }
+            return x.useCount > y.useCount
         }
-        return scored.prefix(limit).map(\.record)
+        return scored.prefix(limit).map(\.position)
     }
 
     /// One candidate string against one term, applying the kind policy above. 0 = rejected.
