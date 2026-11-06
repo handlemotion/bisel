@@ -1,3 +1,4 @@
+import LocalAuthentication
 import AppKit
 import KeyboardShortcuts
 import SwiftUI
@@ -163,6 +164,7 @@ final class AppModel {
 
     private func wirePanelActions() {
         panelModel.runUnlock = { [weak self] in self?.unlockFromPanel() }
+        panelModel.runEmbeddedUnlock = { [weak self] in self?.unlockInPanel(with: $0) }
         panelModel.runOpenSettings = { [weak self] page in
             self?.panelController.hide("settings", immediate: true)
             self?.showSettings(page)
@@ -233,13 +235,24 @@ final class AppModel {
             showMainWindow()
             return
         }
-        guard !panelController.authenticating else { return }
+        guard !panelController.authenticating, panelModel.unlockContext == nil else { return }
+        // Touch ID shows in the card, so there is no sheet on top of it. The card starts `unlockInPanel` once its view exists.
+        guard BiselEnvironment.usesSoftwareKeys else { panelModel.unlockContext = LAContext(); return }
         panelController.authenticating = true
         Task {
             defer { panelController.authenticating = false }
             do { try await service.unlock(reason: "Unlock your box to use the command panel") }
             catch KeyStoreError.userCancelled {}
             catch BiometricGate.Failure.denied {}
+            catch { Toast.shared.show(describe(error), isError: true) }
+        }
+    }
+
+    private func unlockInPanel(with context: LAContext) {
+        Task {
+            defer { if panelModel.unlockContext === context { panelModel.unlockContext = nil } }
+            do { try await service.unlock(reason: "Unlock your box to use the command panel", prompt: EmbeddedPrompt(context)) }
+            catch KeyStoreError.userCancelled {}
             catch { Toast.shared.show(describe(error), isError: true) }
         }
     }

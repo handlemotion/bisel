@@ -71,7 +71,7 @@ struct CommandPanelView: View {
                     else { DetailPane(model: model) }
                 }
             } else {
-                BoxLockedState { model.activate(.plain) }
+                BoxLockedState(context: model.unlockContext, ready: { model.runEmbeddedUnlock?($0) }) { model.activate(.plain) }
             }
         }
     }
