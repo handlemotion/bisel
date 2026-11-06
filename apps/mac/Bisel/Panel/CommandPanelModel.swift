@@ -508,6 +508,23 @@ final class CommandPanelModel {
         PanelAnnouncer.announce(String(localized: "New login"), priority: .medium)
     }
 
+    /// A setup link (`AppModel.setUpCode`): the key goes into the form, and into one already being typed, which is likely that site's
+    /// login. No generated password: this site has one already. A draft with nothing else typed stays too, so the key is not lost.
+    func openNewLogin(codeLink link: TOTPSetup.Parsed) {
+        guard canCreate else { return }
+        if newLogin == nil {
+            guard let editor = items.newEditor() else { return }
+            untouchedDraft = editor.draft
+            newLogin = editor
+        }
+        guard let editor = newLogin else { return }
+        editor.draft.totp = TOTPSetup.text(for: link.params)
+        if editor.draft.title.isEmpty { editor.draft.title = link.issuer ?? link.account ?? "" }
+        if editor.draft.username.isEmpty { editor.draft.username = link.account ?? "" }
+        newLoginSelected = false
+        openNewLogin()
+    }
+
     /// The form goes and so does its row. A draft nobody typed in goes too, so the next + starts fresh.
     private func leaveNewLogin() {
         guard newLoginSelected else { return }
