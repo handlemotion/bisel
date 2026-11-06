@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bisel</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font:
+          13px/1.4 system-ui,
+          sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 12px;
+        background: Canvas;
+        color: CanvasText;
+      }
+      h1 {
+        margin: 0;
+        font-size: 13px;
+      }
+      p {
+        margin: 2px 0 10px;
+        overflow-wrap: anywhere;
+      }
+      button {
+        font: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 id="title"></h1>
+    <p id="detail"></p>
+    <button id="accept" type="button"></button>
+    <button id="decline" type="button">Not Now</button>
+    <script src="prompt.js"></script>
+  </body>
+</html>

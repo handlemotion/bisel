@@ -17,6 +17,11 @@
           "path": "apps/mac/project.yml"
         },
         {
+          "type": "json",
+          "path": "apps/chrome/public/manifest.json",
+          "jsonpath": "$.version"
+        },
+        {
           "type": "xml",
           "path": "apps/mac/Bisel/Info.plist",
           "xpath": "//plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::string[1]"

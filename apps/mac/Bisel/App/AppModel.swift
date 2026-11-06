@@ -29,6 +29,7 @@ final class AppModel {
     private(set) var agentBroker: AgentBroker?
     private var agentListener: AgentListener?
     private var autoFillListener: SocketListener<AutoFillRequest, AutoFillResult>?
+    private var browserListener: SocketListener<BrowserEnvelope, BrowserReply>?
 
     private init() {
         #if DEBUG
@@ -61,6 +62,7 @@ final class AppModel {
         service.onRowsChange = { [weak self] in self?.panelModel.refresh(keepingSelection: true) }
         startAgentListener()
         startAutoFillListener()
+        startBrowserListener()
         Task { await LoginItem.shared.refresh() }
         Task {
             await service.start()
@@ -117,6 +119,23 @@ final class AppModel {
             autoFillListener = listener
         } catch {
             Log.app.error("autofill socket could not start")
+        }
+    }
+
+    /// The Chrome extension's way in, through the signed native host. It can only save (docs/SPEC.md §8, "Chrome extension").
+    private func startBrowserListener() {
+        guard let vault = service.vault else { return }
+        let broker = BrowserSaveBroker(vault: vault, host: AppBrowserSaveHost(service: service), isPublicSuffix: DomainName.isPublicSuffix)
+        let listener = SocketListener<BrowserEnvelope, BrowserReply>(path: AppBrowserSaveHost.socketPath,
+                                                                     clientRequirement: AppBrowserSaveHost.clientRequirement) { envelope in
+            BrowserReply(id: envelope.id, answer: await broker.handle(envelope.request))
+        }
+        do {
+            try listener.start()
+            browserListener = listener
+            BrowserHostManifest.install()
+        } catch {
+            Log.app.error("browser socket could not start")
         }
     }
 

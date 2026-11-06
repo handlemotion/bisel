@@ -224,6 +224,14 @@ grep -q '^Identifier=app.bisel.cli$' <<<"$tool_sig" || die "the agent tool's ide
 grep -q "^Authority=Developer ID Application: .*($TEAM)$" <<<"$tool_sig" || die "the agent tool is not signed with Developer ID ($TEAM)."
 grep -qE '^CodeDirectory .*flags=0x[0-9a-f]*\(runtime\)' <<<"$tool_sig" || die "hardened runtime is not on for the agent tool."
 grep -q '^Timestamp=' <<<"$tool_sig" || die "the agent tool's signature has no secure timestamp."
+# The app trusts Chrome's native host by this signature too (AgentPeer.browserHostRequirement), and Chrome launches it by path.
+BROWSER_HOST="$APP/Contents/Helpers/bisel-browser-host"
+[[ -x "$BROWSER_HOST" ]] || die "no Chrome native host at $BROWSER_HOST."
+host_sig="$(codesign -dvv "$BROWSER_HOST" 2>&1)"
+grep -q '^Identifier=app.bisel.browser-host$' <<<"$host_sig" || die "the Chrome native host's identifier is not app.bisel.browser-host."
+grep -q "^Authority=Developer ID Application: .*($TEAM)$" <<<"$host_sig" || die "the Chrome native host is not signed with Developer ID ($TEAM)."
+grep -qE '^CodeDirectory .*flags=0x[0-9a-f]*\(runtime\)' <<<"$host_sig" || die "hardened runtime is not on for the Chrome native host."
+grep -q '^Timestamp=' <<<"$host_sig" || die "the Chrome native host's signature has no secure timestamp."
 [[ "$(ent "$AUTOFILL_ENTITLEMENT")" == "true" ]] || die "the app has no AutoFill entitlement: the identity store would refuse it."
 ent com.apple.security.application-groups | grep -q "$APP_GROUP" || die "the app is not in App Group $APP_GROUP: the extension could not reach it."
 # The app trusts the extension by this signature too (AgentPeer.autoFillRequirement), and macOS kills it without a sandbox or a profile.

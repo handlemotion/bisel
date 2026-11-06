@@ -82,6 +82,15 @@ if strings -a "$TOOL" | grep -qE 'GRDB|ItemSealer|SecureEnclave|VaultKeys'; then
 fi
 echo "PASS: the agent tool is in the bundle and links no core"
 
+# Chrome's native host holds no keys and opens no store (docs/SPEC.md §8, "Chrome extension"): if it links the core, a process any web
+# page's input reaches has crypto and the box one step away.
+BROWSER_HOST="$REL_APP/Contents/Helpers/bisel-browser-host"
+[[ -x "$BROWSER_HOST" ]] || { echo "FAIL: no Chrome native host at $BROWSER_HOST" >&2; exit 1; }
+if strings -a "$BROWSER_HOST" | grep -qE 'GRDB|ItemSealer|SecureEnclave|VaultKeys'; then
+  echo "FAIL: the Chrome native host links the core; it must link BiselAgent only" >&2; exit 1
+fi
+echo "PASS: the Chrome native host is in the bundle and links no core"
+
 # The AutoFill extension holds no keys and opens no store (docs/SPEC.md §8, "AutoFill"): if it links the core, a process Safari talks to
 # has crypto and the box one step away.
 APPEX="$REL_APP/Contents/PlugIns/BiselAutoFill.appex"

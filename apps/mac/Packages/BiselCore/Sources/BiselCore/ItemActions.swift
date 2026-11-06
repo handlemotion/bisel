@@ -97,9 +97,11 @@ extension Vault {
     /// field differently (or the item was deleted elsewhere) nothing is written and `ItemConflict` is thrown; call again with
     /// `resolution`. A write needs a fresh biometric check (not for `unchanged` or `keepBoth`).
     /// `gate` replaces the configured check for this call: an agent's edit shows its own prompt, it is never skipped.
+    /// `keepingPrevious` puts the replaced version in the local trash on any box, also one whose server would otherwise keep it.
     /// Throws `ItemValidationError`, `ItemConflict`, `ItemActionError.draftIsNew`, `VaultError.locked`.
     @discardableResult
-    public func updateItem(_ draft: ItemDraft, resolution: ConflictResolution? = nil, gate: (any BiometricGate)? = nil) async throws -> UpdateOutcome {
+    public func updateItem(_ draft: ItemDraft, resolution: ConflictResolution? = nil, gate: (any BiometricGate)? = nil,
+                           keepingPrevious: Bool = false) async throws -> UpdateOutcome {
         guard let base = draft.base else { throw ItemActionError.draftIsNew }
         let content = try ItemValidator.validated(draft)
         var authenticated = false
@@ -118,7 +120,7 @@ extension Vault {
                 // without another suspension.
                 if !authenticated { try await (gate ?? config.gate).authenticate(reason: "Edit \(base.title)"); authenticated = true; continue }
                 item.updatedAt = Self.storedNow()
-                try writeItem(try checked(item), key: k, keepPrevious: keepPrevious || keepsLocalHistory())
+                try writeItem(try checked(item), key: k, keepPrevious: keepPrevious || keepingPrevious || keepsLocalHistory())
                 return .saved(item, mergedRemoteChanges: remote)
             }
         }

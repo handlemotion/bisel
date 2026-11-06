@@ -16,6 +16,7 @@ What is in the repo:
 | CloudKit environment                    | `BISEL_ICLOUD_ENVIRONMENT`: `Development` in Debug, `Production` in Release; `iCloudContainerEnvironment: Production` in the export options |
 | Agent CLI (`bisel`, `bl`)               | `project.yml`, target `BiselCLI`, embedded at `Contents/Helpers/bisel`; `Tools/release.sh` checks its identifier `app.bisel.cli`, Developer ID, hardened runtime and timestamp. `docs/AGENT-CLI.md` |
 | AutoFill extension                      | `project.yml`, target `BiselAutoFill`, embedded at `Contents/PlugIns/BiselAutoFill.appex`, its own profile `Bisel AutoFill Developer ID`; `Tools/release.sh` checks both profiles, its signature, sandbox and entitlements. `docs/SPEC.md` §8, "AutoFill" |
+| Chrome native host                      | `project.yml`, target `BiselBrowserHost`, embedded at `Contents/Helpers/bisel-browser-host`; `Tools/release.sh` checks its identifier `app.bisel.browser-host`, Developer ID, hardened runtime and timestamp, and `Tools/check-release.sh` that it carries no keys or debug hooks. The app writes `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/app.bisel.browser.json` on launch, where Chrome is installed, with the path of the running app. No profile, no entitlements. `docs/SPEC.md` §8, "Chrome extension" |
 | Export options                          | `Tools/ExportOptions.plist` (`developer-id`, manual, profiles `Bisel Developer ID` and `Bisel AutoFill Developer ID`)                       |
 | Release script                          | `Tools/release.sh`: preflight, archive, export, verify, notarize, staple, assess, DMG or zip, Sparkle appcast; `--publish <tag>` uploads and publishes |
 | In-app updates (Sparkle 2)              | `project.yml`: the `Sparkle` package, `SUFeedURL`, `SUPublicEDKey` and the update keys in `info`; `Bisel/App/Updater.swift`; see "Updates"  |
@@ -198,6 +199,7 @@ reset those throwaway boxes.
 4. Smoke test on a Mac or user account that has never run a Debug build: open the DMG, drag Bisel to Applications, launch. There
    should be no Gatekeeper warning beyond the usual "downloaded from the internet" prompt. Create a box in iCloud and check it syncs.
    Turn Bisel on in System Settings → General → AutoFill & Passwords, unlock, and fill a login in Safari: one Touch ID, the login goes in.
+   Load `apps/chrome/dist` unpacked in Chrome (`apps/chrome/README.md`), sign in on a site and accept the prompt: one Touch ID, the login is in the box.
 5. Publish: merge the release-please PR (it tags `vX.Y.Z` and creates the GitHub release as a draft, so the update feed stays on
    the previous release), build from that tag's commit, then
 
