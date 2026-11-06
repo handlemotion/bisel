@@ -17,6 +17,12 @@ Include what you found, where (file and line, or the request), how to reproduce 
 
 Known, accepted issues are listed in [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md); a new way to exploit one of them is still in scope.
 
+## What AutoFill exposes
+
+System AutoFill needs a list of what it may offer, and the system keeps that list (`ASCredentialIdentityStore`) as plaintext outside the box. While the box is unlocked it holds, for each login with a password: the site's host, the username and the item's random id. It never holds a title, password, note or one-time code. A process running as you, or someone with your unlocked Mac, may be able to read which sites you have logins on, and under which usernames. The list is emptied when the box locks, resets or quits; after a crash it stays until the next launch. Details are in [docs/SPEC.md](docs/SPEC.md) §8, "AutoFill".
+
+The AutoFill extension itself holds no keys and cannot open the box. It gets one password at a time from the app, after Touch ID, and only for a login whose address matches the site.
+
 ## Please don't report
 
 - Attacks that need an unlocked Mac in the attacker's hands, root or malware on the device, or a compromised Apple ID and its devices, unless Bisel makes them worse than the platform already does.

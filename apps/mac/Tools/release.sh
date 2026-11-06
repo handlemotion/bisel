@@ -20,6 +20,10 @@ TEAM=ZVGTVNUPVA
 BUNDLE_ID=app.bisel.mac
 CONTAINER=iCloud.app.bisel
 PROFILE_NAME="Bisel Developer ID"   # PROVISIONING_PROFILE_SPECIFIER in project.yml and provisioningProfiles in ExportOptions.plist
+AUTOFILL_ID=app.bisel.mac.autofill
+AUTOFILL_PROFILE_NAME="Bisel AutoFill Developer ID"   # the same two places, for the extension
+AUTOFILL_ENTITLEMENT=com.apple.developer.authentication-services.autofill-credential-provider
+APP_GROUP="$TEAM.app.bisel"   # AutoFillSocket.appGroup
 NOTARY_PROFILE="${BISEL_NOTARY_PROFILE:-bisel-notary}"
 SPARKLE_ACCOUNT="${BISEL_SPARKLE_ACCOUNT:-bisel}"
 REPO=handlemotion/bisel   # SUFeedURL in project.yml reads releases/latest/download/appcast.xml from it
@@ -92,16 +96,20 @@ IDENTITY="$(security find-identity -v -p codesigning | sed -nE "s/.*\"(Developer
 echo "identity: $IDENTITY"
 
 # The profile Xcode resolves by name. Read each installed profile's plist (security cms only decodes it, nothing is printed).
-PROFILE=""
-for dir in "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" "$HOME/Library/MobileDevice/Provisioning Profiles"; do
-  [[ -d "$dir" ]] || continue
-  for f in "$dir"/*.provisionprofile; do
-    [[ -f "$f" ]] || continue
-    plist="$(security cms -D -i "$f" 2>/dev/null)" || continue
-    name="$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<<"$plist" 2>/dev/null || true)"
-    [[ "$name" == "$PROFILE_NAME" ]] && { PROFILE="$f"; PROFILE_PLIST="$plist"; break 2; }
+find_profile() {  # find_profile <name>: sets PROFILE and PROFILE_PLIST
+  PROFILE="" PROFILE_PLIST=""
+  local dir f plist name
+  for dir in "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" "$HOME/Library/MobileDevice/Provisioning Profiles"; do
+    [[ -d "$dir" ]] || continue
+    for f in "$dir"/*.provisionprofile; do
+      [[ -f "$f" ]] || continue
+      plist="$(security cms -D -i "$f" 2>/dev/null)" || continue
+      name="$(/usr/libexec/PlistBuddy -c 'Print :Name' /dev/stdin <<<"$plist" 2>/dev/null || true)"
+      [[ "$name" == "$1" ]] && { PROFILE="$f"; PROFILE_PLIST="$plist"; return 0; }
+    done
   done
-done
+}
+find_profile "$PROFILE_NAME"
 [[ -n "$PROFILE" ]] || die "no provisioning profile named \"$PROFILE_NAME\" is installed.
   Create a Developer ID profile for $BUNDLE_ID with iCloud ($CONTAINER) in the developer portal, name it exactly
   \"$PROFILE_NAME\", then Xcode > Settings > Accounts > Download Manual Profiles. See apps/mac/RELEASE.md, step 2."
@@ -119,7 +127,32 @@ expires_at="$(date -j -f '%a %b %d %T %Z %Y' "$expiry" +%s 2>/dev/null || true)"
 if [[ -n "$expires_at" ]] && (( expires_at < $(date +%s) )); then
   die "profile \"$PROFILE_NAME\" expired on $expiry. Regenerate it (RELEASE.md, step 2)."
 fi
+# Both are checked here because a claim the profile does not authorise is worse than a failed build. The App Group is not restricted,
+# so the app would still launch, but with its entitlements unvalidated, and the data protection keychain that holds the device keys
+# can stop working. A Mac profile covers the group once App Groups is on the App ID: it lists <team>.*.
+check_autofill_profile() {  # check_autofill_profile <profile name>
+  [[ "$(pp "Entitlements:$AUTOFILL_ENTITLEMENT")" == "true" ]] \
+    || die "profile \"$1\" does not grant AutoFill Credential Provider. Enable it on the App ID and regenerate the profile (RELEASE.md, step 2)."
+  pp 'Entitlements:com.apple.security.application-groups' | grep -qE "^[[:space:]]*($TEAM\.\*|$APP_GROUP)$" \
+    || die "profile \"$1\" does not authorise App Group $APP_GROUP. Enable App Groups on the App ID and regenerate the profile (RELEASE.md, step 2)."
+}
+check_autofill_profile "$PROFILE_NAME"
 echo "profile:  $PROFILE_NAME (expires $expiry)"
+
+find_profile "$AUTOFILL_PROFILE_NAME"
+[[ -n "$PROFILE" ]] || die "no provisioning profile named \"$AUTOFILL_PROFILE_NAME\" is installed.
+  Create a Developer ID profile for $AUTOFILL_ID, name it exactly that, then download it. See apps/mac/RELEASE.md, step 2."
+[[ "$(pp 'Entitlements:com.apple.application-identifier')" == "$TEAM.$AUTOFILL_ID" ]] \
+  || die "profile \"$AUTOFILL_PROFILE_NAME\" is not for $TEAM.$AUTOFILL_ID (RELEASE.md, step 2)."
+[[ "$(pp ProvisionsAllDevices)" == "true" ]] \
+  || die "profile \"$AUTOFILL_PROFILE_NAME\" is not a Developer ID profile (it lists devices). Create it with type Developer ID (RELEASE.md, step 2)."
+check_autofill_profile "$AUTOFILL_PROFILE_NAME"
+expiry="$(pp ExpirationDate)"
+expires_at="$(date -j -f '%a %b %d %T %Z %Y' "$expiry" +%s 2>/dev/null || true)"
+if [[ -n "$expires_at" ]] && (( expires_at < $(date +%s) )); then
+  die "profile \"$AUTOFILL_PROFILE_NAME\" expired on $expiry. Regenerate it (RELEASE.md, step 2)."
+fi
+echo "profile:  $AUTOFILL_PROFILE_NAME (expires $expiry)"
 
 # Validates the stored credentials against the notary service; prints nothing about them.
 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" --output-format json >/dev/null 2>&1 \
@@ -191,6 +224,22 @@ grep -q '^Identifier=app.bisel.cli$' <<<"$tool_sig" || die "the agent tool's ide
 grep -q "^Authority=Developer ID Application: .*($TEAM)$" <<<"$tool_sig" || die "the agent tool is not signed with Developer ID ($TEAM)."
 grep -qE '^CodeDirectory .*flags=0x[0-9a-f]*\(runtime\)' <<<"$tool_sig" || die "hardened runtime is not on for the agent tool."
 grep -q '^Timestamp=' <<<"$tool_sig" || die "the agent tool's signature has no secure timestamp."
+[[ "$(ent "$AUTOFILL_ENTITLEMENT")" == "true" ]] || die "the app has no AutoFill entitlement: the identity store would refuse it."
+ent com.apple.security.application-groups | grep -q "$APP_GROUP" || die "the app is not in App Group $APP_GROUP: the extension could not reach it."
+# The app trusts the extension by this signature too (AgentPeer.autoFillRequirement), and macOS kills it without a sandbox or a profile.
+APPEX="$APP/Contents/PlugIns/BiselAutoFill.appex"
+[[ -d "$APPEX" ]] || die "no AutoFill extension at $APPEX."
+appex_sig="$(codesign -dvv "$APPEX" 2>&1)"
+grep -q "^Identifier=$AUTOFILL_ID$" <<<"$appex_sig" || die "the extension's identifier is not $AUTOFILL_ID."
+grep -q "^Authority=Developer ID Application: .*($TEAM)$" <<<"$appex_sig" || die "the extension is not signed with Developer ID ($TEAM)."
+grep -qE '^CodeDirectory .*flags=0x[0-9a-f]*\(runtime\)' <<<"$appex_sig" || die "hardened runtime is not on for the extension."
+grep -q '^Timestamp=' <<<"$appex_sig" || die "the extension's signature has no secure timestamp."
+[[ -f "$APPEX/Contents/embedded.provisionprofile" ]] || die "the extension has no embedded provisioning profile: macOS would kill it."
+ents="$(codesign -d --entitlements - --xml "$APPEX" 2>/dev/null | plutil -convert xml1 -o - - 2>/dev/null)"
+[[ "$(ent com.apple.security.app-sandbox)" == "true" ]] || die "the extension is not sandboxed."
+[[ "$(ent "$AUTOFILL_ENTITLEMENT")" == "true" ]] || die "the extension has no AutoFill entitlement."
+ent com.apple.security.application-groups | grep -q "$APP_GROUP" || die "the extension is not in App Group $APP_GROUP."
+ent keychain-access-groups | grep -qx "[[:space:]]*$TEAM.app.bisel" && die "the extension is in the device keys' keychain group: it must hold no keys."
 "$APPLE/Tools/check-release.sh" "$APP"   # get-task-allow, software keys, fixture and BISEL_DEV_ hooks
 # An app whose SUPublicEDKey is not the keychain key's could never be updated again: Sparkle would reject every later update.
 [[ -x "$SPARKLE_BIN/sign_update" ]] || die "Sparkle's tools are not in $SPARKLE_BIN (did the archive resolve the Sparkle package?)."

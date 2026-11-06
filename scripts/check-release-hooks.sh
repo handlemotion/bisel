@@ -82,6 +82,17 @@ if strings -a "$TOOL" | grep -qE 'GRDB|ItemSealer|SecureEnclave|VaultKeys'; then
 fi
 echo "PASS: the agent tool is in the bundle and links no core"
 
+# The AutoFill extension holds no keys and opens no store (docs/SPEC.md §8, "AutoFill"): if it links the core, a process Safari talks to
+# has crypto and the box one step away.
+APPEX="$REL_APP/Contents/PlugIns/BiselAutoFill.appex"
+[[ -x "$APPEX/Contents/MacOS/BiselAutoFill" ]] || { echo "FAIL: no AutoFill extension at $APPEX" >&2; exit 1; }
+if strings -a "$APPEX/Contents/MacOS/BiselAutoFill" | grep -qE 'GRDB|ItemSealer|SecureEnclave|VaultKeys'; then
+  echo "FAIL: the AutoFill extension links the core; it must link BiselAgent only" >&2; exit 1
+fi
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$APPEX/Contents/Info.plist" 2>/dev/null)" == com.apple.authentication-services-credential-provider-ui ]] \
+  || { echo "FAIL: the extension is not a credential provider" >&2; exit 1; }
+echo "PASS: the AutoFill extension is in the bundle and links no core"
+
 # The updater's trust settings (apps/mac/RELEASE.md, "Updates"): without them a shipped build would take an unsigned feed, or could
 # never verify an update at all.
 plist="$REL_APP/Contents/Info.plist"

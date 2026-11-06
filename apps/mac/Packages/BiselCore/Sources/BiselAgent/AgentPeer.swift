@@ -10,6 +10,7 @@ public enum AgentPeer {
     private static let team = "ZVGTVNUPVA"
     public static let toolRequirement = requirement(identifier: "app.bisel.cli")
     public static let appRequirement = requirement(identifier: "app.bisel.mac")
+    public static let autoFillRequirement = requirement(identifier: "app.bisel.mac.autofill")
 
     private static func requirement(identifier: String) -> String {
         "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(identifier)\""

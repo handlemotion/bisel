@@ -1,5 +1,6 @@
 #if BISEL_SOFTWARE_KEYS
 import Foundation
+import Synchronization
 import Testing
 import BiselCore
 import BiselLaneContract
@@ -133,6 +134,17 @@ struct AgentFlowTests {
 
         _ = try AgentSocket.send(.status, path: open, serverRequirement: nil)
         #expect(await calls.count == 1, "control: the transport works, so the refusal above is the signature check")
+
+        // The same check guards the AutoFill socket: only the signed extension may ask it for a password.
+        let autofill = directory + "/autofill.sock"
+        try SocketListener<AutoFillRequest, AutoFillResult>(path: autofill, clientRequirement: AgentPeer.autoFillRequirement) { _ in
+            await calls.add()
+            return .credential(username: "u", password: AgentSecret("leaked"))
+        }.start()
+        #expect(throws: AgentError(.failed)) {
+            let _: AutoFillResult = try AgentSocket.exchange(AutoFillRequest.list(services: ["github.com"]), path: autofill, serverRequirement: nil)
+        }
+        #expect(await calls.count == 1, "the handler never ran for an unsigned caller")
     }
 
     private actor Calls {
@@ -178,6 +190,154 @@ struct AgentFlowTests {
         #expect(refusal(terminal: true) == .wrongSite)
         #expect(refusal(secure: false) == .notPasswordField)
         #expect(refusal(login: true) == .notPasswordField, "--login must not type a username into the password field")
+    }
+}
+// System AutoFill (docs/SPEC.md §8, "AutoFill"), against the real store and crypto. Touch ID is the fake host's answer.
+@Suite("AutoFill", .serialized)
+struct AutoFillFlowTests {
+
+    private actor FakeHost: AutoFillHost {
+        let vault: Vault
+        var prompts = 0
+        var answer: AgentError?
+        init(vault: Vault) { self.vault = vault }
+        func set(answer: AgentError?) { self.answer = answer }
+        func authenticate(_ reason: String) async throws {
+            prompts += 1
+            if let answer { throw answer }
+            if await !vault.isUnlocked { try await vault.unlock() }
+        }
+    }
+
+    private static let password = "correct-horse-battery"
+    private static let suffixes: Set<String> = ["com", "io", "github.io", "co.uk"]
+
+    private func box() async throws -> (Device, FakeHost, AutoFillBroker, Item) {
+        let device = try Device("autofill")
+        _ = try await device.vault.bootstrapLocal(deviceName: "autofill")
+        var draft = ItemDraft(type: .login)
+        draft.title = "GitHub"
+        draft.urls = ["https://github.com/login"]
+        draft.username = "someone@example.com"
+        draft.password = Self.password
+        let item = try await device.vault.createItem(draft)
+        let host = FakeHost(vault: device.vault)
+        return (device, host, AutoFillBroker(vault: device.vault, host: host, isPublicSuffix: { Self.suffixes.contains($0) }), item)
+    }
+
+    private func password(_ result: AutoFillResult) -> String? {
+        if case .credential(_, let secret) = result { return String(decoding: secret.bytes, as: UTF8.self) }
+        return nil
+    }
+
+    private func code(_ result: AutoFillResult) -> AgentCode? {
+        if case .refused(let code) = result { return code }
+        return nil
+    }
+
+    @Test("a password never goes to a site that only looks like the login's address")
+    func lookalikeSitesGetNothing() async throws {
+        let (_, host, broker, item) = try await box()
+        for site in ["github.com.evil.net", "evilgithub.com", "https://github.com.evil.net/login", "github.co.uk", "hub.com"] {
+            #expect(code(await broker.handle(.credential(id: item.id, services: [site]))) == .wrongSite, "\(site)")
+        }
+        #expect(await host.prompts == 0, "nothing to approve: no Touch ID sheet for a request that would be refused")
+        #expect(password(await broker.handle(.credential(id: item.id, services: ["https://login.github.com/x"]))) == Self.password, "control: a real subdomain")
+
+        // A login saved for a shared-hosting name does not reach the tenants under it, and a login without an address reaches nothing.
+        var draft = ItemDraft(type: .login)
+        draft.title = "Pages"
+        draft.urls = ["github.io"]
+        draft.password = Self.password
+        let device = try Device("autofill-tenants")
+        _ = try await device.vault.bootstrapLocal(deviceName: "tenants")
+        let tenant = try await device.vault.createItem(draft)
+        draft.urls = []
+        let noAddress = try await device.vault.createItem(draft)
+        let other = AutoFillBroker(vault: device.vault, host: FakeHost(vault: device.vault), isPublicSuffix: { Self.suffixes.contains($0) })
+        #expect(code(await other.handle(.credential(id: tenant.id, services: ["attacker.github.io"]))) == .wrongSite)
+        #expect(code(await other.handle(.credential(id: noAddress.id, services: ["github.com"]))) == .wrongSite)
+        guard case .candidates(let listed) = await other.handle(.list(services: ["attacker.github.io"])) else { Issue.record("no list"); return }
+        #expect(listed.isEmpty)
+    }
+
+    @Test("without Touch ID there is no password, on an open box or a locked one")
+    func noTouchIDNoPassword() async throws {
+        let (device, host, broker, item) = try await box()
+        let request = AutoFillRequest.credential(id: item.id, services: ["github.com"])
+
+        await host.set(answer: AgentError(.denied))
+        #expect(code(await broker.handle(request)) == .denied, "an open box still asks")
+        await device.vault.lock()
+        #expect(code(await broker.handle(request)) == .denied)
+        #expect(await !device.vault.isUnlocked)
+
+        await host.set(answer: nil)
+        #expect(password(await broker.handle(request)) == Self.password, "Touch ID unlocks a locked box for the request")
+    }
+
+    @Test("one Touch ID for a list pays for one password, of a login on that list")
+    func aListPaysForOnePassword() async throws {
+        let (_, host, broker, item) = try await box()
+        guard case .candidates(let listed) = await broker.handle(.list(services: ["github.com"])) else { Issue.record("no list"); return }
+        #expect(listed == [AutoFillCandidate(id: item.id, title: "GitHub", username: "someone@example.com")])
+        #expect(await host.prompts == 1)
+
+        #expect(password(await broker.handle(.credential(id: item.id, services: ["github.com"]))) == Self.password)
+        #expect(await host.prompts == 1, "choosing from the list does not ask twice")
+        #expect(password(await broker.handle(.credential(id: item.id, services: ["github.com"]))) == Self.password)
+        #expect(await host.prompts == 2, "the next password asks again")
+    }
+
+    @Test("the plaintext identity store gets no secret, no title and no public suffix")
+    func identitiesCarryTheMinimum() async throws {
+        let (device, _, _, item) = try await box()
+        var draft = ItemDraft(type: .login)
+        draft.title = "Pages"
+        draft.urls = ["github.io", "www.example.co.uk"]
+        draft.username = "me"
+        draft.password = Self.password
+        let second = try await device.vault.createItem(draft)
+        draft.password = ""
+        draft.urls = ["no-password.example.com"]
+        _ = try await device.vault.createItem(draft)
+
+        let identities = AutoFillIdentity.all(in: try await device.vault.items().items, isPublicSuffix: { Self.suffixes.contains($0) })
+        #expect(identities == [AutoFillIdentity(domain: "example.co.uk", username: "me", recordID: second.id),
+                               AutoFillIdentity(domain: "github.com", username: "someone@example.com", recordID: item.id)])
+    }
+
+    private final class SlowSink: AutoFillIdentitySink {
+        let held = Mutex<[AutoFillIdentity]>([AutoFillIdentity(domain: "stale.example", username: "old", recordID: "x")])
+        let enabled = Mutex(true)
+        func isEnabled() async -> Bool { enabled.withLock { $0 } }
+        func replace(_ identities: [AutoFillIdentity]) async throws {
+            try await Task.sleep(for: .milliseconds(50))
+            held.withLock { $0 = identities }
+        }
+        func clear() async throws { held.withLock { $0 = [] } }
+    }
+
+    @Test("a lock during a slow write leaves nothing of the box in the identity store")
+    func lockBeatsAWriteInFlight() async throws {
+        let sink = SlowSink(), sync = AutoFillIdentitySync(sink: sink)
+        let identity = AutoFillIdentity(domain: "github.com", username: "me", recordID: "1")
+
+        sync.publish([identity])
+        try await Task.sleep(for: .milliseconds(10))   // the write is under way
+        sync.clear()
+        await sync.settled()
+        #expect(sink.held.withLock { $0 }.isEmpty)
+
+        // Not turned on in AutoFill settings: nothing is written, and it goes in once the person does.
+        sink.enabled.withLock { $0 = false }
+        sync.publish([identity])
+        await sync.settled()
+        #expect(sink.held.withLock { $0 }.isEmpty)
+        sink.enabled.withLock { $0 = true }
+        sync.refresh()
+        await sync.settled()
+        #expect(sink.held.withLock { $0 } == [identity])
     }
 }
 #endif

@@ -12,6 +12,8 @@
 	<dict>
 		<key>app.bisel.mac</key>
 		<string>Bisel Developer ID</string>
+		<key>app.bisel.mac.autofill</key>
+		<string>Bisel AutoFill Developer ID</string>
 	</dict>
 	<key>signingCertificate</key>
 	<string>Developer ID Application</string>

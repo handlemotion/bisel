@@ -94,6 +94,10 @@ targets:
         copy:
           destination: wrapper
           subpath: Contents/Helpers
+      # System AutoFill (docs/SPEC.md §8, "AutoFill"), at Contents/PlugIns. Signed on copy with its own profile.
+      - target: BiselAutoFill
+        embed: true
+        codeSign: true
     postBuildScripts:
       - name: "Release gate: no get-task-allow"
         basedOnDependencyAnalysis: false
@@ -150,6 +154,8 @@ targets:
         # It carries iCloud / CloudKit for the sync lane (docs/SYNC-LANES.md §3, D1): a restricted entitlement, so the signed
         # build needs a provisioning profile with the container (Xcode creates it with -allowProvisioningUpdates).
         # And iCloud key-value storage for the freshness witness (docs/SYNC-LANES.md §8, D5); the same profile grants it.
+        # The AutoFill entitlement (the host app needs it too, or the identity store refuses it) and the App Group that holds the
+        # extension's socket also come from that profile; Tools/release.sh refuses a profile that does not authorise them.
         CODE_SIGN_ENTITLEMENTS: Bisel/Bisel.entitlements
         GENERATE_INFOPLIST_FILE: NO
         COMBINE_HIDPI_IMAGES: YES
@@ -200,6 +206,48 @@ targets:
           # moment away from other processes of this user.
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: "Developer ID Application"
+          OTHER_CODE_SIGN_FLAGS: "--options=runtime --timestamp"
+
+  # System AutoFill (docs/SPEC.md §8, "AutoFill"). Sandboxed, and links BiselAgent only: no keys, no store, no crypto. It asks the
+  # app over a socket in the App Group container, so it has no keychain group either.
+  BiselAutoFill:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: BiselAutoFill
+    dependencies:
+      - package: BiselCore
+        product: BiselAgent
+    info:
+      path: BiselAutoFill/Info.plist
+      properties:
+        CFBundleDisplayName: Bisel
+        CFBundleShortVersionString: "0.1.5" # x-release-please-version
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSMinimumSystemVersion: "26.0"
+        NSHumanReadableCopyright: "Personal use."
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.authentication-services-credential-provider-ui
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).CredentialProviderViewController"
+          NSExtensionAttributes:
+            ASCredentialProviderExtensionCapabilities:
+              ProvidesPasswords: true
+              # The later passkey step turns this on (CredentialProviderViewController, "passkeys").
+              ProvidesPasskeys: false
+    settings:
+      base:
+        # The app checks this identifier and the team on every connection (AgentPeer.autoFillRequirement).
+        PRODUCT_BUNDLE_IDENTIFIER: app.bisel.mac.autofill
+        PRODUCT_NAME: BiselAutoFill
+        CODE_SIGN_ENTITLEMENTS: BiselAutoFill/BiselAutoFill.entitlements
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+      configs:
+        Release:
+          # Its own Developer ID profile: a restricted entitlement with no embedded profile is killed at launch (RELEASE.md, step 2).
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Developer ID Application"
+          PROVISIONING_PROFILE_SPECIFIER: "Bisel AutoFill Developer ID"
           OTHER_CODE_SIGN_FLAGS: "--options=runtime --timestamp"
 
   # Tiny native SwiftUI app with username / password / code fields: the "native SwiftUI app"

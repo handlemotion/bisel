@@ -27,6 +27,7 @@ final class AppModel {
     /// Answers the `bisel` tool (docs/AGENT-CLI.md). Nil only when the box store could not open.
     private(set) var agentBroker: AgentBroker?
     private var agentListener: AgentListener?
+    private var autoFillListener: SocketListener<AutoFillRequest, AutoFillResult>?
 
     private init() {
         #if DEBUG
@@ -58,6 +59,7 @@ final class AppModel {
         }
         service.onRowsChange = { [weak self] in self?.panelModel.refresh(keepingSelection: true) }
         startAgentListener()
+        startAutoFillListener()
         Task { await LoginItem.shared.refresh() }
         Task {
             await service.start()
@@ -100,6 +102,21 @@ final class AppModel {
         }
     }
 
+    /// The AutoFill extension's way in. It asks here for everything: it has no keys and no store of its own (docs/SPEC.md §8, "AutoFill").
+    private func startAutoFillListener() {
+        guard let vault = service.vault, let path = AppAutoFillHost.socketPath else { return }
+        let broker = AutoFillBroker(vault: vault, host: AppAutoFillHost(service: service), isPublicSuffix: DomainName.isPublicSuffix)
+        let listener = SocketListener<AutoFillRequest, AutoFillResult>(path: path, clientRequirement: AgentPeer.autoFillRequirement) { request in
+            await broker.handle(request)
+        }
+        do {
+            try listener.start()
+            autoFillListener = listener
+        } catch {
+            Log.app.error("autofill socket could not start")
+        }
+    }
+
     /// The settings window on one page (an open window switches to it).
     func showSettings(_ page: SettingsPage) {
         UserDefaults.standard.set(page.rawValue, forKey: SettingsPage.defaultsKey)
@@ -130,7 +147,17 @@ final class AppModel {
         #endif
     }
 
-    func terminate() { SecureClipboard.shared.clearOnTerminate() }
+    func terminate() {
+        SecureClipboard.shared.clearOnTerminate()
+        // Quitting leaves nothing of the box in the system's store. Bounded: a stuck store must not hold up quitting; the next launch clears it.
+        let identities = service.autoFillIdentities, done = DispatchSemaphore(value: 0)
+        identities.clear()
+        Task.detached {
+            await identities.settled()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 1)
+    }
 
     // MARK: panel actions
 

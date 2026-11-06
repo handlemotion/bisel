@@ -24,6 +24,12 @@ public enum AgentSocket {
 
     /// Sends one request. `serverRequirement` nil skips the signature check (Debug only, the caller decides).
     public static func send(_ request: AgentRequest, path: String, serverRequirement: String?) throws(AgentError) -> AgentResult {
+        try exchange(request, path: path, serverRequirement: serverRequirement)
+    }
+
+    /// One frame out, one frame back. The AutoFill extension speaks its own messages over the same transport (`AutoFillWire`).
+    public static func exchange<Request: Encodable, Answer: Decodable>(_ request: Request, path: String,
+                                                                       serverRequirement: String?) throws(AgentError) -> Answer {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw AgentError(.failed) }
         defer { close(fd) }
@@ -37,7 +43,7 @@ public enum AgentSocket {
         guard let body = try? JSONEncoder().encode(request), writeFrame(fd, body) else { throw AgentError(.failed) }
         let frame: Data?
         do { frame = try readFrame(fd) } catch { throw AgentError(.timeout) }
-        guard let frame, let result = try? JSONDecoder().decode(AgentResult.self, from: frame) else { throw AgentError(.failed) }
+        guard let frame, let result = try? JSONDecoder().decode(Answer.self, from: frame) else { throw AgentError(.failed) }
         return result
     }
 
@@ -99,9 +105,11 @@ public enum AgentSocket {
     }
 }
 
+public typealias AgentListener = SocketListener<AgentRequest, AgentResult>
+
 /// The app's end. Checks the caller's signature before reading a byte of its request.
-public final class AgentListener: Sendable {
-    public typealias Handler = @Sendable (AgentRequest) async -> AgentResult
+public final class SocketListener<Request: Decodable & Sendable, Answer: Encodable & Sendable>: Sendable {
+    public typealias Handler = @Sendable (Request) async -> Answer
 
     private let path: String
     private let clientRequirement: String?
@@ -148,7 +156,7 @@ public final class AgentListener: Sendable {
     private func serve(_ fd: Int32) {
         AgentSocket.configure(fd, timeout: AgentSocket.serverTimeout)
         if let clientRequirement, !AgentPeer.satisfies(clientRequirement, fd: fd) { close(fd); return }
-        guard let frame = try? AgentSocket.readFrame(fd), let request = try? JSONDecoder().decode(AgentRequest.self, from: frame) else {
+        guard let frame = try? AgentSocket.readFrame(fd), let request = try? JSONDecoder().decode(Request.self, from: frame) else {
             close(fd)
             return
         }

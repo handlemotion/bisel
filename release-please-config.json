@@ -20,6 +20,11 @@
           "type": "xml",
           "path": "apps/mac/Bisel/Info.plist",
           "xpath": "//plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::string[1]"
+        },
+        {
+          "type": "xml",
+          "path": "apps/mac/BiselAutoFill/Info.plist",
+          "xpath": "//plist/dict/key[text()='CFBundleShortVersionString']/following-sibling::string[1]"
         }
       ]
     }

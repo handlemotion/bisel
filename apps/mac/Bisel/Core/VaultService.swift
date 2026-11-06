@@ -91,6 +91,8 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     @ObservationIgnored private let directory = BiselEnvironment.dataDirectory
     @ObservationIgnored private let usage: UsageStore
     @ObservationIgnored private let index = BoxIndex()
+    /// What the system's AutoFill may offer: filled while the box is unlocked, empty otherwise.
+    @ObservationIgnored let autoFillIdentities = AutoFillIdentitySync(sink: SystemIdentityStore())
     @ObservationIgnored private var reloadGeneration = 0
     @ObservationIgnored private var installedGeneration = 0
     @ObservationIgnored private var pollTimer: Timer?
@@ -138,6 +140,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     }
 
     func start() async {
+        autoFillIdentities.clear()   // a crash while unlocked left the last list there
         lockMonitor = LockMonitor(service: self)
         #if DEBUG
         // A measured run must not be locked halfway by an idle Mac: it would time an empty list.
@@ -238,6 +241,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             unlockedAt = nil
             stopPolling()
             if was == .unlocked { dropDecryptedState() }
+            autoFillIdentities.clear()
         }
         Log.app.notice("vault phase \(String(describing: was), privacy: .public) -> \(String(describing: new), privacy: .public)")
         onLockStateChange?()
@@ -508,11 +512,14 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
             let listing = try await vault.items()
             guard phase == .unlocked else { return }   // locked while decrypting: discard
             let usage = usage.entries
-            let built = await Task.detached(priority: .userInitiated) { BoxIndex.build(listing.items, usage: usage) }.value
+            let (built, identities) = await Task.detached(priority: .userInitiated) {
+                (BoxIndex.build(listing.items, usage: usage), AutoFillIdentity.all(in: listing.items, isPublicSuffix: DomainName.isPublicSuffix))
+            }.value
             // Locked meanwhile, or a reload that started later already installed a newer snapshot.
             guard phase == .unlocked, generation >= installedGeneration else { return }
             installedGeneration = generation
             apply(built)
+            autoFillIdentities.publish(identities)
             undecryptable = listing.undecryptable.count
         } catch {
             Log.app.error("reload failed: \(describe(error))")
@@ -778,6 +785,7 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
                 return
             }
             if report.pulled > 0 || report.pushed > 0 || !report.conflicts.isEmpty { await reload() }
+            autoFillIdentities.refresh()   // AutoFill may have been turned on since the last write
             await refreshLaneStatus()
             freshness = report.freshness
             if report.freshness == .forked { Log.app.fault("freshness witness: the lane and the witness hold two chains of this box") }
