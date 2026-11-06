@@ -7,8 +7,8 @@ enum BiselEnvironment {
     /// to connect or not.
     static let defaultServer = "https://box.bisel.app"
 
-    /// `~/Library/Application Support/bisel/vault`. SPEC §7 wants the App Group container from day one; that needs a
-    /// Team ID, so until the app is signed the store lives here (see SPEC §8, "Storage").
+    /// `~/Library/Application Support/bisel/vault`, not the App Group container: the AutoFill extension asks the app instead of
+    /// opening the store (SPEC §8, "AutoFill").
     /// Debug only: `BISEL_DATA_DIR=<dir>` points a run at a throwaway store (flow tests, screenshots).
     static var dataDirectory: URL {
         #if DEBUG
@@ -30,7 +30,7 @@ enum BiselEnvironment {
         #endif
     }
 
-    /// `<team>.app.bisel`, pinned in `keychain-access-groups` so a later AutoFill extension or iPhone app can share the device keys
+    /// `<team>.app.bisel`, pinned in `keychain-access-groups` so a later iPhone app can share the device keys
     /// and secrets. Changing it strands existing device keys (RELEASE.md). Nil when unsigned (no team prefix): the default group.
     static var keychainGroup: String? {
         guard let group = Bundle.main.object(forInfoDictionaryKey: "BiselKeychainGroup") as? String, group.hasSuffix(".app.bisel") else { return nil }

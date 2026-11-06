@@ -143,8 +143,8 @@ public actor Vault {
             else { self.secrets = nil }
         }
 
-        /// Production configuration: Secure Enclave keys in the shared keychain access group, store in the App Group
-        /// container (so the AutoFill extensions can open the same files). Both identifiers are injected, never
+        /// Secure Enclave keys in the shared keychain access group, store in the App Group container (for the iPhone's
+        /// extensions; the Mac's store stays in Application Support, SPEC §8 "AutoFill"). Both identifiers are injected, never
         /// hard-coded in the package; the app passes the ones from its signed entitlements.
         ///
         /// - Parameters:

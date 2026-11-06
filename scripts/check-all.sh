@@ -118,7 +118,7 @@ if (( RUN_RELEASE )); then
   echo "release"
   step "release: no BISEL_DEV_ hooks in the binary" "$ROOT/scripts/check-release-hooks.sh"
   # Offline: the Developer ID plists parse, the release scripts parse, and the CloudKit schema (once exported) has R's fields and no index.
-  step "release: signing config + CloudKit schema" bash -c "cd '$ROOT/apps/mac' && plutil -lint Tools/ExportOptions.plist Bisel/Bisel.entitlements \
+  step "release: signing config + CloudKit schema" bash -c "cd '$ROOT/apps/mac' && plutil -lint Tools/ExportOptions.plist Bisel/Bisel.entitlements BiselAutoFill/BiselAutoFill.entitlements \
     && bash -n Tools/release.sh && bash -n Tools/cloudkit-schema.sh \
     && if [[ -f CloudKit/schema.ckdb ]]; then Tools/cloudkit-schema.sh lint; else echo 'no CloudKit/schema.ckdb yet (RELEASE.md, step 5)'; fi"
   echo

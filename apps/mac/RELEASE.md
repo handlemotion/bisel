@@ -15,7 +15,8 @@ What is in the repo:
 | Entitlements                            | `Bisel/Bisel.entitlements`: iCloud container `iCloud.app.bisel` (CloudKit), key-value storage, container environment                        |
 | CloudKit environment                    | `BISEL_ICLOUD_ENVIRONMENT`: `Development` in Debug, `Production` in Release; `iCloudContainerEnvironment: Production` in the export options |
 | Agent CLI (`bisel`, `bl`)               | `project.yml`, target `BiselCLI`, embedded at `Contents/Helpers/bisel`; `Tools/release.sh` checks its identifier `app.bisel.cli`, Developer ID, hardened runtime and timestamp. `docs/AGENT-CLI.md` |
-| Export options                          | `Tools/ExportOptions.plist` (`developer-id`, manual, profile `Bisel Developer ID`)                                                          |
+| AutoFill extension                      | `project.yml`, target `BiselAutoFill`, embedded at `Contents/PlugIns/BiselAutoFill.appex`, its own profile `Bisel AutoFill Developer ID`; `Tools/release.sh` checks both profiles, its signature, sandbox and entitlements. `docs/SPEC.md` §8, "AutoFill" |
+| Export options                          | `Tools/ExportOptions.plist` (`developer-id`, manual, profiles `Bisel Developer ID` and `Bisel AutoFill Developer ID`)                       |
 | Release script                          | `Tools/release.sh`: preflight, archive, export, verify, notarize, staple, assess, DMG or zip, Sparkle appcast; `--publish <tag>` uploads and publishes |
 | In-app updates (Sparkle 2)              | `project.yml`: the `Sparkle` package, `SUFeedURL`, `SUPublicEDKey` and the update keys in `info`; `Bisel/App/Updater.swift`; see "Updates"  |
 | CloudKit schema                         | `CloudKit/schema.ckdb` (created by step 5) and `Tools/cloudkit-schema.sh`                                                                   |
@@ -54,6 +55,26 @@ The app carries iCloud entitlements, which are restricted: a Developer ID app th
 4. Certificate: the Developer ID Application certificate from step 1 → Continue.
 5. Provisioning Profile Name: **`Bisel Developer ID`**, exactly (the build looks it up by this name) → Generate.
 6. Install it: Xcode → Settings → Accounts → your Apple ID → **Download Manual Profiles**. (Or download it and double-click.)
+
+#### AutoFill (needed for every build since the AutoFill extension)
+
+Apple's capability table lists AutoFill Credential Provider, App Groups and Keychain Sharing for Developer ID. The extension needs its
+own App ID and profile, and the app's profile has to grant the same two capabilities: the host app needs the AutoFill entitlement too.
+
+1. **Identifiers** → `app.bisel.mac`: tick **AutoFill Credential Provider** and **App Groups** → Save. The portal warns that the
+   profile becomes invalid; that is the next step. No group has to be registered: `ZVGTVNUPVA.app.bisel` is a macOS-style ID, covered
+   by the `ZVGTVNUPVA.*` a Mac profile lists once App Groups is on.
+2. **Identifiers** → **+** → App IDs → App → Bundle ID `app.bisel.mac.autofill` (explicit), description `Bisel AutoFill`, tick the same
+   two capabilities → Register.
+3. **Profiles** → `Bisel Developer ID` → Edit → Save → download. Do this even though nothing else changed: the old profile lists no
+   App Group.
+4. **Profiles** → **+** → Developer ID → Mac, App ID `app.bisel.mac.autofill`, the certificate from step 1, name
+   **`Bisel AutoFill Developer ID`**, exactly → Generate.
+5. Xcode → Settings → Accounts → your Apple ID → **Download Manual Profiles**.
+
+Do not ship around a preflight failure here. The App Group is not a restricted entitlement, so an app whose profile does not authorise
+it still launches, but with its entitlements unvalidated, and that can break the data protection keychain the device keys live in.
+`release.sh` refuses such a profile. Check, in the profile plist, that `com.apple.security.application-groups` lists `ZVGTVNUPVA.*`.
 
 Push notifications are not in the entitlements today. When `com.apple.developer.aps-environment` is added (docs/SYNC-LANES.md §15),
 enable Push Notifications on the App ID, regenerate this profile, and add `aps-environment` = `production` for the Developer ID build.
@@ -148,8 +169,8 @@ The keychain asks once whether Sparkle's tools may read the item (again after a 
 ### The keychain access group (decided 2026-10-31: pinned)
 
 Device keys and secrets live in `ZVGTVNUPVA.app.bisel`: `keychain-access-groups` in `Bisel.entitlements`, read back at run time
-from `BiselKeychainGroup` in Info.plist (`BiselEnvironment.keychainGroup`), so a later AutoFill extension or iPhone app on the same
-team can share them. `release.sh` refuses a build without it. Never change it once real boxes exist: device keys in the old group
+from `BiselKeychainGroup` in Info.plist (`BiselEnvironment.keychainGroup`), so a later iPhone app on the same
+team can share them (the AutoFill extension does not use it: it holds no keys). `release.sh` refuses a build without it. Never change it once real boxes exist: device keys in the old group
 are stranded and every Mac would have to re-enroll. Signed test builds made before this change kept their keys in the default group;
 reset those throwaway boxes.
 
@@ -176,6 +197,7 @@ reset those throwaway boxes.
    rejection the script prints Apple's log.
 4. Smoke test on a Mac or user account that has never run a Debug build: open the DMG, drag Bisel to Applications, launch. There
    should be no Gatekeeper warning beyond the usual "downloaded from the internet" prompt. Create a box in iCloud and check it syncs.
+   Turn Bisel on in System Settings → General → AutoFill & Passwords, unlock, and fill a login in Safari: one Touch ID, the login goes in.
 5. Publish: merge the release-please PR (it tags `vX.Y.Z` and creates the GitHub release as a draft, so the update feed stays on
    the previous release), build from that tag's commit, then
 

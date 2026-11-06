@@ -15,4 +15,11 @@ if codesign -d --entitlements - "$TOOL" 2>&1 | grep -q get-task-allow; then echo
 for pat in BISEL_DEV_ BISEL_SOFTWARE_KEYS GRDB ItemSealer SecureEnclave VaultKeys; do
   if strings -a "$TOOL" | grep -q -- "$pat"; then echo "FAIL agent tool contains $pat"; exit 1; fi
 done
+# The AutoFill extension is sandboxed and holds no keys: it links BiselAgent only (docs/SPEC.md §8, "AutoFill").
+APPEX="$APP/Contents/PlugIns/BiselAutoFill.appex"
+[ -d "$APPEX" ] || { echo "FAIL no AutoFill extension at $APPEX"; exit 1; }
+if codesign -d --entitlements - "$APPEX" 2>&1 | grep -q get-task-allow; then echo "FAIL get-task-allow on the AutoFill extension"; exit 1; fi
+for pat in BISEL_DEV_ BISEL_SOFTWARE_KEYS GRDB ItemSealer SecureEnclave VaultKeys; do
+  if strings -a "$APPEX/Contents/MacOS/BiselAutoFill" | grep -q -- "$pat"; then echo "FAIL AutoFill extension contains $pat"; exit 1; fi
+done
 echo "OK: no get-task-allow, no software keys, no fixture/debug hooks in $APP"
