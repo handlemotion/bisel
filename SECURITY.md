@@ -17,6 +17,16 @@ Include what you found, where (file and line, or the request), how to reproduce 
 
 Known, accepted issues are listed in [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md); a new way to exploit one of them is still in scope.
 
+## What the Chrome extension exposes
+
+The Chrome extension can see passwords as you type them: to offer to save a login it reads the form you submit, on every https site, in the browser, outside the box and outside Touch ID. Anyone who controls the extension, for example through a malicious update, could take every password you type in Chrome. Install it only if you accept that, and install only Bisel's. It does not run in private windows or in frames from another site. A password it is holding stays in Chrome's memory, never on disk, until you answer or for 2 minutes at most.
+
+The link back to Bisel is write-only. The extension asks the app to save a login, and the app does that only after Touch ID, which shows the username and site. Replacing a password takes your choice of Update and keeps the old version in the local trash for 30 days. No message reads a password, an item, a title or a list.
+
+It does tell one thing about what is stored: whether a site and username are in the box, and whether a given password is the stored one. Bisel needs that to stay quiet when you sign in normally, and to offer Save or Update. A compromised extension, or any program running as you (it can run the signed host just as Chrome does; the extension ID pinned in the manifest is no barrier to that, and neither is the signature check), could use this to test guesses without Touch ID. So it is rationed: 3 wrong answers per login and 20 in all per hour while the app runs, and after that no answer says anything. Nothing is answered while the box is locked. The same program could also ask to save a login, and you would see a Touch ID prompt you did not expect. If you do, cancel it.
+
+The signature checks on both ends of the socket are there so a password goes only to the real app, and so the app knows the prompt came through the real host. Touch ID is the access control.
+
 ## What AutoFill exposes
 
 System AutoFill needs a list of what it may offer, and the system keeps that list (`ASCredentialIdentityStore`) as plaintext outside the box. While the box is unlocked it holds, for each login with a password: the site's host, the username and the item's random id; for each passkey, also its credential ID and the site's user handle, which are public identifiers; for each login with a one-time code, a second entry with the same host, username and id. It never holds a title, password, private key, note, one-time code or setup key. A process running as you, or someone with your unlocked Mac, may be able to read which sites you have logins on, under which usernames, and which of them use a one-time code. The list is emptied when the box locks, resets or quits; after a crash it stays until the next launch. Details are in [docs/SPEC.md](docs/SPEC.md) §8, "AutoFill".

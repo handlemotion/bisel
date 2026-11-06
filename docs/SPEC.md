@@ -18,7 +18,7 @@ Goals
 
 Non-goals (v1)
 
-- Sharing, multiple users, teams, Windows/Android/Linux, Chromium extension, passkey sign-in, cards/addresses, attachments, SSH keys.
+- Sharing, multiple users, teams, Windows/Android/Linux, passkey sign-in, cards/addresses, attachments, SSH keys.
 
 ## 2. Milestones
 
@@ -363,6 +363,29 @@ Plain XPC is out: a Mach service needs a launchd job, which would be a second pr
 **One-time codes.** `ProvidesOneTimeCodes` makes Bisel a provider of codes. The extension sends `.oneTimeCode(id, services)`, or `.oneTimeCodes(services)` from the manual list, under the same rules as a password: Touch ID every time, the login's own address must match the site, and a login without an address gets nothing. A list of codes pays for one code and for nothing else, so filling a password and then its code is two Touch IDs. The app makes the code with `TOTPGenerator` after the prompt; only those digits cross the socket, never the setup key. Code identities are `ASOneTimeCodeCredentialIdentity`, one per site of a login with a code, under the store's rules. The label the system shows is the username, or the host when there is none, never the title. No end-to-end run yet: this needs a signed build.
 
 **Set Up Codes In.** That list in System Settings is the apps that claim the `otpauth` URL scheme, and it has nothing to do with the extension: Apple's forum answer says so, and 1Password's `Info.plist` shows it. The system opens the link with the chosen app, so a setup key arrives in `AppDelegate.application(_:open:)` and is never logged. Any app or page can send such a link, so it only fills the panel's new login form (`AppModel.setUpCode`), with the issuer as title and the account as username; nothing is saved until the person saves, and a form already being typed keeps its text and takes the key. `hotp` and anything `TOTPSetup` refuses gets a toast. The form holds no address, and a login without one gets no codes, so the person has to add it. Adding the key to an existing login needs a chooser that does not exist yet.
+
+### Chrome extension
+
+macOS gives an AutoFill extension no way to receive a save request (`ASSavePasswordRequest` is iOS and visionOS only), so saving a new login from a browser takes a browser extension. `apps/chrome` is a Manifest V3 extension that does that and nothing else: no filling, no passkeys.
+
+**The path.** A content script in the top frame of `https` pages sees a trusted `submit` and reads the login from that form's own controls: exactly one filled password field, no `new-password` or `one-time-code`, and a username. Sign-ups, password changes, cross-origin frames, plain `http` pages and private windows are left alone. A login in a step of its own, with no username in the form, is not offered. A form that is submitted with a wrong password is offered too: the extension cannot tell. It hands the login to the service worker, which keeps it in `chrome.storage.session` (memory only, closed to content scripts) for 2 minutes. The site is `sender.origin` as Chrome reports it, never anything the page or the content script says. The worker asks the app `save.check`, and the next top-frame page in that tab shows the prompt: `prompt.html`, an extension page in an iframe, which the page around it cannot read. Only that page can accept. Only after an accept does the password cross, in `save`.
+
+**The link.** Chrome launches `bisel-browser-host` (`apps/mac/BiselBrowserHost`, in `Contents/Helpers`) once per message. It links `BiselAgent` only: no keys, no store. It refuses a caller other than the pinned extension origin, then passes the message to the app over a socket at `Application Support/bisel/agent/browser.sock` and checks the app's signature (`AgentPeer.appRequirement`), and the app answers only the signed host (`AgentPeer.browserHostRequirement`), as for the `bisel` tool. The extension's ID comes from the `key` in its manifest, and the app writes Chrome's native messaging manifest on every launch, where Chrome is installed, with that one ID in `allowed_origins`.
+
+**The messages** (`BrowserWire.swift`), the same JSON from Chrome to the host and from the host to the app:
+
+| Type         | Fields                                    | Answers                             |
+| ------------ | ----------------------------------------- | ----------------------------------- |
+| `save.check` | `site`, `username`, `salt`, `digest`      | `new`, `differs`, `same`, `unknown` |
+| `save`       | `site`, `username`, `password`, `replace` | `saved`, `unchanged`, `exists`      |
+
+Every message has `v` (1) and `id`, every answer `v`, `id`, and `result` or `error` (an `AgentCode`). A type the app does not know does not decode. Filling, if it ever comes, adds `fill.*` types with their own broker and leaves these alone.
+
+**The app.** `BrowserSaveBroker` decides. `site` must be a bare `https` origin and not a public suffix. A save takes Touch ID, which names the username and site and unlocks a locked box. Then: the same password is `unchanged`; a login for that site (`SiteMatch`) and username, case-insensitively, with another password is `exists` unless the person chose Update (`replace`), and nothing is written; otherwise it is created or updated. An update changes the password alone, and the replaced version goes to the local trash on any box, kept 30 days, as `keepingPrevious`. The app then reloads and syncs. A check while the box is locked is `unknown`, with no prompt: the extension offers Save, and if that turns out to be `exists` the prompt asks again as Update.
+
+**Write-only.** `BrowserAnswer` has no case that carries anything from the box. The one thing the link tells about stored logins is the word `save.check` answers, which is needed to stay quiet on an ordinary sign-in and to choose Save or Update. Since that word confirms or denies a password, `save.check` is rationed: 3 wrong answers per login and 20 in all per hour, after which every answer is `unknown`, right or wrong, so a guess learns nothing. A right answer costs nothing, so a person signing in never runs out. The allowance lives in memory and starts over when the app does. It carries a salted SHA-256 and not the password, because the person has not answered yet. What this exposes is in `SECURITY.md`.
+
+**Not run yet.** The flows cover the broker, the link's peer checks and the worker with a fake `chrome`. No end-to-end run in Chrome is recorded yet: it needs a signed build (`apps/chrome/README.md`).
 
 ### Theming
 

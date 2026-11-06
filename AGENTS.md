@@ -15,6 +15,7 @@ Bisel is a personal, zero-knowledge password manager for the Mac. Boxes live in 
 
 - `apps/mac`: the Swift Mac app (XcodeGen: `project.yml`, `project.dev.yml`), the core in `apps/mac/Packages/BiselCore`, tools in `apps/mac/Tools`.
 - `apps/server`: the optional, deferred sync server, opt-in from Settings: Cloudflare Worker (Hono, D1, Better Auth passkeys) at `box.bisel.app`, with the dashboard in `apps/server/web` and its assets in `apps/server/public`. Kept working and tested, not developed further for now.
+- `apps/chrome`: the Manifest V3 extension that offers to save a login, through the signed native host `apps/mac/BiselBrowserHost` (`docs/SPEC.md` §8, "Chrome extension"). Saving only.
 - `docs/`: `SPEC.md` is the source of truth for the design; `SECURITY-REVIEW.md`; `design/`.
 
 Repo-wide rules only. App-level docs: `apps/server/README.md` and `DEPLOY.md` (the production runbook), `apps/mac/Packages/BiselCore/README.md`. Explicit user instructions override every repository file.
@@ -32,7 +33,7 @@ Repo-wide rules only. App-level docs: `apps/server/README.md` and `DEPLOY.md` (t
 
 - `pnpm install`, then `pnpm check` (oxfmt + oxlint), `pnpm check-types`, `pnpm test`, `pnpm build`.
 - `pnpm test` runs the server vitest flows (its own `wrangler dev`, free port, local D1). Also `pnpm --filter bisel-server test:legacy` (migration test) and, opt-in, `pnpm --filter bisel-server test:browser` (the one Playwright passkey test).
-- `pnpm ci:local` is CI on your Mac: `scripts/check-all.sh --server --core --app --release`, the same modes the CI jobs run. `scripts/check-all.sh` alone runs server, core and app; `scripts/check-release-hooks.sh` fails if debug hooks leak into Release.
+- `pnpm ci:local` is CI on your Mac: `scripts/check-all.sh --server --chrome --core --app --release`, the same modes the CI jobs run. `scripts/check-all.sh` alone runs server, chrome, core and app; `scripts/check-release-hooks.sh` fails if debug hooks leak into Release.
 - Swift formatting is advisory for now: `xcrun swift-format lint --configuration apps/mac/.swift-format`.
 
 ## Working rules
@@ -52,6 +53,6 @@ Repo-wide rules only. App-level docs: `apps/server/README.md` and `DEPLOY.md` (t
 - PR titles are Conventional Commits (`feat: …`, `fix: …`, `chore: …`, `docs: …`; `feat!:` for a breaking change): the squash commit takes the title, and release-please reads it.
 - Releases: release-please (`.github/workflows/release-please.yml`) keeps one open release PR with the next version and `CHANGELOG.md`. Merging it tags `vX.Y.Z` and makes a draft GitHub release; the notarized DMG is built on a Mac with `apps/mac/Tools/release.sh`, and `--publish` attaches it and publishes the release. Fixes merge to `main` without a release; nothing ships until the release PR is merged. Close and reopen the release PR to run CI on it.
 - Wait for every CI check on the PR to pass (`gh pr checks --watch`), then squash-merge (`gh pr merge --squash --delete-branch`). A red or pending check is never merged; fix it on the branch.
-- CI (`.github/workflows/ci.yml`) runs `scripts/check-all.sh` in four jobs: Server (`--server`), Core (`--core`), App (`--app`, unsigned BiselDev build), Release (`--release`); CodeQL scans actions and TypeScript on every PR, and Swift (~16 min) on every push to `main` and weekly, so it does not gate PRs. The `main` ruleset requires the six PR checks but not an up-to-date branch: green PRs merge back to back, and the post-merge CI on `main` catches a bad combination. Run `pnpm ci:local` before pushing when a change touches more than one of them.
+- CI (`.github/workflows/ci.yml`) runs `scripts/check-all.sh` in five jobs: Server (`--server`), Chrome (`--chrome`), Core (`--core`), App (`--app`, unsigned BiselDev build), Release (`--release`); CodeQL scans actions and TypeScript on every PR, and Swift (~16 min) on every push to `main` and weekly, so it does not gate PRs. The `main` ruleset requires the six PR checks but not an up-to-date branch: green PRs merge back to back, and the post-merge CI on `main` catches a bad combination. Run `pnpm ci:local` before pushing when a change touches more than one of them.
 - CI and `scripts/check-all.sh` change together: a new check goes into a check-all mode, and the job calls that mode.
 - Workflows: `permissions: contents: read` at the top and only what a job needs; third-party actions pinned to a full commit SHA with the version in a comment; `pull_request` and `push` to `main` only, never `pull_request_target`; no secrets. The repo is public, so fork PRs run this code.
