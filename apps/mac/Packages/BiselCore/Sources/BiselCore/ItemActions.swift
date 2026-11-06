@@ -202,12 +202,12 @@ extension Vault {
     /// Items are stored with whole-second dates, so what these operations return equals what a later read gives back.
     static func storedNow() -> Date { Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down)) }
 
-    private func checked(_ item: Item) throws -> Item {
+    func checked(_ item: Item) throws -> Item {
         if let issue = ItemValidator.sizeIssue(for: item) { throw ItemValidationError(issues: [issue]) }
         return item
     }
 
-    private func writeItem(_ item: Item, key k: LockedKey, keepPrevious: Bool) throws {
+    func writeItem(_ item: Item, key k: LockedKey, keepPrevious: Bool) throws {
         let payload = try ItemCodec.encode(item)
         let id = item.id
         try store.commitLocal(id: id, deleted: false, now: item.updatedAt, keepPrevious: keepPrevious) { rev in
