@@ -28,22 +28,38 @@ extension View {
 /// and goes back to the menu bar when the last window closes.
 @MainActor
 enum DockPresence {
-    private static var observer: NSObjectProtocol?
+    private static var observers: [NSObjectProtocol] = []
 
+    /// Runs on every view update, and a closed SwiftUI `Window` keeps updating: only a window on screen may bring the icon back.
     static func windowAppeared(_ window: NSWindow) {
-        if NSApp.activationPolicy() != .regular {
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate()
-        }
-        guard observer == nil else { return }
-        observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { note in
+        observe()
+        if window.isVisible { showIcon() }
+    }
+
+    private static func showIcon() {
+        guard NSApp.activationPolicy() != .regular else { return }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+    }
+
+    private static func counts(_ window: NSWindow) -> Bool { !(window is NSPanel) && window.styleMask.contains(.titled) }
+
+    private static func observe() {
+        guard observers.isEmpty else { return }
+        let center = NotificationCenter.default
+        // A window that was not on screen yet when `windowAppeared` ran, or that reopens with no view update.
+        observers.append(center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { note in
+            let window = note.object as? NSWindow
+            MainActor.assumeIsolated { if let window, counts(window) { showIcon() } }
+        })
+        observers.append(center.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { note in
             let closing = note.object as? NSWindow
             MainActor.assumeIsolated {
                 guard let closing, !(closing is NSPanel) else { return }
-                let others = NSApp.windows.contains { $0 !== closing && $0.isVisible && !($0 is NSPanel) && $0.styleMask.contains(.titled) }
+                let others = NSApp.windows.contains { $0 !== closing && $0.isVisible && counts($0) }
                 if !others { NSApp.setActivationPolicy(.accessory) }
             }
-        }
+        })
     }
 }
 
