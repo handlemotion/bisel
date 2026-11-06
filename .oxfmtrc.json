@@ -9,6 +9,7 @@
     "pnpm-lock.yaml",
     "**/public/app.js",
     ".claude/**",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "apps/chrome/public/manifest.json"
   ]
 }
