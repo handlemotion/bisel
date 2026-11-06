@@ -14,7 +14,7 @@ public struct CustomField: Codable, Sendable, Equatable {
     }
 }
 
-/// Arbitrary JSON, used so the reserved `passkey` blob round-trips losslessly.
+/// Arbitrary JSON, used so the `passkey` slot keeps whatever an import stored in it. BiselPasskey reads its own credentials from it.
 public enum JSONValue: Codable, Sendable, Equatable {
     case null, bool(Bool), number(Double), string(String), array([JSONValue]), object([String: JSONValue])
 
