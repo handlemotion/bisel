@@ -2,8 +2,9 @@
 # One command to verify everything that can be verified without touching production.
 # CI (.github/workflows/ci.yml) runs one mode per job; `pnpm ci:local` runs all of them, so a green local run is a green CI run.
 #
-#   scripts/check-all.sh                 server + core + app
+#   scripts/check-all.sh                 server + chrome + core + app
 #   scripts/check-all.sh --server        pnpm install, format + lint, typecheck, pnpm test, test:legacy
+#   scripts/check-all.sh --chrome        the Chrome extension: pnpm install, typecheck, build, flow tests
 #   scripts/check-all.sh --core          BiselCore Swift flow suite (swift test --traits SoftwareKeys)
 #   scripts/check-all.sh --app           xcodegen (project.dev.yml) + unsigned Debug build of the Mac app (software keys), + compile (never run) of the UI test sources
 #   scripts/check-all.sh --release       Release build + BISEL_DEV_ strings check (scripts/check-release-hooks.sh), signing config lint; slow, opt-in
@@ -18,20 +19,21 @@ set -o pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOGS="$(mktemp -d "${TMPDIR:-/tmp}/bisel-check.XXXXXX")"
-RUN_SERVER=0 RUN_CORE=0 RUN_APP=0 RUN_RELEASE=0 VERBOSE=0
+RUN_SERVER=0 RUN_CHROME=0 RUN_CORE=0 RUN_APP=0 RUN_RELEASE=0 VERBOSE=0
 
 for arg in "$@"; do
   case "$arg" in
     --server)  RUN_SERVER=1 ;;
+    --chrome)  RUN_CHROME=1 ;;
     --core)    RUN_CORE=1 ;;
     --app)     RUN_APP=1 ;;
     --release) RUN_RELEASE=1 ;;
     -v|--verbose) VERBOSE=1 ;;
-    -h|--help) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $arg (try --help)" >&2; exit 64 ;;
   esac
 done
-if (( RUN_SERVER + RUN_CORE + RUN_APP + RUN_RELEASE == 0 )); then RUN_SERVER=1 RUN_CORE=1 RUN_APP=1; fi
+if (( RUN_SERVER + RUN_CHROME + RUN_CORE + RUN_APP + RUN_RELEASE == 0 )); then RUN_SERVER=1 RUN_CHROME=1 RUN_CORE=1 RUN_APP=1; fi
 
 NAMES=() RESULTS=() TIMES=()
 CHILD=0
@@ -87,6 +89,16 @@ if (( RUN_SERVER )); then
     step "server: typecheck (pnpm check-types)" bash -c "cd '$ROOT' && pnpm check-types"
     step "server: build + flow tests (pnpm test)" bash -c "cd '$ROOT' && pnpm test"
     step "server: migration test (test:legacy)" bash -c "cd '$ROOT/apps/server' && pnpm test:legacy"
+  fi
+  echo
+fi
+
+if (( RUN_CHROME )); then
+  echo "chrome"
+  if step "chrome: pnpm install --frozen-lockfile" bash -c "cd '$ROOT' && pnpm install --frozen-lockfile"; then
+    step "chrome: typecheck" bash -c "cd '$ROOT' && pnpm --filter bisel-chrome check-types"
+    step "chrome: build" bash -c "cd '$ROOT' && pnpm --filter bisel-chrome build"
+    step "chrome: flow tests" bash -c "cd '$ROOT' && pnpm --filter bisel-chrome test"
   fi
   echo
 fi
