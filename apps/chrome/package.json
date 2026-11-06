@@ -1,0 +1,20 @@
+{
+  "name": "bisel-chrome",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offers to save a login to Bisel when someone signs in (Chrome, Manifest V3)",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check-types": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.3.7",
+    "@types/node": "26.6.5",
+    "esbuild": "0.28.2",
+    "happy-dom": "21.0.4",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Bisel",
+  "version": "0.1.5",
+  "description": "Offers to save a login to Bisel when you sign in.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmCJGS/SjsErGuEwjT4K5RPRm4728VfJK89X/62gA+6BQLy5enIP7K+S6jzwVw+GhklR/Jbf6dn0YjbE8bx1TUbvROwyxT5ZkhfUJBSpxnfbE38KdJkPFTxvyGv4AgHMNXJXxxfvorZtr8maOqN57Jph1ySDfng1D2McRlIljFWwQbh53/VrZyPhhlLCsTR79kHr6g3UGvELPOmKgfHuKWvbNxmLw31tVAPMkQEp4lHOEbtJuxLG5KJJVELBK6rG8Jtp/PNDVDmRjIbuVFdY8qNJy3uPGI+DIq9Y1lsgFOWYL59AQnfg5qRxxbL+aIHHwwfWaCwcVlvWhoS8qA4GJ6wIDAQAB",
+  "minimum_chrome_version": "116",
+  "incognito": "not_allowed",
+  "permissions": ["nativeMessaging", "storage", "alarms"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [{ "resources": ["prompt.html"], "matches": ["https://*/*"] }]
+}
