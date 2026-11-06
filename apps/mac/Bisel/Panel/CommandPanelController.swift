@@ -123,8 +123,8 @@ final class CommandPanelController {
         FillEngine.shared.warmUp(target: target)
 
         themeStore.reload()
-        // Fully reset BEFORE the window can be seen: no stale query/results/selection/confirmation, and the content
-        // starts in its "not presented" (scaled, transparent) state so nothing flashes.
+        // Reset BEFORE the window can be seen: no stale results or confirmation, and the content starts in its
+        // "not presented" (scaled, transparent) state so nothing flashes. The search and the selected login stay.
         model.reset(targetName: target?.localizedName)
         clearEditingHistory()
         model.presented = true  // instant open: no animation (user preference, like Raycast)
@@ -186,7 +186,7 @@ final class CommandPanelController {
             guard let self, self.state == .hiding else { return }
             self.panel.orderOut(nil)
             self.state = .hidden
-            self.model.reset(targetName: nil)  // clear everything while hidden: next show cannot flash old state
+            self.model.reset(targetName: nil)  // while hidden: the next show cannot flash a stale form or value
             Log.panel.notice("STATE hidden")
         }
         hideWork = work
@@ -295,8 +295,8 @@ final class CommandPanelController {
 
     /// Hover is driven by polling the global pointer position (~30 Hz, only while the panel is visible) instead of
     /// tracking areas: the panel never activates the app, and tracking-area / SwiftUI `.onHover` delivery for an
-    /// inactive app's non-activating panel proved unreliable. Selection changes only when the pointer actually
-    /// moved, so keyboard scrolling under a resting pointer never steals the selection.
+    /// inactive app's non-activating panel proved unreliable. Hover state changes only when the pointer actually
+    /// moved, so keyboard scrolling under a resting pointer does not light rows.
     private var pointerTimer: Timer?
     private var lastPointer = NSPoint(x: -1, y: -1)
     private var lastScrollOffset: CGFloat = 0

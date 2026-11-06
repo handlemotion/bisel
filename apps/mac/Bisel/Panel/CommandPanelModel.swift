@@ -179,14 +179,10 @@ final class CommandPanelModel {
     @ObservationIgnored private var untouchedDraft: ItemDraft?
     /// The login being made sits above the results, as the list's first row.
     var leadingRows: Int { isEditingNew ? 1 : 0 }
-    /// A list row under the pointer while the form is up: there, hovering shows a row but does not select it.
+    /// The list row under the pointer. Hovering only shows a row: a click selects it.
     var hoveredRow: String?
     /// The form input a click landed on, for the form to focus: a whole Values row counts, not just its text.
     var formFocus: String?
-    /// Leaving the form takes a row out of the list, so the rows move under a still pointer. Where the click was: hovering
-    /// does not select until the pointer really moves, or the row just clicked would lose to the one that slid under it.
-    @ObservationIgnored private var hoverHold: CGPoint?
-    private static let hoverHoldDistance: CGFloat = 12
     var actionIndex = 0
     var hoveredPill: PillID?
     var hoveredValue: ValueRowID?
@@ -260,15 +256,14 @@ final class CommandPanelModel {
         items.onChange = { [weak self] in self?.refresh() }
     }
 
-    /// Full reset, run on every show AND every hide: opens as the full A to Z list with the first item selected,
-    /// empty query, no stale state.
+    /// Run on every show AND every hide: clears forms, menus and revealed values, but keeps the search and the selected login,
+    /// so the panel reopens where it was left. Only memory holds those, and a lock clears them (`lockStateChanged`).
     func reset(targetName: String?) {
         self.targetName = targetName
         mode = .search
         newLogin = nil
         newLoginSelected = false
         hoveredRow = nil
-        hoverHold = nil
         notice = nil
         actionIndex = 0
         hoveredPill = nil
@@ -279,8 +274,14 @@ final class CommandPanelModel {
         flashTasks.values.forEach { $0.cancel() }
         flashTasks = [:]
         flashes = [:]
-        if query.isEmpty { refresh() } else { query = "" }
+        refresh(keepingSelection: true)
         focusToken += 1
+    }
+
+    /// A locked box shows nothing, and leaves no search behind for whoever unlocks it next.
+    func lockStateChanged() {
+        if !isUnlocked { query = "" }
+        refresh()
     }
 
     /// `keepingSelection`: a background reload keeps the highlighted login where it is, if it is still in the results.
@@ -437,27 +438,17 @@ final class CommandPanelModel {
         guard isUnlocked else { return }
         let button = isEditingNew ? formButtonFrames.first { $0.value.contains(p) }?.key : nil
         if hoveredFormButton != button { hoveredFormButton = button }
-        let row = isEditingNew ? rowID(at: p) : nil
+        let row = rowID(at: p)
         if hoveredRow != row { hoveredRow = row }
         guard !isEditingNew else { return }
-        if let hold = hoverHold {
-            guard hypot(p.x - hold.x, p.y - hold.y) > Self.hoverHoldDistance else { return }
-            hoverHold = nil
-        }
         let onNewLogin = newLoginFrame.contains(p)
         if hoveredNewLogin != onNewLogin { hoveredNewLogin = onNewLogin }
         let valueHit = selectedResult == nil ? nil : valueFrames.first(where: { $0.value.contains(p) })?.key
         if hoveredValue != valueHit { hoveredValue = valueHit; if let v = valueHit { hoverStats["value.\(v.rawValue)", default: 0] += 1 } }
         let pillHit = pill(at: p)
         if hoveredPill != pillHit { hoveredPill = pillHit; Log.panel.notice("pointer hover pill \(pillHit?.rawValue ?? "none", privacy: .public)") }
-        guard let id = rowID(at: p) else { return }
-        if id.hasPrefix("action.") {
-            if let i = Int(id.dropFirst(7)), i != actionIndex { pointerDriven = true; actionIndex = i }
-        } else if let i = resultIndex(id), i != selected {
-            pointerDriven = true
-            selected = i
-            hoverStats["row\(i)", default: 0] += 1
-        }
+        // The ⌘K menu is a menu: hovering moves its highlight, and a click runs the action.
+        if let row, row.hasPrefix("action."), let i = Int(row.dropFirst(7)), i != actionIndex { pointerDriven = true; actionIndex = i }
     }
 
     /// Click: a pill performs its action, a row selects and performs the default action (like Enter).
@@ -557,7 +548,6 @@ final class CommandPanelModel {
     private func clickInForm(at p: CGPoint) -> Bool {
         if let id = rowID(at: p) {
             guard let i = resultIndex(id) else { return false }
-            hoverHold = p
             selectResult(at: i)
             return true
         }
