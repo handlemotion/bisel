@@ -36,6 +36,12 @@ targets:
         Release:
           CODE_SIGN_STYLE: Automatic
           CODE_SIGN_IDENTITY: "-"
+  BiselBrowserHost:
+    settings:
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Automatic
+          CODE_SIGN_IDENTITY: "-"
   # No restricted entitlement and no App Group: an unsigned build could not carry them. It compiles here and does nothing.
   BiselAutoFill:
     settings:

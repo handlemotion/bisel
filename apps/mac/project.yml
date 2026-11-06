@@ -94,6 +94,13 @@ targets:
         copy:
           destination: wrapper
           subpath: Contents/Helpers
+      # What Chrome launches for the extension (docs/SPEC.md §8, "Chrome extension"), beside the agent CLI.
+      - target: BiselBrowserHost
+        embed: true
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
       # System AutoFill (docs/SPEC.md §8, "AutoFill"), at Contents/PlugIns. Signed on copy with its own profile.
       - target: BiselAutoFill
         embed: true
@@ -209,6 +216,30 @@ targets:
         Release:
           # No entitlements, so no provisioning profile. Hardened runtime and no get-task-allow keep the secrets it holds for a
           # moment away from other processes of this user.
+          CODE_SIGN_STYLE: Manual
+          CODE_SIGN_IDENTITY: "Developer ID Application"
+          OTHER_CODE_SIGN_FLAGS: "--options=runtime --timestamp"
+
+  # Chrome's native messaging host (docs/SPEC.md §8, "Chrome extension"). Links BiselAgent only: no keys, no crypto, no box access.
+  BiselBrowserHost:
+    type: tool
+    platform: macOS
+    sources:
+      - path: BiselBrowserHost
+    dependencies:
+      - package: BiselCore
+        product: BiselAgent
+    settings:
+      base:
+        PRODUCT_NAME: bisel-browser-host
+        # The app checks this identifier and the team on every connection (AgentPeer.browserHostRequirement).
+        PRODUCT_BUNDLE_IDENTIFIER: app.bisel.browser-host
+        GENERATE_INFOPLIST_FILE: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        SKIP_INSTALL: YES
+      configs:
+        Release:
+          # As the agent CLI: no entitlements, so no profile; hardened runtime keeps the password it holds for a moment from other processes.
           CODE_SIGN_STYLE: Manual
           CODE_SIGN_IDENTITY: "Developer ID Application"
           OTHER_CODE_SIGN_FLAGS: "--options=runtime --timestamp"

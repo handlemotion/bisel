@@ -15,6 +15,13 @@ if codesign -d --entitlements - "$TOOL" 2>&1 | grep -q get-task-allow; then echo
 for pat in BISEL_DEV_ BISEL_SOFTWARE_KEYS GRDB ItemSealer SecureEnclave VaultKeys; do
   if strings -a "$TOOL" | grep -q -- "$pat"; then echo "FAIL agent tool contains $pat"; exit 1; fi
 done
+# Chrome's native host ships inside the app, under the same rules (docs/SPEC.md §8, "Chrome extension").
+HOST="$APP/Contents/Helpers/bisel-browser-host"
+[ -x "$HOST" ] || { echo "FAIL no Chrome native host at $HOST"; exit 1; }
+if codesign -d --entitlements - "$HOST" 2>&1 | grep -q get-task-allow; then echo "FAIL get-task-allow on the Chrome native host"; exit 1; fi
+for pat in BISEL_DEV_ BISEL_SOFTWARE_KEYS GRDB ItemSealer SecureEnclave VaultKeys; do
+  if strings -a "$HOST" | grep -q -- "$pat"; then echo "FAIL Chrome native host contains $pat"; exit 1; fi
+done
 # The AutoFill extension is sandboxed and holds no keys: it links BiselAgent only (docs/SPEC.md §8, "AutoFill").
 APPEX="$APP/Contents/PlugIns/BiselAutoFill.appex"
 [ -d "$APPEX" ] || { echo "FAIL no AutoFill extension at $APPEX"; exit 1; }
