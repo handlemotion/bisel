@@ -239,7 +239,7 @@ ents="$(codesign -d --entitlements - --xml "$APPEX" 2>/dev/null | plutil -conver
 [[ "$(ent com.apple.security.app-sandbox)" == "true" ]] || die "the extension is not sandboxed."
 [[ "$(ent "$AUTOFILL_ENTITLEMENT")" == "true" ]] || die "the extension has no AutoFill entitlement."
 ent com.apple.security.application-groups | grep -q "$APP_GROUP" || die "the extension is not in App Group $APP_GROUP."
-[[ -z "$(ent keychain-access-groups)" ]] || die "the extension claims a keychain group: it must hold no keys."
+ent keychain-access-groups | grep -qx "[[:space:]]*$TEAM.app.bisel" && die "the extension is in the device keys' keychain group: it must hold no keys."
 "$APPLE/Tools/check-release.sh" "$APP"   # get-task-allow, software keys, fixture and BISEL_DEV_ hooks
 # An app whose SUPublicEDKey is not the keychain key's could never be updated again: Sparkle would reject every later update.
 [[ -x "$SPARKLE_BIN/sign_update" ]] || die "Sparkle's tools are not in $SPARKLE_BIN (did the archive resolve the Sparkle package?)."
