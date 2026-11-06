@@ -30,9 +30,9 @@ Non-goals (v1)
 | M4  | Safari/system AutoFill credential provider on Mac (shares M2 core)                        | later     |
 | M5  | iPhone app + AutoFill provider, device enrollment by QR                                   | later     |
 | M6  | Apple Passwords credential-exchange import (with passkeys)                                | later     |
-| M7  | Passkey sign-in everywhere; optional Safari extension for URL context                     | later     |
+| M7  | Passkey sign-in everywhere; optional Safari extension for URL context (engine built, §5)  | later     |
 
-Design now for M4–M7 where it is cheap (shared storage location, key access groups, enrollment endpoints, reserved passkey item type) but do not build them.
+Design now for M4–M7 where it is cheap (shared storage location, key access groups, enrollment endpoints, the passkey item type) but do not build them.
 
 ## 3. Repo layout
 
@@ -121,11 +121,43 @@ Test-only key store
   "tags": ["string"],
   "createdAt": "RFC3339",
   "updatedAt": "RFC3339",
-  "passkey": { "reserved": true }
+  "passkey": "any JSON, see Passkeys below"
 }
 ```
 
-`passkey` is reserved: import must be able to store the raw credential blob losslessly, sign-in comes in M7. Types `login`, `note`, `secret` (API keys, env values) are in v1.
+Types `login`, `note`, `secret` (API keys, env values) are in v1.
+
+### Passkeys
+
+The `passkey` slot holds whatever JSON was put there, and nothing rewrites it. Bisel signs only with a slot in its own format, on an item of type `passkey`:
+
+```json
+{
+  "format": "bisel-passkey",
+  "version": 1,
+  "algorithm": -7,
+  "credentialId": "base64url",
+  "rpId": "example.com",
+  "userHandle": "base64url",
+  "userName": "string",
+  "userDisplayName": "string",
+  "privateKey": "base64url, the raw 32-byte P-256 scalar",
+  "signCount": 0,
+  "createdAt": "RFC3339"
+}
+```
+
+This added no payload version and needs no migration: `v` stays 1 and the slot was already free-form JSON. Anything else in the slot (an import's blob, a later `version`, a damaged credential) stays exactly as it is, is never offered to a site, and is listed by `Vault.unusablePasskeys()`. An older build keeps such items and this format intact too.
+
+The engine is `BiselPasskey` (`PasskeyAuthenticator`, pure WebAuthn) and `Vault` in `BiselCore/VaultPasskeys.swift` (`passkeys`, `unusablePasskeys`, `registerPasskey`, `assertPasskey`), for the credential provider extension to call. The rules:
+
+- **Keys.** ES256 only. Keys are software P-256 keys, not Secure Enclave keys, because a passkey must reach the person's other devices. The private key is sealed with the item, so it goes through sync, history, rotation and `.bisel-backup` as ciphertext and is in memory only to sign. Callers get attestation objects and signatures; `PasskeyCredential` keeps the key non-public and out of its text and reflected forms. Agents never see passkey items.
+- **Registration.** `none` attestation, zero AAGUID, a random 32-byte credential ID, a COSE EC2 key, canonical CBOR. A credential the site excluded fails the registration. The same user handle on the same RP ID replaces the item's credential in place, as WebAuthn says, and the old one stays in the item's history.
+- **Assertion.** ASN.1 DER ECDSA over `authenticatorData || clientDataHash`. An RP ID matches exactly, after lowercasing: no subdomain or `SiteMatch` rule, because the browser has already checked the page against the RP ID. The RP ID is inside the credential, so editing the item's title or addresses does not move it. An empty allow list means any credential for that RP ID.
+- **Flags.** User present is always set. User verified is set because every registration and signature takes a fresh biometric check. Backup eligible is always set, since it may not change over a credential's life and any box can start syncing. Backup state is set while the box has a lane.
+- **Sign count.** Always 0. The key is shared between devices, so a counter could only fork, and 0 tells the site none is kept (WebAuthn §6.1.1). Signing therefore writes nothing to the box and cannot cause a sync conflict.
+- **Copies.** A "(conflict)" copy holds the same credential as its original. Lookups return one entry per credential ID, the most recently updated.
+- **Drafts.** Nobody hand-creates or edits a passkey: a draft cannot make, copy or retype one, and it does not carry the slot.
 
 ### Server record (what the server stores)
 
@@ -211,7 +243,7 @@ Binary columns are unpadded base64url TEXT (D1 returns BLOBs as number arrays); 
 
 SwiftPM package, Swift 6, macOS 26+ / iOS 26+. No UI.
 
-Module names are prefixed (`BiselCrypto`, `BiselKeyStore`, `BiselVault`, `BiselLane`, `BiselSync`, `BiselRecovery`, `BiselBackup`, `BiselTOTP`) because a module called `Crypto` collides with swift-crypto's (pulled in by the OTP package) and a module called `Vault` would shadow the public `Vault` type. The umbrella module `BiselCore` re-exports them all and defines the `Vault` facade (an `actor`). `BiselLane` is the sync-lane boundary (`SyncLane`, records, verifier); `BiselSync` runs the engine over a lane (`ServerLane` for the server, `RecordBox` for storage-only lanes; see `docs/SYNC-LANES.md` §14). `BiselBackup` is the `.bisel-backup` format and the backup reminder policy (§12). `BiselTestSupport` (dev/test only, never linked by apps) starts a throwaway local server and provides the in-memory `FakeLane` for flow tests.
+Module names are prefixed (`BiselCrypto`, `BiselKeyStore`, `BiselVault`, `BiselLane`, `BiselSync`, `BiselRecovery`, `BiselBackup`, `BiselTOTP`, `BiselPasskey`) because a module called `Crypto` collides with swift-crypto's (pulled in by the OTP package) and a module called `Vault` would shadow the public `Vault` type. The umbrella module `BiselCore` re-exports them all and defines the `Vault` facade (an `actor`). `BiselLane` is the sync-lane boundary (`SyncLane`, records, verifier); `BiselSync` runs the engine over a lane (`ServerLane` for the server, `RecordBox` for storage-only lanes; see `docs/SYNC-LANES.md` §14). `BiselBackup` is the `.bisel-backup` format and the backup reminder policy (§12). `BiselPasskey` is the WebAuthn authenticator (§5). `BiselTestSupport` (dev/test only, never linked by apps) starts a throwaway local server and provides the in-memory `FakeLane` for flow tests.
 
 Modules
 
@@ -285,7 +317,7 @@ Stack: Swift 6, SwiftUI + AppKit, macOS 26. Project generated by XcodeGen from `
    - A compatibility matrix is a required deliverable: Safari, Chrome-family browser, Firefox, TextEdit, Terminal/Ghostty, System Settings password fields, Slack/Discord (Electron), a native SwiftUI app. For each: username, password, TOTP, secure-input behavior, result and caveat.
 4. **Onboarding / bootstrap**: iCloud first (`BoxSetup`, `apps/mac/Packages/BiselCore/SETUP.md`): check the iCloud account → generate keys and phrase, create the box in the owner's iCloud → show phrase once with a "I have stored it" gate → backup reminder (D4). A box already in this Apple Account's iCloud is joined (8-word / QR pairing over iCloud, D6) or restored, never duplicated. The server (URL, bootstrap token or browser sign-in) is not part of first run; it is connected from Settings.
 5. **Recovery**: enter the phrase on a fresh install to rebuild from the box in iCloud, or restore a `.bisel-backup` file with the phrase (back into iCloud). Export backup file.
-6. **Import**: 1Password `.1pux` and generic CSV (logins, notes, TOTP). Use the standard zip/JSON/CSV libraries. Passkeys in a 1pux are stored losslessly in the reserved `passkey` type if present.
+6. **Import**: 1Password `.1pux` and generic CSV (logins, notes, TOTP). Use the standard zip/JSON/CSV libraries. Passkeys in a 1pux are stored losslessly in the `passkey` slot if present.
 
 ### Implementation notes (as built)
 
@@ -303,7 +335,7 @@ Stack: Swift 6, SwiftUI + AppKit, macOS 26. Project generated by XcodeGen from `
   - Item URLs open only as https, or http after a confirmation; file://, smb://, vnc://, x-apple.systempreferences:, javascript: and the rest are refused.
   - Windows that can show secrets (set-up, recovery-phrase display, item editor and popover) set `sharingType = .none` (always for set-up and the phrase; otherwise per the "Hide from screenshots" setting). Revealed values and notes are not selectable; every copy, username and notes included, goes through `SecureClipboard`.
   - A recovery phrase is "unconfirmed" until the user re-types three random words; a marker file survives a quit, and the next unlock issues a new phrase to confirm. The server hostname is not stored in UserDefaults.
-- **Import.** `.1pux` via ZIPFoundation + JSON, CSV via SwiftCSV (both pinned). A `passkey` value found anywhere in a 1pux item is stored whole in the item's `passkey` slot; its exact location in real 1Password exports is not verified (only generated fake exports were available).
+- **Import.** `.1pux` via ZIPFoundation + JSON, CSV via SwiftCSV (both pinned). A `passkey` value found anywhere in a 1pux item is stored whole in the item's `passkey` slot (unusable for sign-in, §5); its exact location in real 1Password exports is not verified (only generated fake exports were available).
 
 ### Theming
 
