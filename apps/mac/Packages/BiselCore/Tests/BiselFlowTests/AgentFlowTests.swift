@@ -291,6 +291,107 @@ struct AutoFillFlowTests {
         #expect(await host.prompts == 2, "the next password asks again")
     }
 
+    private static let setupKey = "JBSWY3DPEHPK3PXP"
+
+    /// `box()`'s login, with a one-time code.
+    private func boxWithCode() async throws -> (Device, FakeHost, AutoFillBroker, Item) {
+        let (device, host, broker, item) = try await box()
+        var draft = ItemDraft(editing: item)
+        draft.totp = Self.setupKey
+        guard case .saved(let saved, _) = try await device.vault.updateItem(draft) else { throw AgentError(.failed) }
+        return (device, host, broker, saved)
+    }
+
+    private func oneTimeCode(_ result: AutoFillResult) -> String? {
+        if case .oneTimeCode(let secret) = result { return String(decoding: secret.bytes, as: UTF8.self) }
+        return nil
+    }
+
+    /// The whole answer is the code of this moment, or of the one just after it if a period ended on the way: nothing of the key.
+    private func isCurrentCode(_ result: AutoFillResult, since start: Date) throws -> Bool {
+        let parameters = TOTPParameters(secret: Self.setupKey)
+        guard let code = oneTimeCode(result) else { return false }
+        return try [start, Date()].contains { try TOTPGenerator.code(parameters, at: $0).code == code }
+    }
+
+    @Test("a one-time code leaves without Touch ID, or for a site that only looks like the login's address")
+    func oneTimeCodeNeedsTouchIDAndItsOwnSite() async throws {
+        let (device, host, broker, item) = try await boxWithCode()
+        for site in ["github.com.evil.net", "evilgithub.com", "https://github.com.evil.net/login", "github.co.uk", "hub.com"] {
+            #expect(code(await broker.handle(.oneTimeCode(id: item.id, services: [site]))) == .wrongSite, "\(site)")
+        }
+        guard case .candidates(let none) = await broker.handle(.oneTimeCodes(services: ["github.com.evil.net"])) else { Issue.record("no list"); return }
+        #expect(none.isEmpty)
+        let prompts = await host.prompts
+        #expect(prompts == 1, "only the list asked: no Touch ID sheet for a code that would be refused")
+
+        let request = AutoFillRequest.oneTimeCode(id: item.id, services: ["github.com"])
+        await host.set(answer: AgentError(.denied))
+        #expect(code(await broker.handle(request)) == .denied, "an open box still asks")
+        await device.vault.lock()
+        #expect(code(await broker.handle(request)) == .denied)
+        #expect(await !device.vault.isUnlocked)
+
+        await host.set(answer: nil)
+        let start = Date()
+        #expect(try isCurrentCode(await broker.handle(request), since: start), "Touch ID unlocks a locked box for the request")
+
+        // A login without an address reaches nothing, and a login with no code has none to give.
+        var draft = ItemDraft(type: .login)
+        draft.title = "No address"
+        draft.totp = Self.setupKey
+        let noAddress = try await device.vault.createItem(draft)
+        #expect(code(await broker.handle(.oneTimeCode(id: noAddress.id, services: ["github.com"]))) == .wrongSite)
+        var plain = ItemDraft(type: .login)
+        plain.title = "No code"
+        plain.urls = ["https://gitlab.com"]
+        plain.password = Self.password
+        let noCode = try await device.vault.createItem(plain)
+        #expect(code(await broker.handle(.oneTimeCode(id: noCode.id, services: ["gitlab.com"]))) == .noSuchField)
+    }
+
+    @Test("a Touch ID for a list of passwords pays for a one-time code, or one list pays for two codes")
+    func aListPaysForOneCode() async throws {
+        let (_, host, broker, item) = try await boxWithCode()
+        let request = AutoFillRequest.oneTimeCode(id: item.id, services: ["github.com"])
+        _ = await broker.handle(.list(services: ["github.com"]))
+        #expect(oneTimeCode(await broker.handle(request)) != nil)
+        #expect(await host.prompts == 2, "a password's Touch ID is not a code's")
+
+        guard case .candidates(let listed) = await broker.handle(.oneTimeCodes(services: ["github.com"])) else { Issue.record("no list"); return }
+        #expect(listed == [AutoFillCandidate(id: item.id, title: "GitHub", username: "someone@example.com")])
+        #expect(await host.prompts == 3)
+        #expect(oneTimeCode(await broker.handle(request)) != nil)
+        #expect(await host.prompts == 3, "choosing from the list does not ask twice")
+        #expect(oneTimeCode(await broker.handle(request)) != nil)
+        #expect(await host.prompts == 4, "the next code asks again")
+
+        _ = await broker.handle(.oneTimeCodes(services: ["github.com"]))
+        #expect(password(await broker.handle(.credential(id: item.id, services: ["github.com"]))) == Self.password)
+        #expect(await host.prompts == 6, "a code's Touch ID is not a password's")
+    }
+
+    @Test("a one-time code's setup key reaches the extension or the plaintext identity store")
+    func setupKeyStaysInTheApp() async throws {
+        let (device, _, broker, item) = try await boxWithCode()
+        let start = Date()
+        let answer = await broker.handle(.oneTimeCode(id: item.id, services: ["github.com"]))
+        #expect(try isCurrentCode(answer, since: start))
+        let wire = try JSONEncoder().encode(answer)
+        #expect(wire.range(of: Data(Self.setupKey.utf8)) == nil && wire.range(of: Data(Data(Self.setupKey.utf8).base64EncodedString().utf8)) == nil)
+
+        var draft = ItemDraft(type: .login)
+        draft.title = "Code only"
+        draft.urls = ["https://github.io", "https://example.co.uk"]
+        draft.username = "me"
+        draft.totp = Self.setupKey
+        let codeOnly = try await device.vault.createItem(draft)
+        let identities = AutoFillIdentity.all(in: try await device.vault.items().items, isPublicSuffix: { Self.suffixes.contains($0) })
+        #expect(identities == [AutoFillIdentity(domain: "example.co.uk", username: "me", recordID: codeOnly.id, oneTimeCode: true),
+                               AutoFillIdentity(domain: "github.com", username: "someone@example.com", recordID: item.id),
+                               AutoFillIdentity(domain: "github.com", username: "someone@example.com", recordID: item.id, oneTimeCode: true)])
+    }
+
     private static let hash = Data(repeating: 7, count: 32)
 
     private func registered(_ broker: AutoFillBroker, rpID: String = "github.com") async throws -> Data {

@@ -53,6 +53,12 @@ struct SystemIdentityStore: AutoFillIdentitySink {
 
     func replace(_ identities: [AutoFillIdentity]) async throws {
         try await ASCredentialIdentityStore.shared.replaceCredentialIdentities(identities.map { identity -> any ASCredentialIdentity in
+            if identity.oneTimeCode {
+                // The label shows in the suggestion. The username is already in the store; a title would be new, and stays out.
+                return ASOneTimeCodeCredentialIdentity(serviceIdentifier: ASCredentialServiceIdentifier(identifier: identity.domain, type: .domain),
+                                                       label: identity.username.isEmpty ? identity.domain : identity.username,
+                                                       recordIdentifier: identity.recordID)
+            }
             if let passkey = identity.passkey {
                 return ASPasskeyCredentialIdentity(relyingPartyIdentifier: identity.domain, userName: identity.username,
                                                    credentialID: passkey.credentialID, userHandle: passkey.userHandle,

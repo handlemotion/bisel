@@ -3,7 +3,7 @@ import AuthenticationServices
 import BiselAgent
 
 /// The system AutoFill provider (docs/SPEC.md §8, "AutoFill"). It holds no keys and opens no store: it asks the running app over the
-/// App Group socket, and the app does Touch ID and answers with one password or one passkey signature. The screen is the plainest one the system needs.
+/// App Group socket, and the app does Touch ID and answers with one password, one one-time code or one passkey signature. The screen is the plainest one the system needs.
 final class CredentialProviderViewController: ASCredentialProviderViewController {
     private let status = NSTextField(wrappingLabelWithString: "")
     private let choices = NSStackView()
@@ -24,7 +24,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
 
     // MARK: passwords
 
-    /// Never silent: every password needs Touch ID, so the system comes back through `prepareInterfaceToProvideCredential`.
+    /// Never silent: every password and code needs Touch ID, so the system comes back through `prepareInterfaceToProvideCredential`.
     override func provideCredentialWithoutUserInteraction(for credentialRequest: any ASCredentialRequest) {
         cancel(.userInteractionRequired)
     }
@@ -33,6 +33,15 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         if let request = credentialRequest as? ASPasskeyCredentialRequest {
             guard let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity else { cancel(.credentialIdentityNotFound); return }
             sign(rpID: identity.relyingPartyIdentifier, credentialID: identity.credentialID, clientDataHash: request.clientDataHash)
+            return
+        }
+        if credentialRequest is ASOneTimeCodeCredentialRequest {
+            guard let identity = credentialRequest.credentialIdentity as? ASOneTimeCodeCredentialIdentity, let id = identity.recordIdentifier else {
+                cancel(.credentialIdentityNotFound)
+                return
+            }
+            services = [identity.serviceIdentifier.identifier]
+            fetchCode(id)
             return
         }
         guard let identity = credentialRequest.credentialIdentity as? ASPasswordCredentialIdentity, let id = identity.recordIdentifier else {
@@ -84,6 +93,38 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
             case .credential(let username, let password):
                 let credential = ASPasswordCredential(user: username, password: String(decoding: password.bytes, as: UTF8.self))
                 await extensionContext.completeRequest(withSelectedCredential: credential)
+            case .refused(let code): refused(code)
+            default: cancel(.failed)
+            }
+        }
+    }
+
+    // MARK: one-time codes
+
+    override func prepareOneTimeCodeCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier]) {
+        services = serviceIdentifiers.map(\.identifier)
+        show(String(localized: "Waiting for Touch ID in Bisel"))
+        Task {
+            switch await AppLink.ask(.oneTimeCodes(services: services)) {
+            case .candidates(let list) where list.isEmpty: show(String(localized: "No one-time codes for this site"))
+            case .candidates(let list):
+                offer(String(localized: "Choose a one-time code"), list.map { $0.username.isEmpty ? $0.title : "\($0.title) – \($0.username)" }) { [self] in
+                    fetchCode(list[$0].id)
+                }
+            case .refused(let code): refused(code)
+            default: cancel(.failed)
+            }
+        }
+    }
+
+    /// The app makes the code; the setup key stays there (docs/SPEC.md §8, "AutoFill").
+    private func fetchCode(_ id: String) {
+        show(String(localized: "Waiting for Touch ID in Bisel"))
+        Task {
+            switch await AppLink.ask(.oneTimeCode(id: id, services: services)) {
+            case .oneTimeCode(let code):
+                let credential = ASOneTimeCodeCredential(code: String(decoding: code.bytes, as: UTF8.self))
+                _ = await extensionContext.completeOneTimeCodeRequest(using: credential)
             case .refused(let code): refused(code)
             default: cancel(.failed)
             }

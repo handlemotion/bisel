@@ -19,9 +19,11 @@ Known, accepted issues are listed in [docs/SECURITY-REVIEW.md](docs/SECURITY-REV
 
 ## What AutoFill exposes
 
-System AutoFill needs a list of what it may offer, and the system keeps that list (`ASCredentialIdentityStore`) as plaintext outside the box. While the box is unlocked it holds, for each login with a password: the site's host, the username and the item's random id; for each passkey, also its credential ID and the site's user handle, which are public identifiers. It never holds a title, password, private key, note or one-time code. A process running as you, or someone with your unlocked Mac, may be able to read which sites you have logins on, and under which usernames. The list is emptied when the box locks, resets or quits; after a crash it stays until the next launch. Details are in [docs/SPEC.md](docs/SPEC.md) §8, "AutoFill".
+System AutoFill needs a list of what it may offer, and the system keeps that list (`ASCredentialIdentityStore`) as plaintext outside the box. While the box is unlocked it holds, for each login with a password: the site's host, the username and the item's random id; for each passkey, also its credential ID and the site's user handle, which are public identifiers; for each login with a one-time code, a second entry with the same host, username and id. It never holds a title, password, private key, note, one-time code or setup key. A process running as you, or someone with your unlocked Mac, may be able to read which sites you have logins on, under which usernames, and which of them use a one-time code. The list is emptied when the box locks, resets or quits; after a crash it stays until the next launch. Details are in [docs/SPEC.md](docs/SPEC.md) §8, "AutoFill".
 
-The AutoFill extension itself holds no keys and cannot open the box. It gets one password at a time from the app, after Touch ID, and only for a login whose address matches the site. For a passkey the app signs and returns the signature, after Touch ID and only for that passkey's exact site, so the private key never reaches the extension.
+The AutoFill extension itself holds no keys and cannot open the box. It gets one password or one one-time code at a time from the app, after Touch ID, and only for a login whose address matches the site. A code is made in the app, so the setup key never reaches the extension. For a passkey the app signs and returns the signature, after Touch ID and only for that passkey's exact site, so the private key never reaches the extension.
+
+If you choose Bisel in "Set Up Codes In", `otpauth://` links open in Bisel. Any app or web page can send one, so a link only fills the new login form; nothing is saved until you save it.
 
 ## Please don't report
 

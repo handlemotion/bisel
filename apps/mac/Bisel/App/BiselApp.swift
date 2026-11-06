@@ -81,6 +81,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         #endif
     }
 
+    /// A setup link from "Set Up Codes In". It carries a secret: it is never logged.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let link = urls.first(where: { $0.scheme?.lowercased() == "otpauth" }) else { return }
+        MainActor.assumeIsolated { AppModel.shared.setUpCode(link) }
+    }
+
     #if BISEL_CLOUDKIT
     func application(_ application: NSApplication, didFailToRegisterForRemoteNotificationsWithError error: any Error) {
         Log.app.notice("push registration failed: \(error.localizedDescription)")

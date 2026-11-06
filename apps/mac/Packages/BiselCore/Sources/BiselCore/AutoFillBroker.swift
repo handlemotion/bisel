@@ -14,9 +14,9 @@ private struct CheckedByHost: BiometricGate {
     func authenticate(reason: String) async throws {}
 }
 
-/// Decides every request of the AutoFill extension (docs/SPEC.md §8, "AutoFill"). A password leaves only after Touch ID, for a login
-/// whose own address belongs to the site the system named, and a passkey signs only after Touch ID, for exactly the RP ID the system
-/// named. Nothing here logs.
+/// Decides every request of the AutoFill extension (docs/SPEC.md §8, "AutoFill"). A password or a one-time code leaves only after
+/// Touch ID, for a login whose own address belongs to the site the system named, and a passkey signs only after Touch ID, for exactly
+/// the RP ID the system named. A code is made here: its setup key stays in the app. Nothing here logs.
 public actor AutoFillBroker {
     /// How long the person has to choose from the list one Touch ID opened.
     static let choiceWindow: Duration = .seconds(120)
@@ -24,6 +24,8 @@ public actor AutoFillBroker {
     private struct Choice {
         var ids: Set<String>
         var until: ContinuousClock.Instant
+        /// A list of codes pays only for a code, and any other list never pays for one.
+        var codes = false
     }
 
     private let vault: Vault
@@ -44,6 +46,8 @@ public actor AutoFillBroker {
             switch request {
             case .list(let services): return .candidates(try await list(try Self.hosts(services)))
             case .credential(let id, let services): return try await credential(id, try Self.hosts(services))
+            case .oneTimeCodes(let services): return .candidates(try await codes(try Self.hosts(services)))
+            case .oneTimeCode(let id, let services): return try await oneTimeCode(id, try Self.hosts(services))
             case .passkeys(let rpID, let allowList): return .passkeys(try await passkeys(try relyingParty(rpID), allowList))
             case .passkeyAssertion(let rpID, let credentialID, let hash): return try await assertion(try relyingParty(rpID), credentialID, hash)
             case .passkeyRegistration(let request): return try await register(request)
@@ -82,6 +86,25 @@ public actor AutoFillBroker {
         }
         let item = try await login(id, for: hosts)
         return .credential(username: item.username ?? "", password: AgentSecret(item.password ?? ""))
+    }
+
+    private func codes(_ hosts: [String]) async throws -> [AutoFillCandidate] {
+        try await host.authenticate("show your one-time codes for \(AgentPrompt.clean(hosts[0], limit: 60))")
+        let logins = try await vault.items().items.filter { Self.hasCode($0) && belongs($0, to: hosts) }
+        choice = Choice(ids: Set(logins.map(\.id)), until: .now + Self.choiceWindow, codes: true)
+        return logins.map { AutoFillCandidate(id: $0.id, title: $0.title, username: $0.username ?? "") }
+    }
+
+    private func oneTimeCode(_ id: String, _ hosts: [String]) async throws -> AutoFillResult {
+        let open = await vault.isUnlocked
+        let chosen = open && takeChoice(id, codes: true)
+        if !chosen {
+            if open { _ = try await login(id, for: hosts, Self.hasCode) }   // no prompt for what would be refused anyway
+            try await host.authenticate("fill your one-time code on \(AgentPrompt.clean(hosts[0], limit: 60))")
+        }
+        let item = try await login(id, for: hosts, Self.hasCode)
+        guard let parameters = item.totp else { throw AgentError(.noSuchField) }
+        return .oneTimeCode(AgentSecret(try TOTPGenerator.code(parameters).code))   // after the prompt: the person may take a while
     }
 
     /// A public suffix is no site: nobody can own a passkey for all of `github.io`.
@@ -123,21 +146,22 @@ public actor AutoFillBroker {
         return .registered(credentialID: made.credentialID, attestationObject: made.attestationObject)
     }
 
-    /// Single use: a list pays for one password or one signature.
-    private func takeChoice(_ id: String) -> Bool {
+    /// Single use: a list pays for one password, one signature or one code.
+    private func takeChoice(_ id: String, codes: Bool = false) -> Bool {
         defer { choice = nil }
-        guard let choice, ContinuousClock.now < choice.until else { return false }
+        guard let choice, choice.codes == codes, ContinuousClock.now < choice.until else { return false }
         return choice.ids.contains(id)
     }
 
-    private func login(_ id: String, for hosts: [String]) async throws -> Item {
+    private func login(_ id: String, for hosts: [String], _ usable: (Item) -> Bool = AutoFillBroker.isFillable) async throws -> Item {
         let item = try await vault.item(id: id)
-        guard Self.isFillable(item) else { throw AgentError(.noSuchField) }
+        guard usable(item) else { throw AgentError(.noSuchField) }
         guard belongs(item, to: hosts) else { throw AgentError(.wrongSite) }
         return item
     }
 
     private static func isFillable(_ item: Item) -> Bool { item.type == .login && !(item.password ?? "").isEmpty }
+    private static func hasCode(_ item: Item) -> Bool { item.type == .login && item.totp != nil }
 
     /// A login without an address belongs to no site. `SiteMatch` compares whole labels, so `github.com.evil.net` is not `github.com`.
     private func belongs(_ item: Item, to hosts: [String]) -> Bool {
@@ -148,7 +172,7 @@ public actor AutoFillBroker {
 
 /// One entry for the system's credential identity store. That store is plaintext outside the box, so this is all it gets: the site,
 /// the username and the item's random id, and for a passkey the two public ids the system needs to offer it. Never a title, a note,
-/// a key, or anything sealed.
+/// a key, a one-time code's setup key, or anything sealed.
 public struct AutoFillIdentity: Sendable, Hashable {
     public struct Passkey: Sendable, Hashable {
         public var credentialID: Data
@@ -161,24 +185,29 @@ public struct AutoFillIdentity: Sendable, Hashable {
     public var recordID: String
     /// Set on a passkey's entry, whose `domain` is its RP ID.
     public var passkey: Passkey?
-    public init(domain: String, username: String, recordID: String, passkey: Passkey? = nil) {
-        self.domain = domain; self.username = username; self.recordID = recordID; self.passkey = passkey
+    /// An entry for the login's one-time code, beside the one for its password. It says only that the login has a code.
+    public var oneTimeCode: Bool
+    public init(domain: String, username: String, recordID: String, passkey: Passkey? = nil, oneTimeCode: Bool = false) {
+        self.domain = domain; self.username = username; self.recordID = recordID; self.passkey = passkey; self.oneTimeCode = oneTimeCode
     }
 
-    /// One identity per site of each login with a password. A public suffix (`github.io`) is no site: the system would offer that
-    /// login on every tenant under it. A name with no dot is not a domain either.
+    /// One identity per site of each login with a password, and one per site of each login with a one-time code. A public suffix
+    /// (`github.io`) is no site: the system would offer that login on every tenant under it. A name with no dot is not a domain either.
     public static func all(in items: [Item], isPublicSuffix: (String) -> Bool) -> [AutoFillIdentity] {
         var out = Set<AutoFillIdentity>()
-        for item in items where item.type == .login && !(item.password ?? "").isEmpty {
+        for item in items where item.type == .login {
             for host in SiteMatch.hosts(of: item.urls) where host.contains(".") && !isPublicSuffix(host) {
-                out.insert(AutoFillIdentity(domain: host, username: item.username ?? "", recordID: item.id))
+                if !(item.password ?? "").isEmpty { out.insert(AutoFillIdentity(domain: host, username: item.username ?? "", recordID: item.id)) }
+                if item.totp != nil { out.insert(AutoFillIdentity(domain: host, username: item.username ?? "", recordID: item.id, oneTimeCode: true)) }
             }
         }
         for (item, credential) in PasskeyLookup.credentials(in: items) where credential.rpID.contains(".") && !isPublicSuffix(credential.rpID) {
             out.insert(AutoFillIdentity(domain: credential.rpID, username: credential.userName, recordID: item.id,
                                         passkey: Passkey(credentialID: credential.credentialID, userHandle: credential.userHandle)))
         }
-        return out.sorted { ($0.domain, $0.username, $0.recordID) < ($1.domain, $1.username, $1.recordID) }
+        return out.sorted {
+            ($0.domain, $0.username, $0.recordID, $0.oneTimeCode ? 1 : 0) < ($1.domain, $1.username, $1.recordID, $1.oneTimeCode ? 1 : 0)
+        }
     }
 }
 

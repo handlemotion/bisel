@@ -128,6 +128,11 @@ targets:
         LSMinimumSystemVersion: "26.0"
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.utilities
+        # What puts Bisel in System Settings > General > AutoFill & Passwords > Set Up Codes In (AppModel.setUpCode).
+        CFBundleURLTypes:
+          - CFBundleURLName: app.bisel.mac.otpauth
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes: [otpauth]
         NSHumanReadableCopyright: "Personal use."
         NSAppleEventsUsageDescription: "Bisel does not script other apps."
         NSFaceIDUsageDescription: "Bisel uses Touch ID to unlock your box."
@@ -233,6 +238,7 @@ targets:
             ASCredentialProviderExtensionCapabilities:
               ProvidesPasswords: true
               ProvidesPasskeys: true
+              ProvidesOneTimeCodes: true
     settings:
       base:
         # The app checks this identifier and the team on every connection (AgentPeer.autoFillRequirement).

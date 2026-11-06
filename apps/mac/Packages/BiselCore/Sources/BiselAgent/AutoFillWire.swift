@@ -1,8 +1,8 @@
 import Foundation
 
 /// What travels between the AutoFill extension and the app (docs/SPEC.md §8, "AutoFill"). The extension links only this module: it
-/// holds no keys and opens no store. It gets one password or one passkey signature at a time, after Touch ID in the app; a passkey's
-/// private key never crosses this socket.
+/// holds no keys and opens no store. It gets one password, one one-time code or one passkey signature at a time, after Touch ID in
+/// the app; a passkey's private key and a one-time code's setup key never cross this socket.
 
 public enum AutoFillSocket {
     /// macOS-style, so it needs no entry on the developer website; the Mac provisioning profiles authorise `<team>.*`.
@@ -20,6 +20,10 @@ public enum AutoFillRequest: Codable, Sendable {
     case list(services: [String])
     /// One login's password. Answers after Touch ID, unless the same login just came from a `.list`, which already asked.
     case credential(id: String, services: [String])
+    /// The logins with a one-time code for these sites, after one Touch ID.
+    case oneTimeCodes(services: [String])
+    /// One login's current code, made in the app. Answers after Touch ID, unless the same login just came from a `.oneTimeCodes`.
+    case oneTimeCode(id: String, services: [String])
     /// The passkeys for this RP ID, after one Touch ID. An empty `allowList` means any of them.
     case passkeys(rpID: String, allowList: [Data])
     /// One signature. Answers after Touch ID, unless the same passkey just came from a `.passkeys`, which already asked.
@@ -59,6 +63,7 @@ public struct AutoFillCandidate: Codable, Sendable, Equatable {
 public enum AutoFillResult: Codable, Sendable {
     case candidates([AutoFillCandidate])
     case credential(username: String, password: AgentSecret)
+    case oneTimeCode(AgentSecret)
     case passkeys([AutoFillPasskey])
     case assertion(credentialID: Data, userHandle: Data, authenticatorData: Data, signature: Data)
     case registered(credentialID: Data, attestationObject: Data)

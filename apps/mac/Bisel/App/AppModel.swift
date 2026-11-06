@@ -64,6 +64,8 @@ final class AppModel {
         Task { await LoginItem.shared.refresh() }
         Task {
             await service.start()
+            phaseKnown = true
+            if let link = pendingCodeLink { pendingCodeLink = nil; openCodeLink(link) }
             #if DEBUG
             PanelBoxPerf.mark("launch.phase known")
             if ProcessInfo.processInfo.environment["BISEL_DEV_AUTOUNLOCK"] == "1", service.phase == .locked {
@@ -138,6 +140,32 @@ final class AppModel {
     /// with the unlock prompt right then. Throws `KeyStoreError.userCancelled` when the person cancels.
     func unlockIfLocked(_ reason: String) async throws {
         if service.phase == .locked { try await service.unlock(reason: reason) }
+    }
+
+    /// A link that started the app arrives before the box's state is known.
+    private var phaseKnown = false
+    private var pendingCodeLink: TOTPSetup.Parsed?
+
+    /// An `otpauth://` link: "Set Up Codes In" hands Bisel a setup key. Any app or page can send one, so it only ever fills the new
+    /// login form: nothing is saved until the person saves.
+    func setUpCode(_ url: URL) {
+        guard let link = TOTPSetup.parsed(url.absoluteString) else {
+            Toast.shared.show(String(localized: "That one-time code setup key is not valid"), isError: true)
+            return
+        }
+        if phaseKnown { openCodeLink(link) } else { pendingCodeLink = link }
+    }
+
+    private func openCodeLink(_ link: TOTPSetup.Parsed) {
+        guard service.phase != .needsSetup else { showMainWindow(); return }
+        Task {
+            do { try await unlockIfLocked("Unlock your box to add a one-time code") }
+            catch KeyStoreError.userCancelled { return }
+            catch BiometricGate.Failure.denied { return }
+            catch { Toast.shared.show(describe(error), isError: true); return }
+            panelController.show()
+            panelModel.openNewLogin(codeLink: link)
+        }
     }
 
     private var isScriptedFlow: Bool {
