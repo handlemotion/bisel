@@ -232,8 +232,7 @@ targets:
           NSExtensionAttributes:
             ASCredentialProviderExtensionCapabilities:
               ProvidesPasswords: true
-              # The later passkey step turns this on (CredentialProviderViewController, "passkeys").
-              ProvidesPasskeys: false
+              ProvidesPasskeys: true
     settings:
       base:
         # The app checks this identifier and the team on every connection (AgentPeer.autoFillRequirement).

@@ -25,6 +25,11 @@ final class AppAutoFillHost: AutoFillHost {
         }
     }
 
+    func passkeysChanged() async {
+        await service.reload()
+        await service.sync(reason: "passkey")
+    }
+
     /// Nil where the app has no App Group: BiselDev runs unsigned and has no extension to talk to.
     static var socketPath: String? {
         #if BISEL_SOFTWARE_KEYS
@@ -47,9 +52,14 @@ struct SystemIdentityStore: AutoFillIdentitySink {
     func isEnabled() async -> Bool { await ASCredentialIdentityStore.shared.state().isEnabled }
 
     func replace(_ identities: [AutoFillIdentity]) async throws {
-        try await ASCredentialIdentityStore.shared.replaceCredentialIdentities(identities.map {
-            ASPasswordCredentialIdentity(serviceIdentifier: ASCredentialServiceIdentifier(identifier: $0.domain, type: .domain),
-                                         user: $0.username, recordIdentifier: $0.recordID)
+        try await ASCredentialIdentityStore.shared.replaceCredentialIdentities(identities.map { identity -> any ASCredentialIdentity in
+            if let passkey = identity.passkey {
+                return ASPasskeyCredentialIdentity(relyingPartyIdentifier: identity.domain, userName: identity.username,
+                                                   credentialID: passkey.credentialID, userHandle: passkey.userHandle,
+                                                   recordIdentifier: identity.recordID)
+            }
+            return ASPasswordCredentialIdentity(serviceIdentifier: ASCredentialServiceIdentifier(identifier: identity.domain, type: .domain),
+                                                user: identity.username, recordIdentifier: identity.recordID)
         })
     }
 

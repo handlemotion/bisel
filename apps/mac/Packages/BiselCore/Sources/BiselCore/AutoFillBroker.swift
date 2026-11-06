@@ -5,10 +5,18 @@ import Synchronization
 public protocol AutoFillHost: Sendable {
     /// One Touch ID showing `reason`: it unlocks a locked box, and on an open one is a fresh check. Throws when it is not passed.
     func authenticate(_ reason: String) async throws
+    /// A passkey was saved behind the app's back: show it, offer it, and sync it.
+    func passkeysChanged() async
+}
+
+/// `Vault`'s passkey calls each take one check. The broker has already made it through the host, which can also unlock a locked box.
+private struct CheckedByHost: BiometricGate {
+    func authenticate(reason: String) async throws {}
 }
 
 /// Decides every request of the AutoFill extension (docs/SPEC.md §8, "AutoFill"). A password leaves only after Touch ID, for a login
-/// whose own address belongs to the site the system named. Nothing here logs.
+/// whose own address belongs to the site the system named, and a passkey signs only after Touch ID, for exactly the RP ID the system
+/// named. Nothing here logs.
 public actor AutoFillBroker {
     /// How long the person has to choose from the list one Touch ID opened.
     static let choiceWindow: Duration = .seconds(120)
@@ -36,6 +44,9 @@ public actor AutoFillBroker {
             switch request {
             case .list(let services): return .candidates(try await list(try Self.hosts(services)))
             case .credential(let id, let services): return try await credential(id, try Self.hosts(services))
+            case .passkeys(let rpID, let allowList): return .passkeys(try await passkeys(try relyingParty(rpID), allowList))
+            case .passkeyAssertion(let rpID, let credentialID, let hash): return try await assertion(try relyingParty(rpID), credentialID, hash)
+            case .passkeyRegistration(let request): return try await register(request)
             }
         }
         catch let e as AgentError { return .refused(e.code) }
@@ -43,6 +54,9 @@ public actor AutoFillBroker {
         catch VaultError.notFound { return .refused(.notFound) }
         catch VaultError.notConfigured { return .refused(.locked) }
         catch KeyStoreError.userCancelled { return .refused(.denied) }
+        catch PasskeyError.noCredential { return .refused(.notFound) }
+        catch PasskeyError.excludedCredential { return .refused(.excludedCredential) }
+        catch is PasskeyError { return .refused(.badRequest) }
         catch { return .refused(.failed) }
     }
 
@@ -70,7 +84,46 @@ public actor AutoFillBroker {
         return .credential(username: item.username ?? "", password: AgentSecret(item.password ?? ""))
     }
 
-    /// Single use: a list pays for one password.
+    /// A public suffix is no site: nobody can own a passkey for all of `github.io`.
+    private func relyingParty(_ rpID: String) throws -> String {
+        let rp = PasskeyAuthenticator.normalized(rpID: rpID)
+        guard !rp.isEmpty, !isPublicSuffix(rp) else { throw AgentError(.badRequest) }
+        return rp
+    }
+
+    private func passkeys(_ rp: String, _ allowList: [Data]) async throws -> [AutoFillPasskey] {
+        // No prompt for an empty answer: the extension then goes on to passwords, which ask for themselves.
+        if await vault.isUnlocked, try await vault.passkeys(rpID: rp, allowList: allowList).isEmpty { return [] }
+        try await host.authenticate("show your passkeys for \(AgentPrompt.clean(rp, limit: 60))")
+        let matches = try await vault.passkeys(rpID: rp, allowList: allowList)
+        choice = Choice(ids: Set(matches.map(\.itemID)), until: .now + Self.choiceWindow)
+        return matches.map { AutoFillPasskey(credentialID: $0.credentialID, userName: $0.userName) }
+    }
+
+    private func assertion(_ rp: String, _ credentialID: Data, _ clientDataHash: Data) async throws -> AutoFillResult {
+        var chosen = false
+        if await vault.isUnlocked {   // no prompt for what would be refused anyway
+            guard let held = try await vault.passkeys(rpID: rp, allowList: [credentialID]).first else { throw PasskeyError.noCredential }
+            chosen = takeChoice(held.itemID)
+        }
+        if !chosen { try await host.authenticate("sign in to \(AgentPrompt.clean(rp, limit: 60))") }
+        let signed = try await vault.assertPasskey(rpID: rp, credentialID: credentialID, clientDataHash: clientDataHash, gate: CheckedByHost())
+        return .assertion(credentialID: signed.credentialID, userHandle: signed.userHandle,
+                          authenticatorData: signed.authenticatorData, signature: signed.signature)
+    }
+
+    private func register(_ r: AutoFillPasskeyRegistration) async throws -> AutoFillResult {
+        let rp = try relyingParty(r.rpID)
+        guard r.algorithms.contains(PasskeyAuthenticator.es256) else { throw PasskeyError.unsupportedAlgorithm }
+        try await host.authenticate("create a passkey for \(AgentPrompt.clean(rp, limit: 60))")
+        let request = PasskeyRegistrationRequest(rpID: rp, userHandle: r.userHandle, userName: r.userName, userDisplayName: r.userDisplayName,
+                                                 algorithms: r.algorithms, excludedCredentialIDs: r.excludedCredentialIDs)
+        let made = try await vault.registerPasskey(request, gate: CheckedByHost())
+        await host.passkeysChanged()
+        return .registered(credentialID: made.credentialID, attestationObject: made.attestationObject)
+    }
+
+    /// Single use: a list pays for one password or one signature.
     private func takeChoice(_ id: String) -> Bool {
         defer { choice = nil }
         guard let choice, ContinuousClock.now < choice.until else { return false }
@@ -94,12 +147,23 @@ public actor AutoFillBroker {
 }
 
 /// One entry for the system's credential identity store. That store is plaintext outside the box, so this is all it gets: the site,
-/// the username and the item's random id. Never a title, a note, or anything sealed.
+/// the username and the item's random id, and for a passkey the two public ids the system needs to offer it. Never a title, a note,
+/// a key, or anything sealed.
 public struct AutoFillIdentity: Sendable, Hashable {
+    public struct Passkey: Sendable, Hashable {
+        public var credentialID: Data
+        public var userHandle: Data
+        public init(credentialID: Data, userHandle: Data) { self.credentialID = credentialID; self.userHandle = userHandle }
+    }
+
     public var domain: String
     public var username: String
     public var recordID: String
-    public init(domain: String, username: String, recordID: String) { self.domain = domain; self.username = username; self.recordID = recordID }
+    /// Set on a passkey's entry, whose `domain` is its RP ID.
+    public var passkey: Passkey?
+    public init(domain: String, username: String, recordID: String, passkey: Passkey? = nil) {
+        self.domain = domain; self.username = username; self.recordID = recordID; self.passkey = passkey
+    }
 
     /// One identity per site of each login with a password. A public suffix (`github.io`) is no site: the system would offer that
     /// login on every tenant under it. A name with no dot is not a domain either.
@@ -109,6 +173,10 @@ public struct AutoFillIdentity: Sendable, Hashable {
             for host in SiteMatch.hosts(of: item.urls) where host.contains(".") && !isPublicSuffix(host) {
                 out.insert(AutoFillIdentity(domain: host, username: item.username ?? "", recordID: item.id))
             }
+        }
+        for (item, credential) in PasskeyLookup.credentials(in: items) where credential.rpID.contains(".") && !isPublicSuffix(credential.rpID) {
+            out.insert(AutoFillIdentity(domain: credential.rpID, username: credential.userName, recordID: item.id,
+                                        passkey: Passkey(credentialID: credential.credentialID, userHandle: credential.userHandle)))
         }
         return out.sorted { ($0.domain, $0.username, $0.recordID) < ($1.domain, $1.username, $1.recordID) }
     }

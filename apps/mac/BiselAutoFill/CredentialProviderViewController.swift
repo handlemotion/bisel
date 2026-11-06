@@ -3,7 +3,7 @@ import AuthenticationServices
 import BiselAgent
 
 /// The system AutoFill provider (docs/SPEC.md §8, "AutoFill"). It holds no keys and opens no store: it asks the running app over the
-/// App Group socket, and the app does Touch ID and answers with one password. The screen is the plainest one the system needs.
+/// App Group socket, and the app does Touch ID and answers with one password or one passkey signature. The screen is the plainest one the system needs.
 final class CredentialProviderViewController: ASCredentialProviderViewController {
     private let status = NSTextField(wrappingLabelWithString: "")
     private let choices = NSStackView()
@@ -30,9 +30,13 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
     }
 
     override func prepareInterfaceToProvideCredential(for credentialRequest: any ASCredentialRequest) {
-        guard credentialRequest.type == .password, let identity = credentialRequest.credentialIdentity as? ASPasswordCredentialIdentity,
-              let id = identity.recordIdentifier else {
-            if credentialRequest.type != .password { declinePasskey() } else { cancel(.credentialIdentityNotFound) }
+        if let request = credentialRequest as? ASPasskeyCredentialRequest {
+            guard let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity else { cancel(.credentialIdentityNotFound); return }
+            sign(rpID: identity.relyingPartyIdentifier, credentialID: identity.credentialID, clientDataHash: request.clientDataHash)
+            return
+        }
+        guard let identity = credentialRequest.credentialIdentity as? ASPasswordCredentialIdentity, let id = identity.recordIdentifier else {
+            cancel(.credentialIdentityNotFound)
             return
         }
         services = [identity.serviceIdentifier.identifier]
@@ -45,17 +49,32 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         Task {
             switch await AppLink.ask(.list(services: services)) {
             case .candidates(let list) where list.isEmpty: show(String(localized: "No logins for this site"))
-            case .candidates(let list): showChoices(list)
+            case .candidates(let list):
+                offer(String(localized: "Choose a login"), list.map { $0.username.isEmpty ? $0.title : "\($0.title) – \($0.username)" }) { [self] in
+                    fetch(list[$0].id)
+                }
             case .refused(let code): refused(code)
-            case .credential: cancel(.failed)
+            default: cancel(.failed)
             }
         }
     }
 
-    /// `.domain` and `.URL` requests alike: passkey parameters are ignored until the passkey step below.
+    /// Passkeys first; a site's page can ask for either, so with none here it falls back to its passwords.
     override func prepareCredentialList(for serviceIdentifiers: [ASCredentialServiceIdentifier],
                                         requestParameters: ASPasskeyCredentialRequestParameters) {
-        prepareCredentialList(for: serviceIdentifiers)
+        let rpID = requestParameters.relyingPartyIdentifier, hash = requestParameters.clientDataHash
+        show(String(localized: "Waiting for Touch ID in Bisel"))
+        Task {
+            switch await AppLink.ask(.passkeys(rpID: rpID, allowList: requestParameters.allowedCredentials)) {
+            case .passkeys(let list) where list.isEmpty: prepareCredentialList(for: serviceIdentifiers)
+            case .passkeys(let list):
+                offer(String(localized: "Choose a passkey"), list.map(\.userName)) { [self] in
+                    sign(rpID: rpID, credentialID: list[$0].credentialID, clientDataHash: hash)
+                }
+            case .refused(let code): refused(code)
+            default: cancel(.failed)
+            }
+        }
     }
 
     private func fetch(_ id: String) {
@@ -66,20 +85,47 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
                 let credential = ASPasswordCredential(user: username, password: String(decoding: password.bytes, as: UTF8.self))
                 await extensionContext.completeRequest(withSelectedCredential: credential)
             case .refused(let code): refused(code)
-            case .candidates: cancel(.failed)
+            default: cancel(.failed)
             }
         }
     }
 
     // MARK: passkeys
 
-    /// The one place passkeys plug in, for assertion and registration alike. Off today: `ProvidesPasskeys` is false in Info.plist, so
-    /// the system does not offer Bisel for them. To fill it in: add the request to `AutoFillRequest`, answer it in `AutoFillBroker` (the
-    /// app holds the key and signs, as it does for passwords), complete with `completeAssertionRequest` /
-    /// `completeRegistrationRequest` here, and set `ProvidesPasskeys` to true (docs/SPEC.md §8, "AutoFill").
-    override func prepareInterface(forPasskeyRegistration registrationRequest: any ASCredentialRequest) { declinePasskey() }
+    /// The app holds the key and signs; only the signature comes back here (docs/SPEC.md §8, "AutoFill").
+    private func sign(rpID: String, credentialID: Data, clientDataHash: Data) {
+        show(String(localized: "Waiting for Touch ID in Bisel"))
+        Task {
+            switch await AppLink.ask(.passkeyAssertion(rpID: rpID, credentialID: credentialID, clientDataHash: clientDataHash)) {
+            case .assertion(let id, let userHandle, let authenticatorData, let signature):
+                let credential = ASPasskeyAssertionCredential(userHandle: userHandle, relyingParty: rpID, signature: signature,
+                                                              clientDataHash: clientDataHash, authenticatorData: authenticatorData, credentialID: id)
+                _ = await extensionContext.completeAssertionRequest(using: credential)
+            case .refused(let code): refused(code)
+            default: cancel(.failed)
+            }
+        }
+    }
 
-    private func declinePasskey() { cancel(.failed) }
+    override func prepareInterface(forPasskeyRegistration registrationRequest: any ASCredentialRequest) {
+        guard let request = registrationRequest as? ASPasskeyCredentialRequest,
+              let identity = request.credentialIdentity as? ASPasskeyCredentialIdentity else { cancel(.failed); return }
+        let rpID = identity.relyingPartyIdentifier, hash = request.clientDataHash
+        let registration = AutoFillPasskeyRegistration(rpID: rpID, userHandle: identity.userHandle, userName: identity.userName,
+                                                       userDisplayName: identity.userName,
+                                                       algorithms: request.supportedAlgorithms.map { $0.rawValue },
+                                                       excludedCredentialIDs: (request.excludedCredentials ?? []).map(\.credentialID))
+        show(String(localized: "Waiting for Touch ID in Bisel"))
+        Task {
+            switch await AppLink.ask(.passkeyRegistration(registration)) {
+            case .registered(let id, let attestationObject):
+                let credential = ASPasskeyRegistrationCredential(relyingParty: rpID, clientDataHash: hash, credentialID: id, attestationObject: attestationObject)
+                _ = await extensionContext.completeRegistrationRequest(using: credential)
+            case .refused(let code): refused(code)
+            default: cancel(.failed)
+            }
+        }
+    }
 
     // MARK: screen
 
@@ -88,20 +134,19 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         choices.setViews([], in: .top)
     }
 
-    private func showChoices(_ list: [AutoFillCandidate]) {
-        show(String(localized: "Choose a login"))
-        for (index, candidate) in list.enumerated() {
-            let name = candidate.username.isEmpty ? candidate.title : "\(candidate.title) – \(candidate.username)"
+    private func offer(_ heading: String, _ names: [String], pick: @escaping (Int) -> Void) {
+        show(heading)
+        for (index, name) in names.enumerated() {
             let button = NSButton(title: name, target: self, action: #selector(choiceTapped))
             button.tag = index
             choices.addArrangedSubview(button)
         }
-        candidates = list
+        self.pick = pick
     }
 
-    private var candidates: [AutoFillCandidate] = []
+    private var pick: ((Int) -> Void)?
 
-    @objc private func choiceTapped(_ sender: NSButton) { fetch(candidates[sender.tag].id) }
+    @objc private func choiceTapped(_ sender: NSButton) { pick?(sender.tag) }
     @objc private func cancelTapped() { cancel(.userCanceled) }
 
     private func refused(_ code: AgentCode) {
@@ -109,6 +154,7 @@ final class CredentialProviderViewController: ASCredentialProviderViewController
         case .denied, .timeout: cancel(.userCanceled)
         case .appNotRunning: show(String(localized: "Open Bisel and try again"))
         case .wrongSite, .notFound, .noSuchField: cancel(.credentialIdentityNotFound)
+        case .excludedCredential: cancel(.matchedExcludedCredential)
         default: cancel(.failed)
         }
     }
