@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.6](https://github.com/handlemotion/bisel/compare/v0.1.5...v0.1.6) (2026-11-06)
+
+
+### Features
+
+* add the passkey engine to BiselCore ([#47](https://github.com/handlemotion/bisel/issues/47)) ([87bbbb9](https://github.com/handlemotion/bisel/commit/87bbbb9976fc38e9fe5de48fee0fef3a14273220))
+* fill one-time codes through AutoFill ([#53](https://github.com/handlemotion/bisel/issues/53)) ([cada6cc](https://github.com/handlemotion/bisel/commit/cada6ccaf834a388bd593d17d215665b17988205))
+* offer to save logins from Chrome ([#54](https://github.com/handlemotion/bisel/issues/54)) ([35e27f7](https://github.com/handlemotion/bisel/commit/35e27f79b6fcd605bb2ff9e5dc0947750908ed9a))
+* select rows by click and reopen the panel where it was left ([#56](https://github.com/handlemotion/bisel/issues/56)) ([f0b104e](https://github.com/handlemotion/bisel/commit/f0b104e0ad1233142a84331bdf05b091a97a00be))
+* sign in and register passkeys through AutoFill ([#50](https://github.com/handlemotion/bisel/issues/50)) ([c08fced](https://github.com/handlemotion/bisel/commit/c08fcedc5a216444375c7978cd035c20e46d4c6f))
+* system AutoFill extension for passwords ([#48](https://github.com/handlemotion/bisel/issues/48)) ([a936e6d](https://github.com/handlemotion/bisel/commit/a936e6d4db623dfd900521ecf411978de70fc3bf))
+* unlock with Touch ID inside the locked panel ([#51](https://github.com/handlemotion/bisel/issues/51)) ([f6e6cad](https://github.com/handlemotion/bisel/commit/f6e6cadc358ab2ec2bdf99c69926e4ccd071053b))
+
+
+### Bug Fixes
+
+* keep the Dock icon away once every window is closed ([#52](https://github.com/handlemotion/bisel/issues/52)) ([c2f8bb2](https://github.com/handlemotion/bisel/commit/c2f8bb2ef014ea53c890442f42d7fccdb574b1a2))
+
 ## [0.1.5](https://github.com/handlemotion/bisel/compare/v0.1.4...v0.1.5) (2026-11-05)
 
 
