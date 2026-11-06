@@ -56,7 +56,7 @@ final class AppModel {
     func start() {
         Log.app.notice("bisel started; accessibility trusted=\(AccessibilityInspector.isTrusted())")
         service.onLockStateChange = { [weak self] in
-            self?.panelModel.refresh()
+            self?.panelModel.lockStateChanged()
             if let broker = self?.agentBroker { Task { await broker.resetSearchWindow() } }
         }
         service.onRowsChange = { [weak self] in self?.panelModel.refresh(keepingSelection: true) }
