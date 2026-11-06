@@ -200,8 +200,10 @@ struct AutoFillFlowTests {
         let vault: Vault
         var prompts = 0
         var answer: AgentError?
+        var passkeyChanges = 0
         init(vault: Vault) { self.vault = vault }
         func set(answer: AgentError?) { self.answer = answer }
+        func passkeysChanged() async { passkeyChanges += 1 }
         func authenticate(_ reason: String) async throws {
             prompts += 1
             if let answer { throw answer }
@@ -287,6 +289,90 @@ struct AutoFillFlowTests {
         #expect(await host.prompts == 1, "choosing from the list does not ask twice")
         #expect(password(await broker.handle(.credential(id: item.id, services: ["github.com"]))) == Self.password)
         #expect(await host.prompts == 2, "the next password asks again")
+    }
+
+    private static let hash = Data(repeating: 7, count: 32)
+
+    private func registered(_ broker: AutoFillBroker, rpID: String = "github.com") async throws -> Data {
+        let request = AutoFillPasskeyRegistration(rpID: rpID, userHandle: Data([1, 2, 3]), userName: "someone@example.com", userDisplayName: "Someone",
+                                                  algorithms: [PasskeyAuthenticator.es256], excludedCredentialIDs: [])
+        guard case .registered(let id, _) = await broker.handle(.passkeyRegistration(request)) else { throw AgentError(.failed) }
+        return id
+    }
+
+    private func signed(_ result: AutoFillResult) -> Bool {
+        if case .assertion = result { return true }
+        return false
+    }
+
+    @Test("a passkey signs through the extension without Touch ID, or for another site")
+    func passkeyNeedsTouchIDAndItsOwnSite() async throws {
+        let (device, host, broker, _) = try await box()
+        let id = try await registered(broker)
+        #expect(await host.prompts == 1)
+        #expect(await host.passkeyChanges == 1, "a passkey made behind the app's back has to reach its list and sync")
+        let request = AutoFillRequest.passkeyAssertion(rpID: "github.com", credentialID: id, clientDataHash: Self.hash)
+
+        for site in ["github.com.evil.net", "evilgithub.com", "login.github.com"] {
+            #expect(code(await broker.handle(.passkeyAssertion(rpID: site, credentialID: id, clientDataHash: Self.hash))) == .notFound, "\(site)")
+        }
+        #expect(code(await broker.handle(.passkeyAssertion(rpID: "github.io", credentialID: id, clientDataHash: Self.hash))) == .badRequest)
+        #expect(await host.prompts == 1, "no Touch ID sheet for a request that would be refused")
+
+        await host.set(answer: AgentError(.denied))
+        #expect(code(await broker.handle(request)) == .denied, "an open box still asks")
+        await device.vault.lock()
+        #expect(code(await broker.handle(request)) == .denied)
+        #expect(await !device.vault.isUnlocked)
+
+        await host.set(answer: nil)
+        #expect(signed(await broker.handle(request)), "Touch ID unlocks a locked box for the request")
+    }
+
+    @Test("one Touch ID for a passkey list pays for one signature")
+    func aListPaysForOneSignature() async throws {
+        let (_, host, broker, _) = try await box()
+        let id = try await registered(broker)
+        let before = await host.prompts
+        guard case .passkeys(let listed) = await broker.handle(.passkeys(rpID: "github.com", allowList: [])) else { Issue.record("no list"); return }
+        #expect(listed == [AutoFillPasskey(credentialID: id, userName: "someone@example.com")])
+        #expect(await host.prompts == before + 1)
+
+        let request = AutoFillRequest.passkeyAssertion(rpID: "github.com", credentialID: id, clientDataHash: Self.hash)
+        #expect(signed(await broker.handle(request)))
+        #expect(await host.prompts == before + 1, "choosing from the list does not ask twice")
+        #expect(signed(await broker.handle(request)))
+        #expect(await host.prompts == before + 2, "the next signature asks again")
+
+        guard case .passkeys(let none) = await broker.handle(.passkeys(rpID: "gitlab.com", allowList: [])) else { Issue.record("no list"); return }
+        #expect(none.isEmpty)
+        #expect(await host.prompts == before + 2, "no sheet for a site with no passkeys: passwords ask for themselves")
+    }
+
+    @Test("a site's excluded passkey is duplicated, or a passkey is made without Touch ID")
+    func registrationIsGuarded() async throws {
+        let (device, host, broker, _) = try await box()
+        let id = try await registered(broker)
+        let again = AutoFillPasskeyRegistration(rpID: "github.com", userHandle: Data([9]), userName: "other", userDisplayName: "Other",
+                                                algorithms: [PasskeyAuthenticator.es256], excludedCredentialIDs: [id])
+        #expect(code(await broker.handle(.passkeyRegistration(again))) == .excludedCredential)
+
+        await host.set(answer: AgentError(.denied))
+        var fresh = again
+        fresh.excludedCredentialIDs = []
+        #expect(code(await broker.handle(.passkeyRegistration(fresh))) == .denied)
+        #expect(try await device.vault.passkeys(rpID: "github.com").count == 1)
+    }
+
+    @Test("the identity store gets a passkey's private key, or a passkey on a public suffix")
+    func passkeyIdentitiesCarryTheMinimum() async throws {
+        let (device, _, broker, _) = try await box()
+        let id = try await registered(broker)
+        let items = try await device.vault.items().items
+        let passkeys = AutoFillIdentity.all(in: items, isPublicSuffix: { Self.suffixes.contains($0) }).filter { $0.passkey != nil }
+        #expect(passkeys.map(\.domain) == ["github.com"])
+        #expect(passkeys.first?.passkey == AutoFillIdentity.Passkey(credentialID: id, userHandle: Data([1, 2, 3])))
+        #expect(AutoFillIdentity.all(in: items, isPublicSuffix: { $0 == "github.com" }).allSatisfy { $0.passkey == nil })
     }
 
     @Test("the plaintext identity store gets no secret, no title and no public suffix")

@@ -105,6 +105,7 @@ public enum AgentCode: String, Codable, Sendable, CaseIterable {
     case fillFailed = "fill_failed"
     case commandRefused = "command_refused"
     case conflict
+    case excludedCredential = "excluded_credential"
     case badRequest = "bad_request"
     case failed
 
@@ -125,6 +126,7 @@ public enum AgentCode: String, Codable, Sendable, CaseIterable {
         case .fillFailed: "Typing stopped: focus moved, or the next field is not a password field."
         case .commandRefused: "Use a command with no control characters, short enough to show in full."
         case .conflict: "The item changed on another device. Search again and retry."
+        case .excludedCredential: "This box already holds a passkey the site said not to duplicate."
         case .badRequest: "Run bl --help."
         case .failed: "Bisel could not do that."
         }
