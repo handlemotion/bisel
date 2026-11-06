@@ -1,0 +1,183 @@
+import Foundation
+import Synchronization
+
+/// What the app supplies to the broker: the Touch ID prompt.
+public protocol AutoFillHost: Sendable {
+    /// One Touch ID showing `reason`: it unlocks a locked box, and on an open one is a fresh check. Throws when it is not passed.
+    func authenticate(_ reason: String) async throws
+}
+
+/// Decides every request of the AutoFill extension (docs/SPEC.md §8, "AutoFill"). A password leaves only after Touch ID, for a login
+/// whose own address belongs to the site the system named. Nothing here logs.
+public actor AutoFillBroker {
+    /// How long the person has to choose from the list one Touch ID opened.
+    static let choiceWindow: Duration = .seconds(120)
+
+    private struct Choice {
+        var ids: Set<String>
+        var until: ContinuousClock.Instant
+    }
+
+    private let vault: Vault
+    private let host: any AutoFillHost
+    private let isPublicSuffix: @Sendable (String) -> Bool
+    private var busy = false
+    private var choice: Choice?
+
+    public init(vault: Vault, host: any AutoFillHost, isPublicSuffix: @escaping @Sendable (String) -> Bool) {
+        self.vault = vault; self.host = host; self.isPublicSuffix = isPublicSuffix
+    }
+
+    public func handle(_ request: AutoFillRequest) async -> AutoFillResult {
+        guard !busy else { return .refused(.busy) }
+        busy = true
+        defer { busy = false }
+        do {
+            switch request {
+            case .list(let services): return .candidates(try await list(try Self.hosts(services)))
+            case .credential(let id, let services): return try await credential(id, try Self.hosts(services))
+            }
+        }
+        catch let e as AgentError { return .refused(e.code) }
+        catch VaultError.locked { return .refused(.locked) }
+        catch VaultError.notFound { return .refused(.notFound) }
+        catch VaultError.notConfigured { return .refused(.locked) }
+        catch KeyStoreError.userCancelled { return .refused(.denied) }
+        catch { return .refused(.failed) }
+    }
+
+    private static func hosts(_ services: [String]) throws -> [String] {
+        let hosts = SiteMatch.hosts(of: services)
+        guard !hosts.isEmpty else { throw AgentError(.badRequest) }
+        return hosts
+    }
+
+    private func list(_ hosts: [String]) async throws -> [AutoFillCandidate] {
+        try await host.authenticate("show your logins for \(AgentPrompt.clean(hosts[0], limit: 60))")
+        let logins = try await vault.items().items.filter { Self.isFillable($0) && belongs($0, to: hosts) }
+        choice = Choice(ids: Set(logins.map(\.id)), until: .now + Self.choiceWindow)
+        return logins.map { AutoFillCandidate(id: $0.id, title: $0.title, username: $0.username ?? "") }
+    }
+
+    private func credential(_ id: String, _ hosts: [String]) async throws -> AutoFillResult {
+        let open = await vault.isUnlocked
+        let chosen = open && takeChoice(id)
+        if !chosen {
+            if open { _ = try await login(id, for: hosts) }   // no prompt for what would be refused anyway
+            try await host.authenticate("fill your login on \(AgentPrompt.clean(hosts[0], limit: 60))")
+        }
+        let item = try await login(id, for: hosts)
+        return .credential(username: item.username ?? "", password: AgentSecret(item.password ?? ""))
+    }
+
+    /// Single use: a list pays for one password.
+    private func takeChoice(_ id: String) -> Bool {
+        defer { choice = nil }
+        guard let choice, ContinuousClock.now < choice.until else { return false }
+        return choice.ids.contains(id)
+    }
+
+    private func login(_ id: String, for hosts: [String]) async throws -> Item {
+        let item = try await vault.item(id: id)
+        guard Self.isFillable(item) else { throw AgentError(.noSuchField) }
+        guard belongs(item, to: hosts) else { throw AgentError(.wrongSite) }
+        return item
+    }
+
+    private static func isFillable(_ item: Item) -> Bool { item.type == .login && !(item.password ?? "").isEmpty }
+
+    /// A login without an address belongs to no site. `SiteMatch` compares whole labels, so `github.com.evil.net` is not `github.com`.
+    private func belongs(_ item: Item, to hosts: [String]) -> Bool {
+        let own = SiteMatch.hosts(of: item.urls)
+        return hosts.contains { page in own.contains { SiteMatch.matches(page: page, item: $0, isPublicSuffix: isPublicSuffix) } }
+    }
+}
+
+/// One entry for the system's credential identity store. That store is plaintext outside the box, so this is all it gets: the site,
+/// the username and the item's random id. Never a title, a note, or anything sealed.
+public struct AutoFillIdentity: Sendable, Hashable {
+    public var domain: String
+    public var username: String
+    public var recordID: String
+    public init(domain: String, username: String, recordID: String) { self.domain = domain; self.username = username; self.recordID = recordID }
+
+    /// One identity per site of each login with a password. A public suffix (`github.io`) is no site: the system would offer that
+    /// login on every tenant under it. A name with no dot is not a domain either.
+    public static func all(in items: [Item], isPublicSuffix: (String) -> Bool) -> [AutoFillIdentity] {
+        var out = Set<AutoFillIdentity>()
+        for item in items where item.type == .login && !(item.password ?? "").isEmpty {
+            for host in SiteMatch.hosts(of: item.urls) where host.contains(".") && !isPublicSuffix(host) {
+                out.insert(AutoFillIdentity(domain: host, username: item.username ?? "", recordID: item.id))
+            }
+        }
+        return out.sorted { ($0.domain, $0.username, $0.recordID) < ($1.domain, $1.username, $1.recordID) }
+    }
+}
+
+/// The system's credential identity store, or a fake one in the flows.
+public protocol AutoFillIdentitySink: Sendable {
+    /// False while the person has not turned Bisel on in AutoFill settings: the system takes nothing then.
+    func isEnabled() async -> Bool
+    func replace(_ identities: [AutoFillIdentity]) async throws
+    func clear() async throws
+}
+
+/// Keeps the identity store on the last thing asked for. Calls are synchronous and writes run one at a time, always the newest
+/// state, so a `clear()` on lock can never be overtaken by a slow `publish` that started before it.
+public final class AutoFillIdentitySync: Sendable {
+    private struct State {
+        var wanted: [AutoFillIdentity] = []
+        /// What the store holds; nil when unknown (never written, or the last write failed).
+        var applied: [AutoFillIdentity]?
+        var draining = false
+    }
+
+    private let sink: any AutoFillIdentitySink
+    private let state = Mutex(State())
+
+    public init(sink: any AutoFillIdentitySink) { self.sink = sink }
+
+    public func publish(_ identities: [AutoFillIdentity]) { set(identities) }
+    public func clear() { set([]) }
+
+    /// Tries again what could not be written: the person may have turned Bisel on since.
+    public func refresh() { start() }
+
+    /// Waits until the store is on the newest state, or the write failed.
+    public func settled() async {
+        while state.withLock({ $0.draining }) { try? await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    private func set(_ identities: [AutoFillIdentity]) {
+        state.withLock { $0.wanted = identities }
+        start()
+    }
+
+    private func start() {
+        let begin = state.withLock { s -> Bool in
+            guard !s.draining, s.applied != s.wanted else { return false }
+            s.draining = true
+            return true
+        }
+        if begin { Task { await drain() } }
+    }
+
+    private func drain() async {
+        while true {
+            let next = state.withLock { s -> [AutoFillIdentity]? in
+                if s.applied == s.wanted { s.draining = false; return nil }
+                return s.wanted
+            }
+            guard let next else { return }
+            do {
+                if next.isEmpty { try await sink.clear() }
+                else if await sink.isEnabled() { try await sink.replace(next) }
+                else { throw CancellationError() }
+                state.withLock { $0.applied = next }
+            } catch {
+                state.withLock { $0.applied = nil; $0.draining = false }
+                return
+            }
+        }
+    }
+}
