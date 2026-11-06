@@ -20,6 +20,7 @@ let package = Package(
         .library(name: "BiselRecovery", targets: ["BiselRecovery"]),
         .library(name: "BiselBackup", targets: ["BiselBackup"]),
         .library(name: "BiselTOTP", targets: ["BiselTOTP"]),
+        .library(name: "BiselPasskey", targets: ["BiselPasskey"]),
         .library(name: "BiselAgent", targets: ["BiselAgent"]),               // the only module the `bisel` tool links: no keys, no crypto
         .library(name: "BiselTestSupport", targets: ["BiselTestSupport"]),   // dev/test only: spawns the local server
         .library(name: "BiselLaneContract", targets: ["BiselLaneContract"]), // dev/test only: the lane contract flows
@@ -44,9 +45,10 @@ let package = Package(
         .target(name: "BiselSync", dependencies: ["BiselCrypto", "BiselKeyStore", "BiselVault", "BiselLane"]),
         .target(name: "BiselRecovery", dependencies: ["BiselCrypto", "BiselKeyStore", "BiselVault", "BiselSync"]),
         .target(name: "BiselBackup", dependencies: ["BiselCrypto", "BiselVault"]),
+        .target(name: "BiselPasskey", dependencies: ["BiselCrypto", "BiselVault"]),
         .target(name: "BiselAgent"),
         .target(name: "BiselCore", dependencies: ["BiselCrypto", "BiselKeyStore", "BiselVault", "BiselSync",
-                                                   "BiselRecovery", "BiselBackup", "BiselTOTP", "BiselAgent"],
+                                                   "BiselRecovery", "BiselBackup", "BiselTOTP", "BiselPasskey", "BiselAgent"],
                 swiftSettings: [.define("BISEL_SOFTWARE_KEYS", .when(traits: ["SoftwareKeys"]))]),
         .target(name: "BiselTestSupport", dependencies: ["BiselCrypto", "BiselVault", "BiselLane", "BiselSync"]),   // dev/test only
         // The CloudKit private-database lane (docs/SYNC-LANES.md §3). It compiles anywhere but only runs in a signed app with the
