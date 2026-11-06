@@ -1,4 +1,5 @@
 import Foundation
+import LocalAuthentication
 import CryptoKit
 import BiselCrypto
 
@@ -22,6 +23,12 @@ public enum KeyStoreError: Error, Sendable, Equatable {
     case userCancelled
 }
 
+/// An `LAContext` paired with an `LAAuthenticationView`. LAContext is thread-safe but not marked Sendable.
+public struct EmbeddedPrompt: @unchecked Sendable {
+    public let context: LAContext
+    public init(_ context: LAContext) { self.context = context }
+}
+
 /// Device key custody (§4). Two P-256 keys per device:
 /// - DK-enc opens the device envelope; on Secure Enclave it requires biometrics (`.biometryAny`).
 /// - DK-sig signs requests and never prompts.
@@ -38,12 +45,18 @@ public protocol DeviceKeyStore: Sendable {
     /// Opens several envelopes with one authentication (the Secure Enclave store shares one `LAContext`, so the user
     /// sees a single Touch ID sheet). Results are in the order of `envelopes`.
     func openEnvelopes(_ envelopes: [Data], reason: String) async throws -> [Data]
+    /// The same, with Touch ID showing in the view paired with `prompt` and not in a system sheet. A store with no prompt ignores it.
+    func openEnvelopes(_ envelopes: [Data], reason: String, prompt: EmbeddedPrompt?) async throws -> [Data]
     func deleteKeys() throws
     /// Whether the keys are still usable; never prompts.
     func status() -> DeviceKeyStatus
 }
 
 public extension DeviceKeyStore {
+    func openEnvelopes(_ envelopes: [Data], reason: String, prompt: EmbeddedPrompt?) async throws -> [Data] {
+        try await openEnvelopes(envelopes, reason: reason)
+    }
+
     func status() -> DeviceKeyStatus { ((try? publicKeys()) ?? nil) == nil ? .missing : .ok }
     func openEnvelopes(_ envelopes: [Data], reason: String) async throws -> [Data] {
         var out: [Data] = []

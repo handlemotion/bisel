@@ -1,3 +1,4 @@
+import LocalAuthentication
 import AppKit
 import Observation
 import BiselCore
@@ -145,6 +146,15 @@ final class CommandPanelModel {
     @ObservationIgnored var runCopy: ((SecretKind, VaultSearchResult) -> Void)?
     @ObservationIgnored var runOpenURL: ((VaultSearchResult) -> Void)?
     @ObservationIgnored var runUnlock: (() -> Void)?
+    /// Starts the unlock once the card's Touch ID view exists: the prompt shows in whichever view is paired with this context.
+    @ObservationIgnored var runEmbeddedUnlock: ((LAContext) -> Void)?
+    /// Set while the locked card is waiting for a finger.
+    var unlockContext: LAContext?
+
+    func cancelUnlock() {
+        unlockContext?.invalidate()
+        unlockContext = nil
+    }
     /// ⌘, and the empty box's Return: settings, on the given page.
     @ObservationIgnored var runOpenSettings: ((SettingsPage) -> Void)?
     @ObservationIgnored var runClose: (() -> Void)?

@@ -77,9 +77,13 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
     }
 
     public func openEnvelopes(_ envelopes: [Data], reason: String) async throws -> [Data] {
+        try await openEnvelopes(envelopes, reason: reason, prompt: nil)
+    }
+
+    public func openEnvelopes(_ envelopes: [Data], reason: String, prompt: EmbeddedPrompt?) async throws -> [Data] {
         // The key operation blocks while the biometric sheet is up: keep it off the caller's executor.
         try await Task.detached(priority: .userInitiated) { [self] in
-            let context = LAContext()                 // one context: the first decrypt authenticates, the rest reuse it
+            let context = prompt?.context ?? LAContext()     // one context: the first decrypt authenticates, the rest reuse it
             context.localizedReason = reason
             context.localizedFallbackTitle = ""
             if persistent, self.biometryDomainStateChanged(using: context) { throw DeviceKeyError.biometryChanged }
@@ -88,6 +92,8 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
                 if persistent, (try? loadKey(.sig, context: nil)) ?? nil != nil { throw DeviceKeyError.encryptionKeyMissing }
                 throw KeyStoreError.noKeys
             }
+            // Evaluated up front, so the prompt belongs to the paired view; the decrypts below then reuse it and ask nothing.
+            if prompt != nil { try await authorizeDecrypt(context, reason: reason) }
             return try envelopes.map { envelope in
                 var err: Unmanaged<CFError>?
                 guard let out = SecKeyCreateDecryptedData(key, DeviceEnvelope.algorithm, envelope as CFData, &err) else {
@@ -98,13 +104,25 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
         }.value
     }
 
+    /// The same access control DK-enc was made with (`createKeys`).
+    private func authorizeDecrypt(_ context: LAContext, reason: String) async throws {
+        var err: Unmanaged<CFError>?
+        guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+                                                           [.biometryCurrentSet, .privateKeyUsage], &err) else {
+            throw Self.map(err?.takeRetainedValue(), fallback: "access control failed")
+        }
+        do { try await context.evaluateAccessControl(access, operation: .useKeyDecrypt, localizedReason: reason) }
+        catch { throw Self.map(error as NSError as CFError, fallback: "authentication failed") }
+    }
+
     /// Typed mapping of Security / LocalAuthentication failures. Messages carry codes, never key material.
     static func map(_ error: CFError?, fallback: String) -> KeyStoreError {
         guard let error else { return .failed(fallback) }
         let ns = error as Error as NSError
         switch (ns.domain, ns.code) {
         case (LAError.errorDomain, LAError.userCancel.rawValue), (LAError.errorDomain, LAError.appCancel.rawValue),
-             (LAError.errorDomain, LAError.systemCancel.rawValue), (NSOSStatusErrorDomain, Int(errSecUserCanceled)):
+             (LAError.errorDomain, LAError.systemCancel.rawValue), (LAError.errorDomain, LAError.invalidContext.rawValue),
+             (NSOSStatusErrorDomain, Int(errSecUserCanceled)):
             return .userCancelled
         case (LAError.errorDomain, LAError.biometryLockout.rawValue):
             return .unavailable("Touch ID is locked out; unlock the Mac with its password first")

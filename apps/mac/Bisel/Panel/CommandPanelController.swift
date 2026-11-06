@@ -167,6 +167,7 @@ final class CommandPanelController {
         Log.panel.notice("STATE hide reason=\(reason, privacy: .public) hoverStats=\(self.model.hoverStats.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ","), privacy: .public)")
         model.hoverStats = [:]
         state = .hiding
+        model.cancelUnlock()
         confirmWork?.cancel(); confirmWork = nil
         removeMonitors()
         stopPointerTracking()

@@ -256,14 +256,14 @@ public actor Vault {
     /// Biometric unlock: opens the device envelope with DK-enc and keeps VK in memory for the fill window.
     /// If another device rotated the vault key while local edits were still unsynced, those edits are re-wrapped
     /// under the new key here (one Touch ID sheet covers both envelopes).
-    public func unlock(reason: String = "Unlock bisel") async throws {
+    public func unlock(reason: String = "Unlock bisel", prompt: EmbeddedPrompt? = nil) async throws {
         let id = try requireIdentity()
         guard let envelope = id.envelope else { throw VaultError.notConfigured }
         switch config.keyStore.status() {
         case .biometryChanged: throw DeviceKeyError.biometryChanged
         case .ok, .missing: break
         }
-        let opened = try await config.keyStore.openEnvelopes([envelope] + (id.previousEnvelope.map { [$0] } ?? []), reason: reason)
+        let opened = try await config.keyStore.openEnvelopes([envelope] + (id.previousEnvelope.map { [$0] } ?? []), reason: reason, prompt: prompt)
         guard var vk = opened.first else { throw VaultError.notConfigured }
         defer { vk.zeroize() }
         if opened.count > 1 {
