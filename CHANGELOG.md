@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.7](https://github.com/handlemotion/bisel/compare/v0.1.6...v0.1.7) (2026-11-10)
+
+
+### Bug Fixes
+
+* ship releases without a manual step; retry hdiutil's transient busy error ([#57](https://github.com/handlemotion/bisel/issues/57)) ([1c9c00f](https://github.com/handlemotion/bisel/commit/1c9c00fbc57affd858ed6bb307b4c9502976a664))
+* the release watcher only ships a draft newer than the latest release ([#59](https://github.com/handlemotion/bisel/issues/59)) ([b46ad27](https://github.com/handlemotion/bisel/commit/b46ad2766b25b3efa66548fd6a54a5ce545e0b1a))
+* unlock from the command panel falls back to the system Touch ID prompt, and key errors read plainly ([#60](https://github.com/handlemotion/bisel/issues/60)) ([15b859d](https://github.com/handlemotion/bisel/commit/15b859d17e5c4007dc89bdf098fcf7181bd2d014))
+
 ## [0.1.6](https://github.com/handlemotion/bisel/compare/v0.1.5...v0.1.6) (2026-11-06)
 
 
