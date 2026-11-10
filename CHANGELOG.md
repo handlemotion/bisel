@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.8](https://github.com/handlemotion/bisel/compare/v0.1.7...v0.1.8) (2026-11-10)
+
+
+### Bug Fixes
+
+* an existing box no longer flashes the welcome card right after launch ([#61](https://github.com/handlemotion/bisel/issues/61)) ([f58ee6c](https://github.com/handlemotion/bisel/commit/f58ee6c5e2a820f8dde1257d374f71e998e35e0f))
+
 ## [0.1.7](https://github.com/handlemotion/bisel/compare/v0.1.6...v0.1.7) (2026-11-10)
 
 
