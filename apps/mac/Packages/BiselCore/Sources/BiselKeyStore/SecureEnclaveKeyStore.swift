@@ -3,6 +3,7 @@ import CryptoKit
 import LocalAuthentication
 import Security
 import BiselCrypto
+import os
 
 /// Secure Enclave implementation of `DeviceKeyStore`.
 ///
@@ -81,6 +82,16 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
     }
 
     public func openEnvelopes(_ envelopes: [Data], reason: String, prompt: EmbeddedPrompt?) async throws -> [Data] {
+        do { return try await openEnvelopesOnce(envelopes, reason: reason, prompt: prompt) }
+        catch KeyStoreError.touchIDFailed where prompt != nil {
+            // The panel's embedded Touch ID view refused with a LocalAuthentication code we do not know (0.1.6: -1009, on the
+            // first unlock from the command panel). Not a cancel and not a wrong finger, so ask the standard way, with the
+            // system sheet, instead of leaving the box locked.
+            return try await openEnvelopesOnce(envelopes, reason: reason, prompt: nil)
+        }
+    }
+
+    private func openEnvelopesOnce(_ envelopes: [Data], reason: String, prompt: EmbeddedPrompt?) async throws -> [Data] {
         // The key operation blocks while the biometric sheet is up: keep it off the caller's executor.
         try await Task.detached(priority: .userInitiated) { [self] in
             let context = prompt?.context ?? LAContext()     // one context: the first decrypt authenticates, the rest reuse it
@@ -115,7 +126,10 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
         catch { throw Self.map(error as NSError as CFError, fallback: "authentication failed") }
     }
 
-    /// Typed mapping of Security / LocalAuthentication failures. Messages carry codes, never key material.
+    private static let log = Logger(subsystem: "app.bisel", category: "keystore")
+
+    /// Typed mapping of Security / LocalAuthentication failures. Codes go to the log; the messages are for the person at the Mac,
+    /// so each says what happened and what to do, and carries no code and no key material.
     static func map(_ error: CFError?, fallback: String) -> KeyStoreError {
         guard let error else { return .failed(fallback) }
         let ns = error as Error as NSError
@@ -125,13 +139,17 @@ public final class SecureEnclaveDeviceKeyStore: DeviceKeyStore, @unchecked Senda
              (NSOSStatusErrorDomain, Int(errSecUserCanceled)):
             return .userCancelled
         case (LAError.errorDomain, LAError.biometryLockout.rawValue):
-            return .unavailable("Touch ID is locked out; unlock the Mac with its password first")
+            return .unavailable("Touch ID is locked after too many tries. Unlock your Mac with its password, then try again.")
         case (LAError.errorDomain, LAError.biometryNotEnrolled.rawValue), (LAError.errorDomain, LAError.biometryNotAvailable.rawValue):
-            return .unavailable("Touch ID is not available or not enrolled")
+            return .unavailable("Touch ID isn't available on this Mac. Add a fingerprint in System Settings, then try again.")
         case (LAError.errorDomain, LAError.authenticationFailed.rawValue), (NSOSStatusErrorDomain, Int(errSecAuthFailed)):
-            return .failed("authentication failed")
+            return .failed("That fingerprint wasn't recognized. Try again.")
+        case (LAError.errorDomain, _):
+            log.error("\(fallback, privacy: .public): LocalAuthentication \(ns.code, privacy: .public)")
+            return .touchIDFailed
         default:
-            return .failed("\(fallback) (\(ns.domain) \(ns.code))")
+            log.error("\(fallback, privacy: .public): \(ns.domain, privacy: .public) \(ns.code, privacy: .public)")
+            return .failed("Bisel couldn't use this Mac's device keys. Try again; if it keeps happening, restart Bisel.")
         }
     }
 

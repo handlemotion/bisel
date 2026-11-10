@@ -71,8 +71,9 @@ func describe(_ error: Error) -> String {
     case let e as KeyStoreError:
         switch e {
         case .userCancelled: return "Cancelled"
-        case .noKeys: return "This Mac has no device keys for this box"
-        case .unavailable(let m): return "Touch ID unavailable: \(m)"
+        case .noKeys: return "This Mac has no keys for this box yet. Set it up from Settings."
+        case .unavailable(let m): return m
+        case .touchIDFailed: return "Touch ID didn't respond. Try again, or press Return to unlock."
         case .failed(let m): return m
         }
     case let e as SyncError:
