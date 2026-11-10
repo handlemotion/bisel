@@ -64,12 +64,14 @@ echo $$ >"$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
 
 command -v gh >/dev/null || { log "gh not found"; exit 1; }
-# Drafts with no assets, newest first. A draft that already has assets is a build someone is publishing by hand.
-tag="$(gh release list -R "$REPO" --exclude-pre-releases --limit 10 --json tagName,isDraft \
-  --jq '[.[] | select(.isDraft)] | .[].tagName' 2>/dev/null | while read -r t; do
-    n="$(gh release view "$t" -R "$REPO" --json assets --jq '.assets | length' 2>/dev/null || echo 1)"
-    [[ "$n" == 0 ]] && { echo "$t"; break; }
-  done || true)"
+# The newest draft with no assets, and only if it is newer than the latest published release: an older assetless draft (v0.1.4 was
+# one) was superseded, and publishing it could move the update feed back. A draft that has assets is a build someone is publishing by hand.
+latest="$(gh api "repos/$REPO/releases/latest" --jq .tag_name)" || { log "could not read the latest release"; exit 1; }
+tag=""
+while read -r t; do
+  [[ -n "$t" && "$t" != "$latest" && "$(printf '%s\n%s\n' "$latest" "$t" | sort -V | tail -n 1)" == "$t" ]] || continue
+  [[ "$(gh release view "$t" -R "$REPO" --json assets --jq '.assets | length' 2>/dev/null || echo 1)" == 0 ]] && { tag="$t"; break; }
+done < <(gh release list -R "$REPO" --limit 10 --json tagName,isDraft --jq '[.[] | select(.isDraft)] | .[].tagName' | sort -rV)
 [[ -n "$tag" ]] || exit 0
 
 failed="$STATE/failed-$tag"
