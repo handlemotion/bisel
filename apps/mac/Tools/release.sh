@@ -300,7 +300,12 @@ else
   mkdir -p "$stage"
   ditto "$APP" "$stage/Bisel.app"
   ln -s /Applications "$stage/Applications"
-  hdiutil create -volname "Bisel $VERSION" -srcfolder "$stage" -fs APFS -format UDZO -ov "$ARTIFACT" >/dev/null
+  # hdiutil sometimes fails with "Resource busy" right after the copy (0.1.6 stopped here); the same call works seconds later.
+  for attempt in 1 2 3 4 5; do
+    hdiutil create -volname "Bisel $VERSION" -srcfolder "$stage" -fs APFS -format UDZO -ov "$ARTIFACT" >/dev/null && break
+    (( attempt < 5 )) || die "hdiutil create failed five times."
+    echo "hdiutil create failed (attempt $attempt), retrying in 10 s"; rm -f "$ARTIFACT"; sleep 10
+  done
   rm -rf "$stage"
   codesign --sign "$IDENTITY" --timestamp "$ARTIFACT"
   notarize "$ARTIFACT"

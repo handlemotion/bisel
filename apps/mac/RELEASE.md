@@ -200,7 +200,9 @@ reset those throwaway boxes.
    should be no Gatekeeper warning beyond the usual "downloaded from the internet" prompt. Create a box in iCloud and check it syncs.
    Turn Bisel on in System Settings → General → AutoFill & Passwords, unlock, and fill a login in Safari: one Touch ID, the login goes in.
    Load `apps/chrome/dist` unpacked in Chrome (`apps/chrome/README.md`), sign in on a site and accept the prompt: one Touch ID, the login is in the box.
-5. Publish: merge the release-please PR (it tags `vX.Y.Z` and creates the GitHub release as a draft, so the update feed stays on
+5. Publish. This runs by itself: `Tools/release-watch.sh --install` (once, on the Mac that holds the keys) loads a launchd agent that
+   looks every 10 minutes, and when the Mac wakes, for a draft release with no assets, builds its tag and runs `--publish`. A failure
+   posts a notification, logs to `~/Library/Logs/Bisel/release-watch.log` and is not retried for an hour. By hand: merge the release-please PR (it tags `vX.Y.Z` and creates the GitHub release as a draft, so the update feed stays on
    the previous release), build from that tag's commit, then
 
    ```bash
