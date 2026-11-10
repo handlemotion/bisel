@@ -46,7 +46,10 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
     enum Phase: Equatable { case needsSetup, locked, unlocked }
 
     // MARK: observable state
+    /// `.needsSetup` is only where it starts: whether this Mac has a box is read a moment after launch (`phaseResolved`). Anything
+    /// that sends the person to set-up must wait for that, or an existing box flashes the welcome card (0.1.7's first launch did).
     private(set) var phase: Phase = .needsSetup
+    private(set) var phaseResolved = false
     private(set) var rows: [ItemRow] = []
     private var rowsLoaded = false
     private(set) var syncState: SyncState = .idle
@@ -227,7 +230,13 @@ final class VaultService: VaultSearchSource, VaultSecretProvider {
         pendingChanges = (try? await vault.pendingChanges()) ?? 0
         let new: Phase = !configured ? .needsSetup : (unlocked ? .unlocked : .locked)
         setPhase(new)
+        phaseResolved = true
         if new == .unlocked { await reload() }
+    }
+
+    /// Returns once the box's state has been read. Gives up after a few seconds (no vault at all: `startupError` says why).
+    func untilPhaseResolved() async {
+        for _ in 0..<100 where !phaseResolved { try? await Task.sleep(for: .milliseconds(100)) }
     }
 
     private func setPhase(_ new: Phase) {

@@ -148,6 +148,8 @@ final class AppModel {
 
     func showMainWindow() {
         Task {
+            // Which screen it opens on depends on whether this Mac has a box, which is read a moment after launch.
+            await service.untilPhaseResolved()
             // `openMainWindow` is installed by the menu-bar label a moment after launch.
             for _ in 0..<20 where openMainWindow == nil { try? await Task.sleep(for: .milliseconds(150)) }
             openMainWindow?()
@@ -277,6 +279,11 @@ final class AppModel {
 
     /// Touch ID right in the panel; with no vault on this Mac yet, send the user to set-up in the main window.
     private func unlockFromPanel() {
+        guard service.phaseResolved else {
+            // A press right after launch: the box is not read yet, and "no box" is only the starting value.
+            Task { await service.untilPhaseResolved(); unlockFromPanel() }
+            return
+        }
         guard service.phase != .needsSetup else {
             panelController.hide()
             showMainWindow()
