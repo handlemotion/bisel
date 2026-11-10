@@ -130,7 +130,7 @@ targets:
         CFBundleName: "$(BISEL_DISPLAY_NAME)"
         # release-please bumps the version on its release PR (release-please-config.json); the build number is stamped by
         # Tools/release.sh (the commit count), so every notarized build has a higher one.
-        CFBundleShortVersionString: "0.1.6" # x-release-please-version
+        CFBundleShortVersionString: "0.1.7" # x-release-please-version
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSMinimumSystemVersion: "26.0"
         LSUIElement: true
@@ -258,7 +258,7 @@ targets:
       path: BiselAutoFill/Info.plist
       properties:
         CFBundleDisplayName: Bisel
-        CFBundleShortVersionString: "0.1.6" # x-release-please-version
+        CFBundleShortVersionString: "0.1.7" # x-release-please-version
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: "Personal use."
