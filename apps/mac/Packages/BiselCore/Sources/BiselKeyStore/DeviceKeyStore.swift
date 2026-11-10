@@ -20,6 +20,9 @@ public enum KeyStoreError: Error, Sendable, Equatable {
     case noKeys
     case unavailable(String)
     case failed(String)
+    /// Touch ID could not check a finger for a reason that is not the user's: no cancel, no wrong finger, no lockout. The
+    /// LocalAuthentication code is in the log (category keystore), not in the message.
+    case touchIDFailed
     case userCancelled
 }
 
