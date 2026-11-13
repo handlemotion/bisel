@@ -30,7 +30,7 @@ let package = Package(
         .trait(name: "SoftwareKeys", description: "Compile the software P-256 DeviceKeyStore (BISEL_SOFTWARE_KEYS). Never enable for Release."),
     ],
     dependencies: [
-        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1"),
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.12.0"),
         .package(url: "https://github.com/pengpengliu/BIP39.git", exact: "1.0.2"),
         .package(url: "https://github.com/lachlanbell/SwiftOTP.git", exact: "3.0.2"),
     ],
